@@ -1,24 +1,22 @@
 {
-  "name": "@atable/db",
+  "name": "atable-api",
   "version": "0.1.0",
   "private": true,
-  "main": "dist/index.js",
-  "types": "dist/index.d.ts",
   "scripts": {
-    "build": "tsc -p tsconfig.json",
-    "generate": "prisma generate",
-    "migrate": "prisma migrate dev",
-    "deploy": "prisma db push --accept-data-loss",
-    "seed": "tsx prisma/seed.ts",
-    "studio": "prisma studio"
+    "dev": "npm -w api run dev",
+    "build": "tsc --project tsconfig.json && tsc --project api/tsconfig.json",
+    "start": "node api/dist/server.js",
+    "db:push": "npx prisma db push --accept-data-loss",
+    "db:seed": "npx prisma db seed"
   },
+  "workspaces": ["api"],
   "dependencies": {
     "@prisma/client": "^5.22.0"
   },
   "devDependencies": {
+    "typescript": "^5.6.3",
     "prisma": "^5.22.0",
     "tsx": "^4.19.2",
-    "typescript": "^5.6.3",
     "bcryptjs": "^2.4.3",
     "@types/bcryptjs": "^2.4.6"
   },
