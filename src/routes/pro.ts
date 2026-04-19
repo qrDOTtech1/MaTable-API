@@ -1,7 +1,7 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import bcrypt from "bcryptjs";
-import { prisma } from "../../src/index.js";
+import { prisma } from "../db.js";
 import { requirePro } from "../auth.js";
 
 export async function proRoutes(app: FastifyInstance) {

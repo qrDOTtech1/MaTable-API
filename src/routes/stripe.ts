@@ -1,7 +1,7 @@
 import type { FastifyInstance } from "fastify";
 import Stripe from "stripe";
 import { z } from "zod";
-import { prisma } from "@atable/db";
+import { prisma } from "../db.js";
 import { requireSessionToken } from "../auth.js";
 import { env } from "../env.js";
 import { emitToRestaurant } from "../realtime.js";

@@ -1,6 +1,6 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
-import { prisma } from "@atable/db";
+import { prisma } from "../db.js";
 import { requireSessionToken } from "../auth.js";
 import { emitToRestaurant } from "../realtime.js";
 
