@@ -26,8 +26,10 @@ export async function requireSessionToken(req: FastifyRequest, reply: FastifyRep
 
 export async function requirePro(req: FastifyRequest, reply: FastifyReply) {
   try {
-    const token = req.cookies["atable_pro"];
-    if (!token) throw new Error("no cookie");
+    // Authorization: Bearer <token>
+    const authHeader = req.headers.authorization;
+    if (!authHeader?.startsWith("Bearer ")) throw new Error("no token");
+    const token = authHeader.slice(7);
     const decoded = req.server.jwt.verify<ProTokenPayload>(token);
     if (decoded.kind !== "pro") throw new Error("wrong kind");
     return decoded;
