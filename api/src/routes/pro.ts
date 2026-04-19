@@ -1,10 +1,32 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import bcrypt from "bcryptjs";
-import { prisma } from "@atable/db";
+import { prisma } from "../../src/index.js";
 import { requirePro } from "../auth.js";
 
 export async function proRoutes(app: FastifyInstance) {
+  app.post("/register", async (req, reply) => {
+    const { email, password, restaurantName } = z
+      .object({
+        email: z.string().email(),
+        password: z.string().min(6),
+        restaurantName: z.string().min(1),
+      })
+      .parse(req.body);
+
+    const existing = await prisma.user.findUnique({ where: { email } });
+    if (existing) return reply.code(409).send({ error: "email_exists" });
+
+    const passwordHash = await bcrypt.hash(password, 10);
+    const restaurant = await prisma.restaurant.create({
+      data: { name: restaurantName },
+    });
+    const user = await prisma.user.create({
+      data: { email, passwordHash, restaurantId: restaurant.id },
+    });
+    return { ok: true, restaurantId: restaurant.id, userId: user.id };
+  });
+
   app.post("/login", async (req, reply) => {
     const { email, password } = z
       .object({ email: z.string().email(), password: z.string().min(6) })
