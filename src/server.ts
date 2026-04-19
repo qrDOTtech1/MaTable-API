@@ -28,7 +28,26 @@ async function build() {
     }
   );
 
-  await app.register(cors, { origin: env.PUBLIC_WEB_URL, credentials: true });
+  // CORS : accepte PUBLIC_WEB_URL + toujours avec https://
+  const allowedOrigins = [
+    env.PUBLIC_WEB_URL,
+    env.PUBLIC_WEB_URL.replace(/^https?:\/\//, "https://"),
+    env.PUBLIC_WEB_URL.replace(/^https?:\/\//, "http://"),
+  ].filter(Boolean);
+
+  await app.register(cors, {
+    origin: (origin, cb) => {
+      if (!origin || allowedOrigins.includes(origin)) {
+        cb(null, true);
+      } else {
+        cb(new Error(`CORS: ${origin} non autorisé`), false);
+      }
+    },
+    credentials: true,
+    methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allowedHeaders: ["Content-Type", "Authorization"],
+  });
+
   await app.register(cookie);
   await app.register(jwt, { secret: env.JWT_SECRET });
   await app.register(rateLimit, { max: 120, timeWindow: "1 minute" });
