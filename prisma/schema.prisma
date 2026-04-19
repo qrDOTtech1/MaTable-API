@@ -48,6 +48,8 @@ model TableSession {
   active    Boolean   @default(true)
   createdAt DateTime  @default(now())
   closedAt  DateTime?
+  billRequestedAt DateTime?
+  billPaymentMode PaymentMode?
   orders    Order[]
 
   @@index([tableId, active])
@@ -90,4 +92,10 @@ enum OrderStatus {
   SERVED
   PAID
   CANCELLED
+}
+
+enum PaymentMode {
+  CARD
+  CASH
+  COUNTER
 }

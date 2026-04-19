@@ -3,6 +3,7 @@ import { z } from "zod";
 import bcrypt from "bcryptjs";
 import { prisma } from "../db.js";
 import { requirePro } from "../auth.js";
+import { emitToRestaurant } from "../realtime.js";
 
 export async function proRoutes(app: FastifyInstance) {
   app.post("/register", async (req, reply) => {
@@ -79,6 +80,41 @@ export async function proRoutes(app: FastifyInstance) {
       where: { tableId: id, active: true },
       data: { active: false, closedAt: new Date() },
     });
+    return { ok: true };
+  });
+
+  app.post("/tables/:id/settle", async (req, reply) => {
+    const me = await requirePro(req, reply);
+    const { id } = req.params as { id: string };
+    const { mode } = z
+      .object({ mode: z.enum(["CASH", "COUNTER"]).optional() })
+      .parse(req.body ?? {});
+
+    const table = await prisma.table.findFirst({
+      where: { id, restaurantId: me.restaurantId },
+      include: { sessions: { where: { active: true }, take: 1 } },
+    });
+    if (!table) return reply.code(404).send({ error: "not_found" });
+
+    const session = table.sessions[0];
+    if (!session) return reply.code(400).send({ error: "no_active_session" });
+
+    await prisma.order.updateMany({
+      where: { sessionId: session.id, status: { notIn: ["PAID", "CANCELLED"] } },
+      data: { status: "PAID" },
+    });
+    await prisma.tableSession.update({
+      where: { id: session.id },
+      data: {
+        active: false,
+        closedAt: new Date(),
+        billRequestedAt: session.billRequestedAt ?? new Date(),
+        billPaymentMode: (mode ?? session.billPaymentMode ?? "COUNTER") as any,
+      },
+    });
+
+    emitToRestaurant(me.restaurantId, "order:paid", { tableId: id });
+
     return { ok: true };
   });
 

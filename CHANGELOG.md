@@ -5,6 +5,17 @@ Format : [Keep a Changelog](https://keepachangelog.com/fr/1.0.0/)
 
 ---
 
+## [Unreleased]
+
+### Modifié
+- **Stripe Checkout** : paiement au niveau **TableSession** (addition) en agrégeant toutes les commandes non payées de la session.
+- **Webhook Stripe** : au paiement, passe toutes les commandes de la session en `PAID` (hors `CANCELLED`) puis ferme la session.
+
+### Ajouté
+- **Addition** : endpoint client `POST /api/bill/request` (mode `CARD|CASH|COUNTER`) + événement Socket.io `bill:requested`.
+- **Encaissement (pro)** : endpoint `POST /api/pro/tables/:id/settle` pour marquer les commandes de la session en `PAID` et fermer la session (paiement hors Stripe).
+- **DB** : champs `billRequestedAt` / `billPaymentMode` sur `TableSession`.
+
 ## [1.0.0] — 2026-04-19
 
 ### Première version publique — MVP complet

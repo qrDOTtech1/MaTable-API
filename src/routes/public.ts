@@ -111,4 +111,30 @@ export async function publicRoutes(app: FastifyInstance) {
     });
     return { orders };
   });
+
+  app.post("/bill/request", async (req, reply) => {
+    const decoded = await requireSessionToken(req, reply);
+    const { mode } = z
+      .object({ mode: z.enum(["CARD", "CASH", "COUNTER"]).default("CARD") })
+      .parse(req.body ?? {});
+
+    const session = await prisma.tableSession.findUnique({
+      where: { id: decoded.sessionId },
+      include: { table: true },
+    });
+    if (!session || !session.active) return reply.code(401).send({ error: "session_closed" });
+
+    await prisma.tableSession.update({
+      where: { id: decoded.sessionId },
+      data: { billRequestedAt: new Date(), billPaymentMode: mode as any },
+    });
+
+    emitToRestaurant(decoded.restaurantId, "bill:requested", {
+      tableId: decoded.tableId,
+      tableNumber: session.table.number,
+      mode,
+    });
+
+    return { ok: true };
+  });
 }

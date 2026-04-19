@@ -12,17 +12,51 @@ export async function stripeRoutes(app: FastifyInstance) {
   app.post("/checkout", async (req, reply) => {
     if (!stripe) return reply.code(503).send({ error: "stripe_not_configured" });
     const decoded = await requireSessionToken(req, reply);
-    const { orderId } = z.object({ orderId: z.string() }).parse(req.body);
-    const order = await prisma.order.findFirst({
-      where: { id: orderId, sessionId: decoded.sessionId },
-    });
-    if (!order) return reply.code(404).send({ error: "order_not_found" });
 
-    const items = order.items as Array<{ name: string; priceCents: number; quantity: number }>;
+    // Session-level "addition": pay everything not yet paid for the table session.
+    // We keep backward compatibility with an optional orderId.
+    const { orderId } = z
+      .object({ orderId: z.string().optional() })
+      .default({})
+      .parse(req.body ?? {});
+
+    const sessionRow = await prisma.tableSession.findUnique({ where: { id: decoded.sessionId } });
+    if (!sessionRow || !sessionRow.active) {
+      return reply.code(401).send({ error: "session_closed" });
+    }
+
+    const orders = orderId
+      ? await prisma.order.findMany({ where: { id: orderId, sessionId: decoded.sessionId } })
+      : await prisma.order.findMany({
+          where: {
+            sessionId: decoded.sessionId,
+            status: { notIn: ["PAID", "CANCELLED"] },
+          },
+          orderBy: { createdAt: "asc" },
+        });
+
+    if (!orders.length) {
+      return reply.code(400).send({ error: orderId ? "order_not_found" : "nothing_to_pay" });
+    }
+
+    const itemsByKey = new Map<string, { name: string; priceCents: number; quantity: number }>();
+    for (const o of orders) {
+      const items = o.items as Array<{ name: string; priceCents: number; quantity: number }>;
+      for (const it of items) {
+        const key = `${it.name}__${it.priceCents}`;
+        const prev = itemsByKey.get(key);
+        if (prev) prev.quantity += it.quantity;
+        else itemsByKey.set(key, { name: it.name, priceCents: it.priceCents, quantity: it.quantity });
+      }
+    }
+
+    const mergedItems = Array.from(itemsByKey.values()).filter((i) => i.quantity > 0);
+    if (!mergedItems.length) return reply.code(400).send({ error: "nothing_to_pay" });
+
     const session = await stripe.checkout.sessions.create({
       mode: "payment",
       payment_method_types: ["card"],
-      line_items: items.map((i) => ({
+      line_items: mergedItems.map((i) => ({
         quantity: i.quantity,
         price_data: {
           currency: "eur",
@@ -32,7 +66,13 @@ export async function stripeRoutes(app: FastifyInstance) {
       })),
       success_url: `${env.PUBLIC_WEB_URL}/order/${decoded.tableId}?paid=1`,
       cancel_url: `${env.PUBLIC_WEB_URL}/order/${decoded.tableId}`,
-      metadata: { orderId: order.id, sessionId: order.sessionId, tableId: order.tableId },
+      metadata: {
+        // If orderId is present we still use session-level settlement, but keep it for debug.
+        orderId: orderId ?? "",
+        sessionId: decoded.sessionId,
+        tableId: decoded.tableId,
+        restaurantId: decoded.restaurantId,
+      },
     });
     return { url: session.url };
   });
@@ -58,23 +98,24 @@ export async function stripeRoutes(app: FastifyInstance) {
 
       if (event.type === "checkout.session.completed") {
         const s = event.data.object as Stripe.Checkout.Session;
-        const orderId = s.metadata?.orderId;
         const sessionId = s.metadata?.sessionId;
-        if (orderId && sessionId) {
-          const order = await prisma.order.update({
-            where: { id: orderId },
+        const tableId = s.metadata?.tableId;
+        const restaurantId = s.metadata?.restaurantId;
+
+        if (sessionId && tableId) {
+          await prisma.order.updateMany({
+            where: { sessionId, status: { notIn: ["PAID", "CANCELLED"] } },
             data: { status: "PAID" },
-            include: { table: true },
           });
           await prisma.tableSession.update({
             where: { id: sessionId },
             data: { active: false, closedAt: new Date() },
           });
-          emitToRestaurant(order.table.restaurantId, "order:paid", {
-            id: order.id,
-            tableId: order.tableId,
-            tableNumber: order.table.number,
-          });
+
+          // Payload isn't used by the web currently; keep an event to refresh the dashboard.
+          if (restaurantId) {
+            emitToRestaurant(restaurantId, "order:paid", { tableId });
+          }
         }
       }
       return { received: true };
