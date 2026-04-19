@@ -6,7 +6,7 @@ const schema = z.object({
   STRIPE_SECRET: z.string().optional(),
   STRIPE_WEBHOOK_SECRET: z.string().optional(),
   PUBLIC_WEB_URL: z.string().default("http://localhost:3000"),
-  API_PORT: z.coerce.number().default(3001),
+  PORT: z.coerce.number().default(3001),
   NODE_ENV: z.string().default("development"),
 });
 

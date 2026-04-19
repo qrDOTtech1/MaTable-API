@@ -45,8 +45,8 @@ async function build() {
 build()
   .then(async (app) => {
     initRealtime(app);
-    await app.listen({ port: env.API_PORT, host: "0.0.0.0" });
-    app.log.info(`API ready on :${env.API_PORT}`);
+    await app.listen({ port: env.PORT, host: "0.0.0.0" });
+    app.log.info(`API ready on :${env.PORT}`);
   })
   .catch((err) => {
     console.error(err);
