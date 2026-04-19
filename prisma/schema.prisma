@@ -1,0 +1,93 @@
+generator client {
+  provider      = "prisma-client-js"
+  binaryTargets = ["native", "linux-musl-openssl-3.0.x", "debian-openssl-3.0.x"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Restaurant {
+  id        String     @id @default(uuid())
+  name      String
+  createdAt DateTime   @default(now())
+  users     User[]
+  tables    Table[]
+  menuItems MenuItem[]
+}
+
+model User {
+  id           String     @id @default(uuid())
+  email        String     @unique
+  passwordHash String
+  restaurant   Restaurant @relation(fields: [restaurantId], references: [id], onDelete: Cascade)
+  restaurantId String
+  createdAt    DateTime   @default(now())
+
+  @@index([restaurantId])
+}
+
+model Table {
+  id           String         @id @default(uuid())
+  number       Int
+  restaurant   Restaurant     @relation(fields: [restaurantId], references: [id], onDelete: Cascade)
+  restaurantId String
+  sessions     TableSession[]
+  orders       Order[]
+  createdAt    DateTime       @default(now())
+
+  @@unique([restaurantId, number])
+  @@index([restaurantId])
+}
+
+model TableSession {
+  id        String    @id @default(uuid())
+  table     Table     @relation(fields: [tableId], references: [id], onDelete: Cascade)
+  tableId   String
+  active    Boolean   @default(true)
+  createdAt DateTime  @default(now())
+  closedAt  DateTime?
+  orders    Order[]
+
+  @@index([tableId, active])
+}
+
+model Order {
+  id        String       @id @default(uuid())
+  table     Table        @relation(fields: [tableId], references: [id], onDelete: Cascade)
+  tableId   String
+  session   TableSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  sessionId String
+  status    OrderStatus  @default(PENDING)
+  items     Json
+  totalCents Int
+  createdAt DateTime     @default(now())
+  updatedAt DateTime     @updatedAt
+
+  @@index([tableId])
+  @@index([status, createdAt])
+  @@index([sessionId])
+}
+
+model MenuItem {
+  id           String     @id @default(uuid())
+  restaurant   Restaurant @relation(fields: [restaurantId], references: [id], onDelete: Cascade)
+  restaurantId String
+  name         String
+  description  String?
+  priceCents   Int
+  available    Boolean    @default(true)
+  category     String?
+  createdAt    DateTime   @default(now())
+
+  @@index([restaurantId])
+}
+
+enum OrderStatus {
+  PENDING
+  COOKING
+  SERVED
+  PAID
+  CANCELLED
+}
