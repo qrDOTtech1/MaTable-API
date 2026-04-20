@@ -5,7 +5,6 @@ import crypto from "node:crypto";
 import { prisma } from "../db.js";
 import { requirePro } from "../auth.js";
 import { emitToRestaurant } from "../realtime.js";
-import { env } from "../env.js";
 
 export async function proRoutes(app: FastifyInstance) {
   app.post("/register", async (req, reply) => {
@@ -173,34 +172,33 @@ export async function proRoutes(app: FastifyInstance) {
     return { item };
   });
 
-  app.post("/uploads/sign-cloudinary", async (req, reply) => {
-    await requirePro(req, reply);
-    if (!env.CLOUDINARY_CLOUD_NAME || !env.CLOUDINARY_API_KEY || !env.CLOUDINARY_API_SECRET) {
-      return reply.code(503).send({ error: "cloudinary_not_configured" });
+  app.post("/uploads/image", async (req, reply) => {
+    const me = await requirePro(req, reply);
+
+    // @fastify/multipart adds req.file()
+    const part = await (req as any).file();
+    if (!part) return reply.code(400).send({ error: "missing_file" });
+    if (typeof part.mimetype !== "string" || !part.mimetype.startsWith("image/")) {
+      return reply.code(400).send({ error: "invalid_mime" });
     }
 
-    const { folder } = z
-      .object({ folder: z.string().min(1).default("matable/menu") })
-      .parse(req.body ?? {});
+    const buf: Buffer = await part.toBuffer();
+    if (!buf.length) return reply.code(400).send({ error: "empty_file" });
 
-    const timestamp = Math.floor(Date.now() / 1000);
+    const sha256 = crypto.createHash("sha256").update(buf).digest("hex");
 
-    // Cloudinary signature algorithm:
-    //   signature = SHA1( sortedParamsString + api_secret )
-    // where sortedParamsString is like: folder=...&timestamp=...
-    const paramsToSign = `folder=${folder}&timestamp=${timestamp}`;
-    const signature = crypto
-      .createHash("sha1")
-      .update(paramsToSign + env.CLOUDINARY_API_SECRET)
-      .digest("hex");
+    const media = await prisma.media.create({
+      data: {
+        restaurantId: me.restaurantId,
+        mimeType: part.mimetype,
+        bytes: buf,
+        size: buf.length,
+        originalName: part.filename,
+        sha256,
+      },
+    });
 
-    return {
-      cloudName: env.CLOUDINARY_CLOUD_NAME,
-      apiKey: env.CLOUDINARY_API_KEY,
-      timestamp,
-      folder,
-      signature,
-    };
+    return { id: media.id, path: `/api/media/${media.id}` };
   });
 
   app.patch("/menu/:id", async (req, reply) => {

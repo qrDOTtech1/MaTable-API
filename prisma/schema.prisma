@@ -29,6 +29,7 @@ model Restaurant {
   servers              Server[]
   openingHours         OpeningHour[]
   reservations         Reservation[]
+  media                Media[]
 }
 
 model Reservation {
@@ -150,6 +151,20 @@ model MenuItem {
   priceCents   Int
   available    Boolean    @default(true)
   category     String?
+  createdAt    DateTime   @default(now())
+
+  @@index([restaurantId])
+}
+
+model Media {
+  id           String     @id @default(uuid())
+  restaurant   Restaurant @relation(fields: [restaurantId], references: [id], onDelete: Cascade)
+  restaurantId String
+  mimeType     String
+  bytes        Bytes
+  size         Int
+  originalName String?
+  sha256       String?
   createdAt    DateTime   @default(now())
 
   @@index([restaurantId])

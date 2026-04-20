@@ -5,6 +5,16 @@ import { requireSessionToken } from "../auth.js";
 import { emitToRestaurant } from "../realtime.js";
 
 export async function publicRoutes(app: FastifyInstance) {
+  app.get("/media/:id", async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const media = await prisma.media.findUnique({ where: { id } });
+    if (!media) return reply.code(404).send({ error: "not_found" });
+
+    reply.header("Content-Type", media.mimeType);
+    reply.header("Cache-Control", "public, max-age=31536000, immutable");
+    return reply.send(Buffer.from(media.bytes as any));
+  });
+
   app.get("/tables/:tableId", async (req, reply) => {
     const { tableId } = req.params as { tableId: string };
     const table = await prisma.table.findUnique({

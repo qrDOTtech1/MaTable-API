@@ -11,7 +11,8 @@ Format : [Keep a Changelog](https://keepachangelog.com/fr/1.0.0/)
 - **Photos plats** : champ `MenuItem.imageUrl`.
 
 ### Ajouté
-- **Upload photo** : endpoint pro `POST /api/pro/uploads/sign-cloudinary` pour upload direct depuis le navigateur vers Cloudinary.
+- **Upload photo** : endpoint pro `POST /api/pro/uploads/image` (multipart) qui stocke l'image en base et renvoie une URL publique `/api/media/:id`.
+- **Upload photo (historique)** : un endpoint Cloudinary `POST /api/pro/uploads/sign-cloudinary` a existé puis a été remplacé par le stockage en base.
 
 ### Corrigé
 - **Photos plats** : persistance de `imageUrl` sur les endpoints pro `POST/PATCH /api/pro/menu` (les URLs étaient ignorées).
