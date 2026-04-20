@@ -2,6 +2,7 @@ import Fastify from "fastify";
 import cors from "@fastify/cors";
 import cookie from "@fastify/cookie";
 import jwt from "@fastify/jwt";
+import multipart from "@fastify/multipart";
 import rateLimit from "@fastify/rate-limit";
 import { env } from "./env.js";
 import { initRealtime } from "./realtime.js";
@@ -36,6 +37,12 @@ async function build() {
   });
 
   await app.register(cookie);
+  await app.register(multipart, {
+    limits: {
+      fileSize: 5 * 1024 * 1024, // 5MB
+      files: 1,
+    },
+  });
   await app.register(jwt, { secret: env.JWT_SECRET });
   await app.register(rateLimit, { max: 120, timeWindow: "1 minute" });
 

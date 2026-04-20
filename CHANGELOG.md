@@ -16,6 +16,14 @@ Format : [Keep a Changelog](https://keepachangelog.com/fr/1.0.0/)
 
 ### Ajouté — Lot A : Menu enrichi
 - **Photos plats** : champ `MenuItem.imageUrl`.
+
+### Ajouté
+- **Upload photo** : endpoint pro `POST /api/pro/uploads/image` (multipart) qui stocke l'image en base et renvoie une URL publique `/api/media/:id`.
+- **Upload photo (historique)** : un endpoint Cloudinary `POST /api/pro/uploads/sign-cloudinary` a existé puis a été remplacé par le stockage en base.
+- **Témoignages landing** : table `Testimonial` + endpoints `GET /api/testimonials` (public) et `GET/PUT /api/pro/testimonial` (restaurateur) pour afficher des témoignages réels sur la home.
+
+### Corrigé
+- **Photos plats** : persistance de `imageUrl` sur les endpoints pro `POST/PATCH /api/pro/menu` (les URLs étaient ignorées).
 - **Allergènes UE (règlement INCO 1169/2011)** : enum `Allergen` avec les 14 allergènes officiels, champ `MenuItem.allergens[]`.
 - **Régimes alimentaires** : enum `Diet` (`VEGETARIAN`, `VEGAN`, `GLUTEN_FREE`, `LACTOSE_FREE`, `HALAL`, `KOSHER`, `PORK_FREE`, `LOW_CAL`, `SPICY`), champ `MenuItem.diets[]`.
 - **Gestion des stocks** : `stockEnabled`, `stockQty`, `lowStockThreshold` sur `MenuItem`. Décrément transactionnel à chaque commande, auto-désactivation à 0, endpoint pro `POST /api/pro/menu/:id/restock`. Table `StockMovement` pour l'historique.
@@ -29,6 +37,7 @@ Format : [Keep a Changelog](https://keepachangelog.com/fr/1.0.0/)
 - **Avis serveurs** : table `ServerReview`. Endpoints `POST /api/reviews/server`, `GET /api/r-by-table/:tableId/servers`, agrégat pro avec note moyenne + nombre d'avis par serveur.
 - **Pourboires** : champs `Order.tipCents` / `TableSession.tipCents`, ligne Stripe dédiée lors du checkout, support paiement hors Stripe.
 - **Appel serveur** : table `ServiceCall`, endpoint client `POST /api/service-call` + événement Socket.io `service:called`, endpoints pro `GET /api/pro/service-calls` et `POST /api/pro/service-calls/:id/resolve`.
+- **Horaires d'ouverture (commande)** : `GET /api/tables/:tableId` retourne les `openingHours` du restaurant afin que le client puisse savoir si le restaurant est ouvert.
 
 ### Ajouté — Lot C : Analytics & fiscalité
 - **Analytics dashboard** : `GET /api/pro/analytics?days=N` — CA total, nombre de commandes, ticket moyen, top 10 plats, CA par jour, CA par serveur.
@@ -69,6 +78,7 @@ Format : [Keep a Changelog](https://keepachangelog.com/fr/1.0.0/)
 - **Addition** : endpoint client `POST /api/bill/request` (mode `CARD|CASH|COUNTER`) + événement Socket.io `bill:requested`.
 - **Encaissement (pro)** : endpoint `POST /api/pro/tables/:id/settle` pour marquer les commandes de la session en `PAID` et fermer la session (paiement hors Stripe).
 - **DB** : champs `billRequestedAt` / `billPaymentMode` sur `TableSession`.
+- **Planning** : exposition des `openingHours` du restaurant dans `GET /api/tables/:tableId` pour permettre au client de savoir si le restaurant est ouvert.
 
 ## [1.0.0] — 2026-04-19
 

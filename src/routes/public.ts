@@ -5,6 +5,42 @@ import { requireSessionToken } from "../auth.js";
 import { emitToRestaurant } from "../realtime.js";
 
 export async function publicRoutes(app: FastifyInstance) {
+  app.get("/testimonials", async (req) => {
+    const { limit } = z
+      .object({ limit: z.coerce.number().int().min(1).max(12).optional() })
+      .parse(req.query ?? {});
+
+    const testimonials = await prisma.testimonial.findMany({
+      where: { published: true },
+      orderBy: { updatedAt: "desc" },
+      take: limit ?? 3,
+      include: { restaurant: { select: { name: true, city: true } } },
+    });
+
+    return {
+      testimonials: testimonials.map((t) => ({
+        id: t.id,
+        displayName: t.displayName,
+        displayRole: t.displayRole,
+        quote: t.quote,
+        rating: t.rating,
+        restaurantName: t.restaurant.name,
+        restaurantCity: t.restaurant.city,
+        updatedAt: t.updatedAt,
+      })),
+    };
+  });
+
+  app.get("/media/:id", async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const media = await prisma.media.findUnique({ where: { id } });
+    if (!media) return reply.code(404).send({ error: "not_found" });
+
+    reply.header("Content-Type", media.mimeType);
+    reply.header("Cache-Control", "public, max-age=31536000, immutable");
+    return reply.send(Buffer.from(media.bytes as any));
+  });
+
   app.get("/tables/:tableId", async (req, reply) => {
     const { tableId } = req.params as { tableId: string };
     const table = await prisma.table.findUnique({
@@ -14,6 +50,7 @@ export async function publicRoutes(app: FastifyInstance) {
           select: {
             id: true,
             name: true,
+            openingHours: { orderBy: { dayOfWeek: "asc" } },
             menuItems: { where: { available: true }, orderBy: { category: "asc" } },
           },
         },
@@ -22,7 +59,11 @@ export async function publicRoutes(app: FastifyInstance) {
     if (!table) return reply.code(404).send({ error: "table_not_found" });
     return {
       table: { id: table.id, number: table.number },
-      restaurant: { id: table.restaurant.id, name: table.restaurant.name },
+      restaurant: {
+        id: table.restaurant.id,
+        name: table.restaurant.name,
+        openingHours: table.restaurant.openingHours,
+      },
       menu: table.restaurant.menuItems,
     };
   });
