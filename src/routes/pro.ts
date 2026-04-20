@@ -1,6 +1,7 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import bcrypt from "bcryptjs";
+import crypto from "crypto";
 import { prisma } from "../db.js";
 import { requirePro } from "../auth.js";
 import { emitToRestaurant } from "../realtime.js";
@@ -59,6 +60,60 @@ export async function proRoutes(app: FastifyInstance) {
   });
 
   app.post("/logout", async () => ({ ok: true }));
+
+  // ---------------------------------------------------------------------------
+  // Testimonial (vitrine publique)
+  // ---------------------------------------------------------------------------
+  app.get("/testimonial", async (req, reply) => {
+    const me = await requirePro(req, reply);
+    const testimonial = await prisma.testimonial.findUnique({
+      where: { restaurantId: me.restaurantId },
+    });
+    return { testimonial };
+  });
+
+  app.put("/testimonial", async (req, reply) => {
+    const me = await requirePro(req, reply);
+    const data = z.object({
+      displayName: z.string().min(1).max(80),
+      displayRole: z.string().max(120).optional(),
+      quote: z.string().min(20).max(600),
+      rating: z.number().int().min(1).max(5).default(5),
+      published: z.boolean().default(true),
+    }).parse(req.body);
+
+    const testimonial = await prisma.testimonial.upsert({
+      where: { restaurantId: me.restaurantId },
+      create: { restaurantId: me.restaurantId, ...data, displayRole: data.displayRole?.trim() || undefined },
+      update: { ...data, displayRole: data.displayRole?.trim() || undefined },
+    });
+    return { testimonial };
+  });
+
+  // ---------------------------------------------------------------------------
+  // Upload image (stockage Postgres via Media)
+  // ---------------------------------------------------------------------------
+  app.post("/uploads/image", async (req, reply) => {
+    const me = await requirePro(req, reply);
+    const part = await (req as any).file();
+    if (!part) return reply.code(400).send({ error: "missing_file" });
+    if (typeof part.mimetype !== "string" || !part.mimetype.startsWith("image/"))
+      return reply.code(400).send({ error: "invalid_mime" });
+    const buf: Buffer = await part.toBuffer();
+    if (!buf.length) return reply.code(400).send({ error: "empty_file" });
+    const sha256 = crypto.createHash("sha256").update(buf).digest("hex");
+    const media = await prisma.media.create({
+      data: {
+        restaurantId: me.restaurantId,
+        mimeType: part.mimetype,
+        bytes: buf,
+        size: buf.length,
+        originalName: part.filename,
+        sha256,
+      },
+    });
+    return { id: media.id, path: `/api/media/${media.id}` };
+  });
 
   app.get("/me", async (req, reply) => {
     const me = await requirePro(req, reply);

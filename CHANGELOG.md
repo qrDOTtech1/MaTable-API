@@ -7,6 +7,13 @@ Format : [Keep a Changelog](https://keepachangelog.com/fr/1.0.0/)
 
 ## [Unreleased] — v1.1 + v1.2 (en cours)
 
+### Ajouté — Médias & Témoignages (2026-04-20)
+- **Stockage image Postgres** : modèle `Media` (bytes, mimeType, sha256, originalName). Endpoint `POST /api/pro/uploads/image` (multipart) → renvoie `{ id, path: /api/media/:id }`.
+- **Témoignage vitrine** : modèle `Testimonial` (1 par restaurant), endpoints `GET /api/pro/testimonial` et `PUT /api/pro/testimonial` (upsert).
+- **Schéma v1.1 complet** : ajout de `ModifierGroup`, `ModifierOption`, `DishReview`, `ServerReview`, `ServiceCall`, `StockMovement` + enums `Allergen` (14 valeurs) et `Diet` (9 valeurs).
+- **Routes serveurs** : `POST /api/pro/servers`, `DELETE /api/pro/servers/:id`, `GET/PUT /api/pro/servers/:id/schedules`.
+- **Route PATCH /api/pro/restaurant** : mise à jour atomique des horaires (`$transaction` delete+create).
+
 ### Ajouté — Lot A : Menu enrichi
 - **Photos plats** : champ `MenuItem.imageUrl`.
 - **Allergènes UE (règlement INCO 1169/2011)** : enum `Allergen` avec les 14 allergènes officiels, champ `MenuItem.allergens[]`.

@@ -47,6 +47,8 @@ model Restaurant {
   dishReviews    DishReview[]
   serverReviews  ServerReview[]
   stockMovements StockMovement[]
+  media          Media[]
+  testimonial    Testimonial?
 
   @@index([slug])
 }
@@ -328,6 +330,41 @@ model Reservation {
 
   @@index([restaurantId, startsAt])
   @@index([status, startsAt])
+}
+
+// ---------------------------------------------------------------------------
+// Media (images stockées en Postgres Bytes)
+// ---------------------------------------------------------------------------
+model Media {
+  id           String     @id @default(uuid())
+  restaurant   Restaurant @relation(fields: [restaurantId], references: [id], onDelete: Cascade)
+  restaurantId String
+  mimeType     String
+  bytes        Bytes
+  size         Int
+  originalName String?
+  sha256       String?
+  createdAt    DateTime   @default(now())
+
+  @@index([restaurantId])
+}
+
+// ---------------------------------------------------------------------------
+// Testimonial (témoignage vitrine publique)
+// ---------------------------------------------------------------------------
+model Testimonial {
+  id           String     @id @default(uuid())
+  restaurant   Restaurant @relation(fields: [restaurantId], references: [id], onDelete: Cascade)
+  restaurantId String     @unique
+  displayName  String
+  displayRole  String?
+  quote        String
+  rating       Int        @default(5)
+  published    Boolean    @default(true)
+  createdAt    DateTime   @default(now())
+  updatedAt    DateTime   @updatedAt
+
+  @@index([published, updatedAt])
 }
 
 // ---------------------------------------------------------------------------
