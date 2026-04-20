@@ -10,6 +10,9 @@ Format : [Keep a Changelog](https://keepachangelog.com/fr/1.0.0/)
 ### Ajouté — Lot A : Menu enrichi
 - **Photos plats** : champ `MenuItem.imageUrl`.
 
+### Ajouté
+- **Upload photo** : endpoint pro `POST /api/pro/uploads/sign-cloudinary` pour upload direct depuis le navigateur vers Cloudinary.
+
 ### Corrigé
 - **Photos plats** : persistance de `imageUrl` sur les endpoints pro `POST/PATCH /api/pro/menu` (les URLs étaient ignorées).
 - **Allergènes UE (règlement INCO 1169/2011)** : enum `Allergen` avec les 14 allergènes officiels, champ `MenuItem.allergens[]`.

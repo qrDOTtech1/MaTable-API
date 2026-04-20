@@ -1,9 +1,11 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import bcrypt from "bcryptjs";
+import crypto from "node:crypto";
 import { prisma } from "../db.js";
 import { requirePro } from "../auth.js";
 import { emitToRestaurant } from "../realtime.js";
+import { env } from "../env.js";
 
 export async function proRoutes(app: FastifyInstance) {
   app.post("/register", async (req, reply) => {
@@ -169,6 +171,36 @@ export async function proRoutes(app: FastifyInstance) {
     }).parse(req.body);
     const item = await prisma.menuItem.create({ data: { ...data, restaurantId: me.restaurantId } });
     return { item };
+  });
+
+  app.post("/uploads/sign-cloudinary", async (req, reply) => {
+    await requirePro(req, reply);
+    if (!env.CLOUDINARY_CLOUD_NAME || !env.CLOUDINARY_API_KEY || !env.CLOUDINARY_API_SECRET) {
+      return reply.code(503).send({ error: "cloudinary_not_configured" });
+    }
+
+    const { folder } = z
+      .object({ folder: z.string().min(1).default("matable/menu") })
+      .parse(req.body ?? {});
+
+    const timestamp = Math.floor(Date.now() / 1000);
+
+    // Cloudinary signature algorithm:
+    //   signature = SHA1( sortedParamsString + api_secret )
+    // where sortedParamsString is like: folder=...&timestamp=...
+    const paramsToSign = `folder=${folder}&timestamp=${timestamp}`;
+    const signature = crypto
+      .createHash("sha1")
+      .update(paramsToSign + env.CLOUDINARY_API_SECRET)
+      .digest("hex");
+
+    return {
+      cloudName: env.CLOUDINARY_CLOUD_NAME,
+      apiKey: env.CLOUDINARY_API_KEY,
+      timestamp,
+      folder,
+      signature,
+    };
   });
 
   app.patch("/menu/:id", async (req, reply) => {
