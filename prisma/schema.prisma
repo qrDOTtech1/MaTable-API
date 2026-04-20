@@ -15,6 +15,17 @@ model Restaurant {
   users     User[]
   tables    Table[]
   menuItems MenuItem[]
+  servers   Server[]
+}
+
+model Server {
+  id           String     @id @default(uuid())
+  name         String
+  restaurant   Restaurant @relation(fields: [restaurantId], references: [id], onDelete: Cascade)
+  restaurantId String
+  createdAt    DateTime   @default(now())
+
+  @@index([restaurantId])
 }
 
 model User {
@@ -42,30 +53,30 @@ model Table {
 }
 
 model TableSession {
-  id        String    @id @default(uuid())
-  table     Table     @relation(fields: [tableId], references: [id], onDelete: Cascade)
-  tableId   String
-  active    Boolean   @default(true)
-  createdAt DateTime  @default(now())
-  closedAt  DateTime?
+  id              String       @id @default(uuid())
+  table           Table        @relation(fields: [tableId], references: [id], onDelete: Cascade)
+  tableId         String
+  active          Boolean      @default(true)
+  createdAt       DateTime     @default(now())
+  closedAt        DateTime?
   billRequestedAt DateTime?
   billPaymentMode PaymentMode?
-  orders    Order[]
+  orders          Order[]
 
   @@index([tableId, active])
 }
 
 model Order {
-  id        String       @id @default(uuid())
-  table     Table        @relation(fields: [tableId], references: [id], onDelete: Cascade)
-  tableId   String
-  session   TableSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
-  sessionId String
-  status    OrderStatus  @default(PENDING)
-  items     Json
+  id         String       @id @default(uuid())
+  table      Table        @relation(fields: [tableId], references: [id], onDelete: Cascade)
+  tableId    String
+  session    TableSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  sessionId  String
+  status     OrderStatus  @default(PENDING)
+  items      Json
   totalCents Int
-  createdAt DateTime     @default(now())
-  updatedAt DateTime     @updatedAt
+  createdAt  DateTime     @default(now())
+  updatedAt  DateTime     @updatedAt
 
   @@index([tableId])
   @@index([status, createdAt])

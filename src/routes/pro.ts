@@ -200,7 +200,23 @@ export async function proRoutes(app: FastifyInstance) {
     return { ok: true };
   });
 
+  app.get("/servers", async (req, reply) => {
+    const me = await requirePro(req, reply);
+    const servers = await prisma.server.findMany({
+      where: { restaurantId: me.restaurantId },
+      orderBy: { name: "asc" },
+    });
+    return { servers };
+  });
+
   app.post("/servers", async (req, reply) => {
-    return reply.code(501).send({ error: "not_implemented" });
+    const me = await requirePro(req, reply);
+    const data = z.object({
+      name: z.string().min(1),
+    }).parse(req.body);
+    const server = await prisma.server.create({
+      data: { ...data, restaurantId: me.restaurantId },
+    });
+    return { server };
   });
 }
