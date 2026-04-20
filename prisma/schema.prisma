@@ -146,6 +146,7 @@ model MenuItem {
   restaurantId String
   name         String
   description  String?
+  imageUrl     String?
   priceCents   Int
   available    Boolean    @default(true)
   category     String?

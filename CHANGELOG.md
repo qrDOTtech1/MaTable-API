@@ -9,6 +9,9 @@ Format : [Keep a Changelog](https://keepachangelog.com/fr/1.0.0/)
 
 ### Ajouté — Lot A : Menu enrichi
 - **Photos plats** : champ `MenuItem.imageUrl`.
+
+### Corrigé
+- **Photos plats** : persistance de `imageUrl` sur les endpoints pro `POST/PATCH /api/pro/menu` (les URLs étaient ignorées).
 - **Allergènes UE (règlement INCO 1169/2011)** : enum `Allergen` avec les 14 allergènes officiels, champ `MenuItem.allergens[]`.
 - **Régimes alimentaires** : enum `Diet` (`VEGETARIAN`, `VEGAN`, `GLUTEN_FREE`, `LACTOSE_FREE`, `HALAL`, `KOSHER`, `PORK_FREE`, `LOW_CAL`, `SPICY`), champ `MenuItem.diets[]`.
 - **Gestion des stocks** : `stockEnabled`, `stockQty`, `lowStockThreshold` sur `MenuItem`. Décrément transactionnel à chaque commande, auto-désactivation à 0, endpoint pro `POST /api/pro/menu/:id/restock`. Table `StockMovement` pour l'historique.

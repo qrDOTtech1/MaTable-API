@@ -163,6 +163,7 @@ export async function proRoutes(app: FastifyInstance) {
       name: z.string().min(1),
       priceCents: z.number().int().min(0),
       description: z.string().optional(),
+      imageUrl: z.string().url().optional(),
       category: z.string().optional(),
       available: z.boolean().default(true),
     }).parse(req.body);
@@ -177,6 +178,7 @@ export async function proRoutes(app: FastifyInstance) {
       name: z.string().optional(),
       priceCents: z.number().int().optional(),
       description: z.string().optional(),
+      imageUrl: z.string().url().optional(),
       category: z.string().optional(),
       available: z.boolean().optional(),
     }).parse(req.body);
