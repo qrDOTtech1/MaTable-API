@@ -22,6 +22,7 @@ Format : [Keep a Changelog](https://keepachangelog.com/fr/1.0.0/)
 - **Avis serveurs** : table `ServerReview`. Endpoints `POST /api/reviews/server`, `GET /api/r-by-table/:tableId/servers`, agrégat pro avec note moyenne + nombre d'avis par serveur.
 - **Pourboires** : champs `Order.tipCents` / `TableSession.tipCents`, ligne Stripe dédiée lors du checkout, support paiement hors Stripe.
 - **Appel serveur** : table `ServiceCall`, endpoint client `POST /api/service-call` + événement Socket.io `service:called`, endpoints pro `GET /api/pro/service-calls` et `POST /api/pro/service-calls/:id/resolve`.
+- **Horaires d'ouverture (commande)** : `GET /api/tables/:tableId` retourne les `openingHours` du restaurant afin que le client puisse savoir si le restaurant est ouvert.
 
 ### Ajouté — Lot C : Analytics & fiscalité
 - **Analytics dashboard** : `GET /api/pro/analytics?days=N` — CA total, nombre de commandes, ticket moyen, top 10 plats, CA par jour, CA par serveur.
