@@ -193,6 +193,16 @@ export async function proRoutes(app: FastifyInstance) {
     const data = z.object({
       name: z.string().optional(),
       slug: z.string().optional(),
+      description: z.string().optional(),
+      address: z.string().optional(),
+      city: z.string().optional(),
+      phone: z.string().optional(),
+      email: z.string().optional(),
+      website: z.string().optional(),
+      coverImageUrl: z.string().optional(),
+      logoUrl: z.string().optional(),
+      acceptReservations: z.boolean().optional(),
+      depositPerGuestCents: z.number().optional(),
       openingHours: z.array(z.object({
         dayOfWeek: z.number().int(),
         openMin: z.number().int(),
