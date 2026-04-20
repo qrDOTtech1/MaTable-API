@@ -279,10 +279,32 @@ export async function proRoutes(app: FastifyInstance) {
     await prisma.$transaction([
       prisma.serverSchedule.deleteMany({ where: { serverId: id } }),
       prisma.serverSchedule.createMany({
-        data: schedules.map(s => ({ ...s, serverId: id, restaurantId: me.restaurantId }))
+        data: schedules.map(s => ({ ...s, serverId: id }))
       })
     ]);
 
+    return { ok: true };
+  });
+
+  app.get("/reservations", async (req, reply) => {
+    const me = await requirePro(req, reply);
+    const reservations = await prisma.reservation.findMany({
+      where: { restaurantId: me.restaurantId },
+      include: { table: true },
+      orderBy: { startsAt: "asc" },
+    });
+    return { reservations };
+  });
+
+  app.post("/reservations/:id/status", async (req, reply) => {
+    const me = await requirePro(req, reply);
+    const { id } = req.params as { id: string };
+    const { status } = z.object({ status: z.string() }).parse(req.body);
+    
+    await prisma.reservation.updateMany({
+      where: { id, restaurantId: me.restaurantId },
+      data: { status },
+    });
     return { ok: true };
   });
 }

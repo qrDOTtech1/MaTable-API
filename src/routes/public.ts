@@ -112,8 +112,8 @@ export async function publicRoutes(app: FastifyInstance) {
       name: z.string().min(1),
       phone: z.string(),
       email: z.string().email().optional(),
-      date: z.string(),
-      time: z.string(),
+      date: z.string(), // ISO date
+      time: z.string(), // HH:mm
       guests: z.number().int().min(1),
     }).parse(req.body);
 
@@ -122,7 +122,23 @@ export async function publicRoutes(app: FastifyInstance) {
       return reply.code(404).send({ error: "restaurant_not_found" });
     }
 
-    return { ok: true, message: "Reservation recorded", restaurantId: restaurant.id };
+    const [hours, mins] = input.time.split(":").map(Number);
+    const startsAt = new Date(input.date);
+    startsAt.setHours(hours, mins, 0, 0);
+
+    const reservation = await prisma.reservation.create({
+      data: {
+        restaurantId: restaurant.id,
+        startsAt,
+        partySize: input.guests,
+        customerName: input.name,
+        customerEmail: input.email ?? "",
+        customerPhone: input.phone,
+        status: "PENDING",
+      },
+    });
+
+    return { ok: true, reservationId: reservation.id };
   });
 
   app.post("/orders", async (req, reply) => {

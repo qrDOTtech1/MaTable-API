@@ -28,6 +28,25 @@ model Restaurant {
   menuItems            MenuItem[]
   servers              Server[]
   openingHours         OpeningHour[]
+  reservations         Reservation[]
+}
+
+model Reservation {
+  id            String     @id @default(uuid())
+  restaurant    Restaurant @relation(fields: [restaurantId], references: [id], onDelete: Cascade)
+  restaurantId  String
+  table         Table?     @relation(fields: [tableId], references: [id])
+  tableId       String?
+  startsAt      DateTime
+  partySize     Int
+  customerName  String
+  customerEmail String
+  customerPhone String?
+  status        String     @default("PENDING")
+  createdAt     DateTime   @default(now())
+
+  @@index([restaurantId])
+  @@index([tableId])
 }
 
 model Server {
