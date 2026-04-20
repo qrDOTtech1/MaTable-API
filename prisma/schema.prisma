@@ -9,16 +9,26 @@ datasource db {
 }
 
 model Restaurant {
-  id              String           @id @default(uuid())
-  slug            String?          @unique
-  name            String
-  createdAt       DateTime         @default(now())
-  users           User[]
-  tables          Table[]
-  menuItems       MenuItem[]
-  servers         Server[]
-  openingHours    OpeningHour[]
-  serverSchedules ServerSchedule[]
+  id                   String           @id @default(uuid())
+  slug                 String?          @unique
+  name                 String
+  description          String?
+  address              String?
+  city                 String?
+  phone                String?
+  email                String?
+  website              String?
+  coverImageUrl        String?
+  logoUrl             String?
+  acceptReservations   Boolean          @default(false)
+  depositPerGuestCents Int             @default(0)
+  createdAt           DateTime         @default(now())
+  users                User[]
+  tables               Table[]
+  menuItems            MenuItem[]
+  servers              Server[]
+  openingHours         OpeningHour[]
+  serverSchedules       ServerSchedule[]
 }
 
 model Server {
@@ -39,12 +49,9 @@ model ServerSchedule {
   dayOfWeek    Int
   openMin      Int
   closeMin     Int
-  restaurant   Restaurant @relation(fields: [restaurantId], references: [id], onDelete: Cascade)
-  restaurantId String
-  createdAt    DateTime   @default(now())
+  createdAt   DateTime   @default(now())
 
   @@index([serverId])
-  @@index([restaurantId])
 }
 
 model OpeningHour {

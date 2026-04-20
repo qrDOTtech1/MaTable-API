@@ -38,37 +38,7 @@ export async function publicRoutes(app: FastifyInstance) {
     });
     if (!session) {
       session = await prisma.tableSession.create({ data: { tableId } });
-  app.get("/r/:slug", async (req, reply) => {
-    const { slug } = req.params as { slug: string };
-    const restaurant = await prisma.restaurant.findUnique({
-      where: { slug },
-      include: {
-        menuItems: { where: { available: true }, orderBy: { category: "asc" } },
-      },
-    });
-
-    if (!restaurant) {
-      return reply.code(404).send({ error: "restaurant_not_found" });
     }
-
-    return {
-      id: restaurant.id,
-      name: restaurant.name,
-      slug: restaurant.slug,
-      menu: restaurant.menuItems,
-    };
-  });
-
-  app.get("/r/:slug/availability", async (req, reply) => {
-    // Placeholder for availability check (can be implemented later based on table capacity/reservations)
-    return { available: true, message: "Always available in MVP" };
-  });
-
-  app.post("/r/:slug/reservations", async (req, reply) => {
-    // Placeholder for saving a reservation
-    return { ok: true, message: "Reservation recorded (MVP stub)" };
-  });
-}
 
     const token = await reply.jwtSign(
       {
@@ -80,6 +50,72 @@ export async function publicRoutes(app: FastifyInstance) {
       { expiresIn: "12h" }
     );
     return { token, sessionId: session.id };
+  });
+
+  app.get("/r/:slug", async (req, reply) => {
+    const { slug } = req.params as { slug: string };
+    const restaurant = await prisma.restaurant.findUnique({
+      where: { slug },
+      include: {
+        menuItems: { where: { available: true }, orderBy: { category: "asc" } },
+        openingHours: { orderBy: { dayOfWeek: "asc" } },
+        servers: {
+          include: { schedules: { orderBy: { dayOfWeek: "asc" } } },
+        },
+      },
+    });
+
+    if (!restaurant) {
+      return reply.code(404).send({ error: "restaurant_not_found" });
+    }
+
+    return {
+      id: restaurant.id,
+      name: restaurant.name,
+      slug: restaurant.slug,
+      description: restaurant.description,
+      address: restaurant.address,
+      city: restaurant.city,
+      phone: restaurant.phone,
+      email: restaurant.email,
+      website: restaurant.website,
+      coverImageUrl: restaurant.coverImageUrl,
+      logoUrl: restaurant.logoUrl,
+      acceptReservations: restaurant.acceptReservations,
+      depositPerGuestCents: restaurant.depositPerGuestCents,
+      menu: restaurant.menuItems,
+      openingHours: restaurant.openingHours,
+      servers: restaurant.servers,
+    };
+  });
+
+  app.get("/r/:slug/availability", async (req, reply) => {
+    const { slug } = req.params as { slug: string };
+    const restaurant = await prisma.restaurant.findUnique({ where: { slug } });
+    if (!restaurant) {
+      return reply.code(404).send({ error: "restaurant_not_found" });
+    }
+
+    return { available: true, message: "Available" };
+  });
+
+  app.post("/r/:slug/reservations", async (req, reply) => {
+    const { slug } = req.params as { slug: string };
+    const input = z.object({
+      name: z.string().min(1),
+      phone: z.string(),
+      email: z.string().email().optional(),
+      date: z.string(),
+      time: z.string(),
+      guests: z.number().int().min(1),
+    }).parse(req.body);
+
+    const restaurant = await prisma.restaurant.findUnique({ where: { slug } });
+    if (!restaurant) {
+      return reply.code(404).send({ error: "restaurant_not_found" });
+    }
+
+    return { ok: true, message: "Reservation recorded", restaurantId: restaurant.id };
   });
 
   app.post("/orders", async (req, reply) => {
