@@ -49,13 +49,25 @@ export async function proRoutes(app: FastifyInstance) {
       email: z.string().email(),
       password: z.string().min(6),
     }).parse(req.body);
+    
+    console.log("[login] attempt for email:", email);
     const user = await prisma.user.findUnique({ where: { email } });
-    if (!user || !(await bcrypt.compare(password, user.passwordHash)))
+    if (!user) {
+      console.log("[login] user not found:", email);
       return reply.code(401).send({ error: "invalid_credentials" });
+    }
+
+    const matches = await bcrypt.compare(password, user.passwordHash);
+    if (!matches) {
+      console.log("[login] password mismatch for:", email);
+      return reply.code(401).send({ error: "invalid_credentials" });
+    }
+
     const token = app.jwt.sign(
       { kind: "pro", userId: user.id, restaurantId: user.restaurantId },
       { expiresIn: "7d" }
     );
+    console.log("[login] success for:", email);
     return { ok: true, token, restaurantId: user.restaurantId };
   });
 
