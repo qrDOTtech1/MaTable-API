@@ -35,7 +35,7 @@ model Restaurant {
   serviceCallEnabled      Boolean  @default(true)
   reviewsEnabled          Boolean  @default(true)
   createdAt               DateTime @default(now())
-  updatedAt               DateTime @updatedAt
+  updatedAt               DateTime @default(now()) @updatedAt
 
   users          User[]
   tables         Table[]
@@ -154,7 +154,7 @@ model MenuItem {
   allergens         Allergen[] @default([])
   diets             Diet[]     @default([])
   createdAt         DateTime  @default(now())
-  updatedAt         DateTime  @updatedAt
+  updatedAt         DateTime  @default(now()) @updatedAt
 
   modifierGroups ModifierGroup[]
   dishReviews    DishReview[]
