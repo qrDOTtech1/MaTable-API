@@ -14,6 +14,7 @@ export async function publicRoutes(app: FastifyInstance) {
           select: {
             id: true,
             name: true,
+            openingHours: { orderBy: { dayOfWeek: "asc" } },
             menuItems: { where: { available: true }, orderBy: { category: "asc" } },
           },
         },
@@ -22,7 +23,11 @@ export async function publicRoutes(app: FastifyInstance) {
     if (!table) return reply.code(404).send({ error: "table_not_found" });
     return {
       table: { id: table.id, number: table.number },
-      restaurant: { id: table.restaurant.id, name: table.restaurant.name },
+      restaurant: {
+        id: table.restaurant.id,
+        name: table.restaurant.name,
+        openingHours: table.restaurant.openingHours,
+      },
       menu: table.restaurant.menuItems,
     };
   });

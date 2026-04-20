@@ -62,6 +62,7 @@ Format : [Keep a Changelog](https://keepachangelog.com/fr/1.0.0/)
 - **Addition** : endpoint client `POST /api/bill/request` (mode `CARD|CASH|COUNTER`) + événement Socket.io `bill:requested`.
 - **Encaissement (pro)** : endpoint `POST /api/pro/tables/:id/settle` pour marquer les commandes de la session en `PAID` et fermer la session (paiement hors Stripe).
 - **DB** : champs `billRequestedAt` / `billPaymentMode` sur `TableSession`.
+- **Planning** : exposition des `openingHours` du restaurant dans `GET /api/tables/:tableId` pour permettre au client de savoir si le restaurant est ouvert.
 
 ## [1.0.0] — 2026-04-19
 
