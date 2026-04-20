@@ -102,6 +102,7 @@ model Table {
   restaurantId String
   sessions     TableSession[]
   orders       Order[]
+  reservations Reservation[]
   createdAt    DateTime       @default(now())
 
   @@unique([restaurantId, number])
