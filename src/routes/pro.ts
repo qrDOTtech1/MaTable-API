@@ -172,9 +172,9 @@ export async function proRoutes(app: FastifyInstance) {
       prisma.restaurant.update({ where: { id: me.restaurantId }, data: restData }),
     ];
     if (openingHours !== undefined) {
-      ops.push(prisma.openingHours.deleteMany({ where: { restaurantId: me.restaurantId } }));
+      ops.push(prisma.openingHour.deleteMany({ where: { restaurantId: me.restaurantId } }));
       if (openingHours.length > 0) {
-        ops.push(prisma.openingHours.createMany({
+        ops.push(prisma.openingHour.createMany({
           data: openingHours.map((h) => ({ ...h, restaurantId: me.restaurantId })),
         }));
       }
@@ -188,7 +188,7 @@ export async function proRoutes(app: FastifyInstance) {
   // ---------------------------------------------------------------------------
   app.get("/opening-hours", async (req, reply) => {
     const me = await requirePro(req, reply);
-    const hours = await prisma.openingHours.findMany({
+    const hours = await prisma.openingHour.findMany({
       where: { restaurantId: me.restaurantId },
       orderBy: [{ dayOfWeek: "asc" }, { openMin: "asc" }],
     });
@@ -205,9 +205,9 @@ export async function proRoutes(app: FastifyInstance) {
         service: z.string().optional(),
       })),
     }).parse(req.body);
-    await prisma.openingHours.deleteMany({ where: { restaurantId: me.restaurantId } });
+    await prisma.openingHour.deleteMany({ where: { restaurantId: me.restaurantId } });
     if (body.hours.length)
-      await prisma.openingHours.createMany({
+      await prisma.openingHour.createMany({
         data: body.hours.map((h) => ({ ...h, restaurantId: me.restaurantId })),
       });
     return { ok: true };
