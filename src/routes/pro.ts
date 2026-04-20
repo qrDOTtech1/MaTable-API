@@ -374,35 +374,6 @@ export async function proRoutes(app: FastifyInstance) {
     return { item };
   });
 
-  app.post("/uploads/image", async (req, reply) => {
-    const me = await requirePro(req, reply);
-
-    // @fastify/multipart adds req.file()
-    const part = await (req as any).file();
-    if (!part) return reply.code(400).send({ error: "missing_file" });
-    if (typeof part.mimetype !== "string" || !part.mimetype.startsWith("image/")) {
-      return reply.code(400).send({ error: "invalid_mime" });
-    }
-
-    const buf: Buffer = await part.toBuffer();
-    if (!buf.length) return reply.code(400).send({ error: "empty_file" });
-
-    const sha256 = crypto.createHash("sha256").update(buf).digest("hex");
-
-    const media = await prisma.media.create({
-      data: {
-        restaurantId: me.restaurantId,
-        mimeType: part.mimetype,
-        bytes: buf,
-        size: buf.length,
-        originalName: part.filename,
-        sha256,
-      },
-    });
-
-    return { id: media.id, path: `/api/media/${media.id}` };
-  });
-
   app.patch("/menu/:id", async (req, reply) => {
     const me = await requirePro(req, reply);
     const { id } = req.params as { id: string };
