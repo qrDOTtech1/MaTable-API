@@ -8,82 +8,52 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
+// ---------------------------------------------------------------------------
+// Restaurant
+// ---------------------------------------------------------------------------
 model Restaurant {
-  id                   String        @id @default(uuid())
-  slug                 String?       @unique
-  name                 String
-  description          String?
-  address              String?
-  city                 String?
-  phone                String?
-  email                String?
-  website              String?
-  coverImageUrl        String?
-  logoUrl              String?
-  acceptReservations   Boolean       @default(false)
-  depositPerGuestCents Int           @default(0)
-  createdAt            DateTime      @default(now())
-  users                User[]
-  tables               Table[]
-  menuItems            MenuItem[]
-  servers              Server[]
-  openingHours         OpeningHour[]
-  reservations         Reservation[]
+  id                      String   @id @default(uuid())
+  slug                    String?  @unique
+  name                    String
+  description             String?
+  address                 String?
+  city                    String?
+  postalCode              String?
+  country                 String?  @default("FR")
+  phone                   String?
+  email                   String?
+  website                 String?
+  coverImageUrl           String?
+  logoUrl                 String?
+  acceptReservations      Boolean  @default(false)
+  depositPerGuestCents    Int      @default(0)
+  avgPrepMinutes          Int      @default(90)
+  reservationLeadMinutes  Int      @default(60)
+  reservationSlotMinutes  Int      @default(30)
+  reservationPolicy       String?
+  tipsEnabled             Boolean  @default(true)
+  serviceCallEnabled      Boolean  @default(true)
+  reviewsEnabled          Boolean  @default(true)
+  createdAt               DateTime @default(now())
+  updatedAt               DateTime @updatedAt
+
+  users          User[]
+  tables         Table[]
+  menuItems      MenuItem[]
+  servers        Server[]
+  openingHours   OpeningHour[]
+  reservations   Reservation[]
+  serviceCalls   ServiceCall[]
+  dishReviews    DishReview[]
+  serverReviews  ServerReview[]
+  stockMovements StockMovement[]
+
+  @@index([slug])
 }
 
-model Reservation {
-  id            String     @id @default(uuid())
-  restaurant    Restaurant @relation(fields: [restaurantId], references: [id], onDelete: Cascade)
-  restaurantId  String
-  table         Table?     @relation(fields: [tableId], references: [id])
-  tableId       String?
-  startsAt      DateTime
-  partySize     Int
-  customerName  String
-  customerEmail String
-  customerPhone String?
-  status        String     @default("PENDING")
-  createdAt     DateTime   @default(now())
-
-  @@index([restaurantId])
-  @@index([tableId])
-}
-
-model Server {
-  id           String           @id @default(uuid())
-  name         String
-  restaurant   Restaurant       @relation(fields: [restaurantId], references: [id], onDelete: Cascade)
-  restaurantId String
-  schedules    ServerSchedule[]
-  createdAt    DateTime         @default(now())
-
-  @@index([restaurantId])
-}
-
-model ServerSchedule {
-  id        String   @id @default(uuid())
-  server    Server   @relation(fields: [serverId], references: [id], onDelete: Cascade)
-  serverId  String
-  dayOfWeek Int
-  openMin   Int
-  closeMin  Int
-  createdAt DateTime @default(now())
-
-  @@index([serverId])
-}
-
-model OpeningHour {
-  id           String     @id @default(uuid())
-  restaurant   Restaurant @relation(fields: [restaurantId], references: [id], onDelete: Cascade)
-  restaurantId String
-  dayOfWeek    Int
-  openMin      Int
-  closeMin     Int
-  service      String?
-
-  @@index([restaurantId])
-}
-
+// ---------------------------------------------------------------------------
+// Users
+// ---------------------------------------------------------------------------
 model User {
   id           String     @id @default(uuid())
   email        String     @unique
@@ -95,14 +65,20 @@ model User {
   @@index([restaurantId])
 }
 
+// ---------------------------------------------------------------------------
+// Tables & sessions
+// ---------------------------------------------------------------------------
 model Table {
   id           String         @id @default(uuid())
   number       Int
+  seats        Int            @default(2)
+  label        String?
   restaurant   Restaurant     @relation(fields: [restaurantId], references: [id], onDelete: Cascade)
   restaurantId String
   sessions     TableSession[]
   orders       Order[]
   reservations Reservation[]
+  serviceCalls ServiceCall[]
   createdAt    DateTime       @default(now())
 
   @@unique([restaurantId, number])
@@ -118,42 +94,245 @@ model TableSession {
   closedAt        DateTime?
   billRequestedAt DateTime?
   billPaymentMode PaymentMode?
+  tipCents        Int          @default(0)
+  serverId        String?
+  server          Server?      @relation(fields: [serverId], references: [id], onDelete: SetNull)
   orders          Order[]
+  serviceCalls    ServiceCall[]
 
   @@index([tableId, active])
+  @@index([serverId])
 }
 
+// ---------------------------------------------------------------------------
+// Orders
+// ---------------------------------------------------------------------------
 model Order {
   id         String       @id @default(uuid())
   table      Table        @relation(fields: [tableId], references: [id], onDelete: Cascade)
   tableId    String
   session    TableSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
   sessionId  String
+  server     Server?      @relation(fields: [serverId], references: [id], onDelete: SetNull)
+  serverId   String?
   status     OrderStatus  @default(PENDING)
   items      Json
   totalCents Int
+  tipCents   Int          @default(0)
+  notes      String?
   createdAt  DateTime     @default(now())
   updatedAt  DateTime     @updatedAt
+
+  dishReviews   DishReview[]
+  serverReviews ServerReview[]
 
   @@index([tableId])
   @@index([status, createdAt])
   @@index([sessionId])
+  @@index([serverId])
 }
 
+// ---------------------------------------------------------------------------
+// Menu
+// ---------------------------------------------------------------------------
 model MenuItem {
+  id                String    @id @default(uuid())
+  restaurant        Restaurant @relation(fields: [restaurantId], references: [id], onDelete: Cascade)
+  restaurantId      String
+  name              String
+  description       String?
+  priceCents        Int
+  imageUrl          String?
+  available         Boolean   @default(true)
+  category          String?
+  position          Int       @default(0)
+  stockEnabled      Boolean   @default(false)
+  stockQty          Int?
+  lowStockThreshold Int?      @default(5)
+  allergens         Allergen[] @default([])
+  diets             Diet[]     @default([])
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+
+  modifierGroups ModifierGroup[]
+  dishReviews    DishReview[]
+  stockMovements StockMovement[]
+
+  @@index([restaurantId])
+  @@index([restaurantId, category])
+}
+
+model ModifierGroup {
+  id         String           @id @default(uuid())
+  menuItem   MenuItem         @relation(fields: [menuItemId], references: [id], onDelete: Cascade)
+  menuItemId String
+  name       String
+  required   Boolean          @default(false)
+  multiple   Boolean          @default(false)
+  position   Int              @default(0)
+  options    ModifierOption[]
+
+  @@index([menuItemId])
+}
+
+model ModifierOption {
+  id             String        @id @default(uuid())
+  group          ModifierGroup @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  groupId        String
+  name           String
+  priceDeltaCents Int          @default(0)
+  position       Int           @default(0)
+  available      Boolean       @default(true)
+
+  @@index([groupId])
+}
+
+// ---------------------------------------------------------------------------
+// Staff (serveurs)
+// ---------------------------------------------------------------------------
+model Server {
+  id           String     @id @default(uuid())
+  name         String
+  photoUrl     String?
+  active       Boolean    @default(true)
+  restaurant   Restaurant @relation(fields: [restaurantId], references: [id], onDelete: Cascade)
+  restaurantId String
+  schedules    ServerSchedule[]
+  sessions     TableSession[]
+  orders       Order[]
+  reviews      ServerReview[]
+  createdAt    DateTime   @default(now())
+
+  @@index([restaurantId, active])
+}
+
+model ServerSchedule {
+  id        String   @id @default(uuid())
+  server    Server   @relation(fields: [serverId], references: [id], onDelete: Cascade)
+  serverId  String
+  dayOfWeek Int
+  openMin   Int
+  closeMin  Int
+
+  @@index([serverId])
+}
+
+// ---------------------------------------------------------------------------
+// Opening hours
+// ---------------------------------------------------------------------------
+model OpeningHour {
   id           String     @id @default(uuid())
   restaurant   Restaurant @relation(fields: [restaurantId], references: [id], onDelete: Cascade)
   restaurantId String
-  name         String
-  description  String?
-  priceCents   Int
-  available    Boolean    @default(true)
-  category     String?
-  createdAt    DateTime   @default(now())
+  dayOfWeek    Int
+  openMin      Int
+  closeMin     Int
+  service      String?
 
-  @@index([restaurantId])
+  @@index([restaurantId, dayOfWeek])
 }
 
+// ---------------------------------------------------------------------------
+// Reviews
+// ---------------------------------------------------------------------------
+model DishReview {
+  id           String     @id @default(uuid())
+  restaurant   Restaurant @relation(fields: [restaurantId], references: [id], onDelete: Cascade)
+  restaurantId String
+  menuItem     MenuItem   @relation(fields: [menuItemId], references: [id], onDelete: Cascade)
+  menuItemId   String
+  order        Order?     @relation(fields: [orderId], references: [id], onDelete: SetNull)
+  orderId      String?
+  rating       Int
+  comment      String?
+  verified     Boolean    @default(true)
+  createdAt    DateTime   @default(now())
+
+  @@index([restaurantId, createdAt])
+  @@index([menuItemId, createdAt])
+}
+
+model ServerReview {
+  id           String     @id @default(uuid())
+  restaurant   Restaurant @relation(fields: [restaurantId], references: [id], onDelete: Cascade)
+  restaurantId String
+  server       Server     @relation(fields: [serverId], references: [id], onDelete: Cascade)
+  serverId     String
+  order        Order?     @relation(fields: [orderId], references: [id], onDelete: SetNull)
+  orderId      String?
+  rating       Int
+  comment      String?
+  createdAt    DateTime   @default(now())
+
+  @@index([serverId, createdAt])
+  @@index([restaurantId, createdAt])
+}
+
+// ---------------------------------------------------------------------------
+// Service calls & stock movements
+// ---------------------------------------------------------------------------
+model ServiceCall {
+  id           String        @id @default(uuid())
+  restaurant   Restaurant    @relation(fields: [restaurantId], references: [id], onDelete: Cascade)
+  restaurantId String
+  table        Table         @relation(fields: [tableId], references: [id], onDelete: Cascade)
+  tableId      String
+  session      TableSession? @relation(fields: [sessionId], references: [id], onDelete: SetNull)
+  sessionId    String?
+  reason       String?
+  createdAt    DateTime      @default(now())
+  resolvedAt   DateTime?
+
+  @@index([restaurantId, resolvedAt])
+  @@index([tableId, resolvedAt])
+}
+
+model StockMovement {
+  id           String     @id @default(uuid())
+  restaurant   Restaurant @relation(fields: [restaurantId], references: [id], onDelete: Cascade)
+  restaurantId String
+  menuItem     MenuItem   @relation(fields: [menuItemId], references: [id], onDelete: Cascade)
+  menuItemId   String
+  delta        Int
+  reason       String
+  orderId      String?
+  createdAt    DateTime   @default(now())
+
+  @@index([restaurantId, createdAt])
+  @@index([menuItemId, createdAt])
+}
+
+// ---------------------------------------------------------------------------
+// Reservations
+// ---------------------------------------------------------------------------
+model Reservation {
+  id              String     @id @default(uuid())
+  restaurant      Restaurant @relation(fields: [restaurantId], references: [id], onDelete: Cascade)
+  restaurantId    String
+  table           Table?     @relation(fields: [tableId], references: [id], onDelete: SetNull)
+  tableId         String?
+  startsAt        DateTime
+  durationMin     Int        @default(90)
+  partySize       Int
+  customerName    String
+  customerEmail   String
+  customerPhone   String?
+  notes           String?
+  status          String     @default("PENDING")
+  depositCents    Int        @default(0)
+  depositStatus   String     @default("NONE")
+  stripeSessionId String?
+  createdAt       DateTime   @default(now())
+  updatedAt       DateTime   @updatedAt
+  cancelledAt     DateTime?
+
+  @@index([restaurantId, startsAt])
+  @@index([status, startsAt])
+}
+
+// ---------------------------------------------------------------------------
+// Enums
+// ---------------------------------------------------------------------------
 enum OrderStatus {
   PENDING
   COOKING
@@ -166,4 +345,33 @@ enum PaymentMode {
   CARD
   CASH
   COUNTER
+}
+
+enum Allergen {
+  GLUTEN
+  CRUSTACEANS
+  EGGS
+  FISH
+  PEANUTS
+  SOYBEANS
+  MILK
+  NUTS
+  CELERY
+  MUSTARD
+  SESAME
+  SULPHITES
+  LUPIN
+  MOLLUSCS
+}
+
+enum Diet {
+  VEGETARIAN
+  VEGAN
+  GLUTEN_FREE
+  LACTOSE_FREE
+  HALAL
+  KOSHER
+  PORK_FREE
+  LOW_CAL
+  SPICY
 }
