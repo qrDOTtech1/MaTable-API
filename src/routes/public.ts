@@ -70,22 +70,29 @@ export async function publicRoutes(app: FastifyInstance) {
     }
 
     return {
-      id: restaurant.id,
-      name: restaurant.name,
-      slug: restaurant.slug,
-      description: restaurant.description,
-      address: restaurant.address,
-      city: restaurant.city,
-      phone: restaurant.phone,
-      email: restaurant.email,
-      website: restaurant.website,
-      coverImageUrl: restaurant.coverImageUrl,
-      logoUrl: restaurant.logoUrl,
-      acceptReservations: restaurant.acceptReservations,
-      depositPerGuestCents: restaurant.depositPerGuestCents,
-      menu: restaurant.menuItems,
-      openingHours: restaurant.openingHours,
-      servers: restaurant.servers,
+      restaurant: {
+        id: restaurant.id,
+        name: restaurant.name,
+        slug: restaurant.slug,
+        description: restaurant.description,
+        address: restaurant.address,
+        city: restaurant.city,
+        phone: restaurant.phone,
+        email: restaurant.email,
+        website: restaurant.website,
+        coverImageUrl: restaurant.coverImageUrl,
+        logoUrl: restaurant.logoUrl,
+        acceptReservations: restaurant.acceptReservations,
+        depositPerGuestCents: restaurant.depositPerGuestCents,
+        menuItems: restaurant.menuItems,
+        openingHours: restaurant.openingHours,
+        servers: restaurant.servers,
+      },
+      reviews: {
+        avgRating: null,
+        count: 0,
+        latest: [],
+      },
     };
   });
 
