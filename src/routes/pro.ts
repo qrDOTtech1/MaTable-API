@@ -210,7 +210,7 @@ export async function proRoutes(app: FastifyInstance) {
         dayOfWeek: z.number().int(),
         openMin: z.number().int(),
         closeMin: z.number().int(),
-        service: z.string().optional()
+        service: z.string().optional().nullable()
       })).optional()
     }).parse(req.body);
 
@@ -218,7 +218,10 @@ export async function proRoutes(app: FastifyInstance) {
     if (data.openingHours !== undefined) {
       updateData.openingHours = {
         deleteMany: {},
-        create: data.openingHours,
+        create: data.openingHours.map(h => ({
+          ...h,
+          service: h.service ?? undefined
+        })),
       };
     }
 
