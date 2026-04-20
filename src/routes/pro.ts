@@ -187,4 +187,20 @@ export async function proRoutes(app: FastifyInstance) {
     await prisma.menuItem.deleteMany({ where: { id, restaurantId: me.restaurantId } });
     return { ok: true };
   });
+
+  app.patch("/restaurant", async (req, reply) => {
+    const me = await requirePro(req, reply);
+    const data = z.object({
+      name: z.string().optional(),
+    }).parse(req.body);
+    await prisma.restaurant.update({
+      where: { id: me.restaurantId },
+      data,
+    });
+    return { ok: true };
+  });
+
+  app.post("/servers", async (req, reply) => {
+    return reply.code(501).send({ error: "not_implemented" });
+  });
 }
