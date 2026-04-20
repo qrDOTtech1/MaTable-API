@@ -45,7 +45,10 @@ export async function proRoutes(app: FastifyInstance) {
 
   app.get("/me", async (req, reply) => {
     const me = await requirePro(req, reply);
-    const restaurant = await prisma.restaurant.findUnique({ where: { id: me.restaurantId } });
+    const restaurant = await prisma.restaurant.findUnique({
+      where: { id: me.restaurantId },
+      include: { openingHours: { orderBy: { dayOfWeek: "asc" } } },
+    });
     return { userId: me.userId, restaurant };
   });
 
