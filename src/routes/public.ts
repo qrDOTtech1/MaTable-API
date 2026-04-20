@@ -38,7 +38,37 @@ export async function publicRoutes(app: FastifyInstance) {
     });
     if (!session) {
       session = await prisma.tableSession.create({ data: { tableId } });
+  app.get("/r/:slug", async (req, reply) => {
+    const { slug } = req.params as { slug: string };
+    const restaurant = await prisma.restaurant.findUnique({
+      where: { slug },
+      include: {
+        menuItems: { where: { available: true }, orderBy: { category: "asc" } },
+      },
+    });
+
+    if (!restaurant) {
+      return reply.code(404).send({ error: "restaurant_not_found" });
     }
+
+    return {
+      id: restaurant.id,
+      name: restaurant.name,
+      slug: restaurant.slug,
+      menu: restaurant.menuItems,
+    };
+  });
+
+  app.get("/r/:slug/availability", async (req, reply) => {
+    // Placeholder for availability check (can be implemented later based on table capacity/reservations)
+    return { available: true, message: "Always available in MVP" };
+  });
+
+  app.post("/r/:slug/reservations", async (req, reply) => {
+    // Placeholder for saving a reservation
+    return { ok: true, message: "Reservation recorded (MVP stub)" };
+  });
+}
 
     const token = await reply.jwtSign(
       {
