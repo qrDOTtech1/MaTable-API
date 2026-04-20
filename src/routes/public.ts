@@ -5,6 +5,32 @@ import { requireSessionToken } from "../auth.js";
 import { emitToRestaurant } from "../realtime.js";
 
 export async function publicRoutes(app: FastifyInstance) {
+  app.get("/testimonials", async (req) => {
+    const { limit } = z
+      .object({ limit: z.coerce.number().int().min(1).max(12).optional() })
+      .parse(req.query ?? {});
+
+    const testimonials = await prisma.testimonial.findMany({
+      where: { published: true },
+      orderBy: { updatedAt: "desc" },
+      take: limit ?? 3,
+      include: { restaurant: { select: { name: true, city: true } } },
+    });
+
+    return {
+      testimonials: testimonials.map((t) => ({
+        id: t.id,
+        displayName: t.displayName,
+        displayRole: t.displayRole,
+        quote: t.quote,
+        rating: t.rating,
+        restaurantName: t.restaurant.name,
+        restaurantCity: t.restaurant.city,
+        updatedAt: t.updatedAt,
+      })),
+    };
+  });
+
   app.get("/media/:id", async (req, reply) => {
     const { id } = req.params as { id: string };
     const media = await prisma.media.findUnique({ where: { id } });

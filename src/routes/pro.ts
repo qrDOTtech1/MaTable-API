@@ -53,6 +53,48 @@ export async function proRoutes(app: FastifyInstance) {
     return { userId: me.userId, restaurant };
   });
 
+  app.get("/testimonial", async (req, reply) => {
+    const me = await requirePro(req, reply);
+    const testimonial = await prisma.testimonial.findUnique({
+      where: { restaurantId: me.restaurantId },
+    });
+    return { testimonial };
+  });
+
+  app.put("/testimonial", async (req, reply) => {
+    const me = await requirePro(req, reply);
+    const data = z
+      .object({
+        displayName: z.string().min(1).max(80),
+        displayRole: z.string().max(120).optional(),
+        quote: z.string().min(20).max(600),
+        rating: z.number().int().min(1).max(5).default(5),
+        published: z.boolean().default(true),
+      })
+      .parse(req.body);
+
+    const testimonial = await prisma.testimonial.upsert({
+      where: { restaurantId: me.restaurantId },
+      create: {
+        restaurantId: me.restaurantId,
+        displayName: data.displayName,
+        displayRole: data.displayRole?.trim() || undefined,
+        quote: data.quote,
+        rating: data.rating,
+        published: data.published,
+      },
+      update: {
+        displayName: data.displayName,
+        displayRole: data.displayRole?.trim() || undefined,
+        quote: data.quote,
+        rating: data.rating,
+        published: data.published,
+      },
+    });
+
+    return { testimonial };
+  });
+
   app.get("/tables", async (req, reply) => {
     const me = await requirePro(req, reply);
     const tables = await prisma.table.findMany({
