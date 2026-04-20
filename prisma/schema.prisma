@@ -9,22 +9,52 @@ datasource db {
 }
 
 model Restaurant {
-  id        String     @id @default(uuid())
-  slug      String?    @unique
-  name      String
-  createdAt DateTime   @default(now())
-  users     User[]
-  tables    Table[]
-  menuItems MenuItem[]
-  servers   Server[]
+  id              String           @id @default(uuid())
+  slug            String?          @unique
+  name            String
+  createdAt       DateTime         @default(now())
+  users           User[]
+  tables          Table[]
+  menuItems       MenuItem[]
+  servers         Server[]
+  openingHours    OpeningHour[]
+  serverSchedules ServerSchedule[]
 }
 
 model Server {
-  id           String     @id @default(uuid())
+  id           String           @id @default(uuid())
   name         String
+  restaurant   Restaurant       @relation(fields: [restaurantId], references: [id], onDelete: Cascade)
+  restaurantId String
+  schedules    ServerSchedule[]
+  createdAt    DateTime         @default(now())
+
+  @@index([restaurantId])
+}
+
+model ServerSchedule {
+  id           String     @id @default(uuid())
+  server       Server     @relation(fields: [serverId], references: [id], onDelete: Cascade)
+  serverId     String
+  dayOfWeek    Int
+  openMin      Int
+  closeMin     Int
   restaurant   Restaurant @relation(fields: [restaurantId], references: [id], onDelete: Cascade)
   restaurantId String
   createdAt    DateTime   @default(now())
+
+  @@index([serverId])
+  @@index([restaurantId])
+}
+
+model OpeningHour {
+  id           String     @id @default(uuid())
+  restaurant   Restaurant @relation(fields: [restaurantId], references: [id], onDelete: Cascade)
+  restaurantId String
+  dayOfWeek    Int
+  openMin      Int
+  closeMin     Int
+  service      String?
 
   @@index([restaurantId])
 }

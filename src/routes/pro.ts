@@ -193,10 +193,25 @@ export async function proRoutes(app: FastifyInstance) {
     const data = z.object({
       name: z.string().optional(),
       slug: z.string().optional(),
+      openingHours: z.array(z.object({
+        dayOfWeek: z.number().int(),
+        openMin: z.number().int(),
+        closeMin: z.number().int(),
+        service: z.string().optional()
+      })).optional()
     }).parse(req.body);
+
+    const updateData: any = { ...data };
+    if (data.openingHours !== undefined) {
+      updateData.openingHours = {
+        deleteMany: {},
+        create: data.openingHours,
+      };
+    }
+
     await prisma.restaurant.update({
       where: { id: me.restaurantId },
-      data,
+      data: updateData,
     });
     return { ok: true };
   });
@@ -219,5 +234,39 @@ export async function proRoutes(app: FastifyInstance) {
       data: { ...data, restaurantId: me.restaurantId },
     });
     return { server };
+  });
+
+  app.get("/servers/:id/schedules", async (req, reply) => {
+    const me = await requirePro(req, reply);
+    const { id } = req.params as { id: string };
+    const server = await prisma.server.findFirst({
+      where: { id, restaurantId: me.restaurantId },
+      include: { schedules: true }
+    });
+    if (!server) return reply.code(404).send({ error: "not_found" });
+    return { schedules: server.schedules };
+  });
+
+  app.put("/servers/:id/schedules", async (req, reply) => {
+    const me = await requirePro(req, reply);
+    const { id } = req.params as { id: string };
+    
+    const server = await prisma.server.findFirst({ where: { id, restaurantId: me.restaurantId } });
+    if (!server) return reply.code(404).send({ error: "not_found" });
+
+    const schedules = z.array(z.object({
+      dayOfWeek: z.number().int(),
+      openMin: z.number().int(),
+      closeMin: z.number().int(),
+    })).parse(req.body);
+
+    await prisma.$transaction([
+      prisma.serverSchedule.deleteMany({ where: { serverId: id } }),
+      prisma.serverSchedule.createMany({
+        data: schedules.map(s => ({ ...s, serverId: id, restaurantId: me.restaurantId }))
+      })
+    ]);
+
+    return { ok: true };
   });
 }
