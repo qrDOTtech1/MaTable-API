@@ -192,6 +192,7 @@ export async function proRoutes(app: FastifyInstance) {
     const me = await requirePro(req, reply);
     const data = z.object({
       name: z.string().optional(),
+      slug: z.string().optional(),
     }).parse(req.body);
     await prisma.restaurant.update({
       where: { id: me.restaurantId },
