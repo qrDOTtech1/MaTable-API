@@ -5,9 +5,17 @@ Format : [Keep a Changelog](https://keepachangelog.com/fr/1.0.0/)
 
 ---
 
-## [Unreleased] — v1.1 + v1.2 (en cours)
+## [Unreleased] — v1.2 (Nova IA & Direct Feedback)
 
-### Ajouté — Médias & Témoignages (2026-04-20)
+### Ajouté — Infrastructure IA
+- **Proxy AI Centralisé** : Endpoint `POST /api/ai/chat` avec support du streaming pour Ollama.
+- **Support Vision** : Traitement des images pour l'extraction automatique de données de menu via des modèles vision (Magic Scan).
+
+### Ajouté — Temps Réel (Client)
+- **Session Rooms** : Salons Socket.io par `sessionId` pour des notifications ciblées.
+- **Émissions de Statut** : Envoi automatique de `order:updated` aux sessions clientes dès qu'un statut change en cuisine.
+
+## [1.1.0] — 2026-04-20
 - **Stockage image Postgres** : modèle `Media` (bytes, mimeType, sha256, originalName). Endpoint `POST /api/pro/uploads/image` (multipart) → renvoie `{ id, path: /api/media/:id }`.
 - **Témoignage vitrine** : modèle `Testimonial` (1 par restaurant), endpoints `GET /api/pro/testimonial` et `PUT /api/pro/testimonial` (upsert).
 - **Schéma v1.1 complet** : ajout de `ModifierGroup`, `ModifierOption`, `DishReview`, `ServerReview`, `ServiceCall`, `StockMovement` + enums `Allergen` (14 valeurs) et `Diet` (9 valeurs).
