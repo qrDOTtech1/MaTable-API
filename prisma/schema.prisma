@@ -56,9 +56,100 @@ model Restaurant {
   stockMovements StockMovement[]
   media          Media[]
   testimonial    Testimonial?
+  socialProfiles SocialProfile[] // Active profiles in this restaurant
 
   @@index([slug])
 }
+
+// ... existing code ...
+
+model TableSession {
+  id              String       @id @default(uuid())
+  table           Table        @relation(fields: [tableId], references: [id], onDelete: Cascade)
+  tableId         String
+  active          Boolean      @default(true)
+  createdAt       DateTime     @default(now())
+  closedAt        DateTime?
+  billRequestedAt DateTime?
+  billPaymentMode PaymentMode?
+  tipCents        Int          @default(0)
+  serverId        String?
+  server          Server?      @relation(fields: [serverId], references: [id], onDelete: SetNull)
+  orders          Order[]
+  serviceCalls    ServiceCall[]
+  socialProfileId String?      // Link to social profile if active
+  socialProfile   SocialProfile? @relation(fields: [socialProfileId], references: [id], onDelete: SetNull)
+
+  @@index([tableId, active])
+  @@index([serverId])
+  @@index([socialProfileId])
+}
+
+// ... existing code ...
+
+// ─── SOCIAL CORE (Nova Connect) ──────────────────────────────────────────────
+
+enum SocialMode {
+  BUSINESS
+  FUN
+  DATE
+  HIDDEN
+}
+
+model SocialProfile {
+  id           String      @id @default(uuid())
+  // Can be linked to a permanent user (NextAuth user)
+  externalId   String?     @unique // e.g. Google ID or NextAuth User ID
+  name         String
+  image        String?
+  email        String?
+  
+  bio          String?     @db.Text
+  interests    String[]    // Keywords for IA matching
+  occupation   String?
+  
+  activeMode   SocialMode  @default(HIDDEN)
+  onboardingData Json?     
+  
+  // Presence
+  currentRestaurantId String?
+  restaurant          Restaurant? @relation(fields: [currentRestaurantId], references: [id], onDelete: SetNull)
+  
+  createdAt    DateTime    @default(now())
+  updatedAt    DateTime    @default(now()) @updatedAt
+
+  // Relations
+  tableSessions TableSession[]
+  sentPings     SocialPing[] @relation("SentPings")
+  receivedPings SocialPing[] @relation("ReceivedPings")
+
+  @@index([currentRestaurantId, activeMode])
+}
+
+model SocialPing {
+  id          String   @id @default(uuid())
+  senderId    String
+  sender      SocialProfile @relation("SentPings", fields: [senderId], references: [id], onDelete: Cascade)
+  receiverId  String
+  receiver    SocialProfile @relation("ReceivedPings", fields: [receiverId], references: [id], onDelete: Cascade)
+  
+  message     String?
+  mode        SocialMode
+  status      PingStatus @default(SENT)
+  
+  createdAt   DateTime @default(now())
+
+  @@index([senderId])
+  @@index([receiverId])
+}
+
+enum PingStatus {
+  SENT
+  ACCEPTED
+  DECLINED
+  SEEN
+}
+
 
 // ---------------------------------------------------------------------------
 // Users

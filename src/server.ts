@@ -11,6 +11,7 @@ import { proRoutes } from "./routes/pro.js";
 import { stripeRoutes } from "./routes/stripe.js";
 import { aiRoutes } from "./routes/ai.js";
 import { serverPortalRoutes } from "./routes/serverPortal.js";
+import { socialRoutes } from "./routes/social.js";
 
 async function build() {
   const app = Fastify({
@@ -55,6 +56,7 @@ async function build() {
   await app.register(stripeRoutes, { prefix: "/api/stripe" });
   await app.register(aiRoutes, { prefix: "/api/pro" });
   await app.register(serverPortalRoutes, { prefix: "/api/server" });
+  await app.register(socialRoutes, { prefix: "/api" });
 
   return app;
 }
