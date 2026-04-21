@@ -52,7 +52,7 @@ async function build() {
   await app.register(publicRoutes, { prefix: "/api" });
   await app.register(proRoutes, { prefix: "/api/pro" });
   await app.register(stripeRoutes, { prefix: "/api/stripe" });
-  await app.register(aiRoutes, { prefix: "/api/ai" });
+  await app.register(aiRoutes, { prefix: "/api/pro" });
 
   return app;
 }
