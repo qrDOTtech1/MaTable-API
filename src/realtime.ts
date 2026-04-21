@@ -12,6 +12,9 @@ export function initRealtime(app: FastifyInstance) {
   io.on("connection", (socket) => {
     const restaurantId = socket.handshake.auth?.restaurantId as string | undefined;
     if (restaurantId) socket.join(`restaurant:${restaurantId}`);
+
+    const sessionId = socket.handshake.auth?.sessionId as string | undefined;
+    if (sessionId) socket.join(`session:${sessionId}`);
   });
 
   return io;
@@ -19,4 +22,8 @@ export function initRealtime(app: FastifyInstance) {
 
 export function emitToRestaurant(restaurantId: string, event: string, payload: unknown) {
   io?.to(`restaurant:${restaurantId}`).emit(event, payload);
+}
+
+export function emitToSession(sessionId: string, event: string, payload: unknown) {
+  io?.to(`session:${sessionId}`).emit(event, payload);
 }

@@ -4,7 +4,7 @@ import bcrypt from "bcryptjs";
 import crypto from "crypto";
 import { prisma } from "../db.js";
 import { requirePro } from "../auth.js";
-import { emitToRestaurant } from "../realtime.js";
+import { emitToRestaurant, emitToSession } from "../realtime.js";
 
 const ALLERGENS = [
   "GLUTEN","CRUSTACEANS","EGGS","FISH","PEANUTS","SOYBEANS","MILK","NUTS",
@@ -334,6 +334,7 @@ export async function proRoutes(app: FastifyInstance) {
     if (!order) return reply.code(404).send({ error: "not_found" });
     const updated = await prisma.order.update({ where: { id }, data: { status } });
     emitToRestaurant(me.restaurantId, "order:updated", { id: updated.id, status: updated.status });
+    emitToSession(updated.sessionId, "order:updated", { id: updated.id, status: updated.status });
     return { order: updated };
   });
 
