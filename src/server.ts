@@ -9,6 +9,7 @@ import { initRealtime } from "./realtime.js";
 import { publicRoutes } from "./routes/public.js";
 import { proRoutes } from "./routes/pro.js";
 import { stripeRoutes } from "./routes/stripe.js";
+import { aiRoutes } from "./routes/ai.js";
 
 async function build() {
   const app = Fastify({
@@ -51,6 +52,7 @@ async function build() {
   await app.register(publicRoutes, { prefix: "/api" });
   await app.register(proRoutes, { prefix: "/api/pro" });
   await app.register(stripeRoutes, { prefix: "/api/stripe" });
+  await app.register(aiRoutes, { prefix: "/api/ai" });
 
   return app;
 }
