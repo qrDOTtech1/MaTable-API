@@ -10,7 +10,15 @@ Format : [Keep a Changelog](https://keepachangelog.com/fr/1.0.0/)
 ### Ajouté — Infrastructure IA
 - **Proxy AI Centralisé** : Endpoint `POST /api/ai/chat` avec support du streaming pour Ollama.
 - **Support Vision** : Traitement des images pour l'extraction automatique de données de menu via des modèles vision (Magic Scan).
-- **Social Connect API** : Modèles `SocialProfile` et `SocialPing`. Endpoints pour la gestion des profils, la découverte de proximité et le matching IA.
+### Ajouté — Social Connect API
+- **Modèles SocialProfile & SocialPing** : Support complet pour le réseau social culinaire.
+- **Endpoints Proximité** : `GET /api/social/nearby/:restaurantId` pour découvrir les clients actifs autour de soi.
+- **Interactions Temps Réel** : `POST /api/social/ping` pour envoyer des signaux sociaux aux autres tables via Socket.io.
+- **Matching IA (Stub)** : Premier algorithme de suggestion de rencontre basé sur les intérêts.
+
+### Corrigé
+- **Schéma Prisma** : Nettoyage des modèles dupliqués qui bloquaient le déploiement.
+- **Dépendances** : Ajout de `jsonwebtoken` manquant.
 
 ### Ajouté — Temps Réel (Client)
 - **Session Rooms** : Salons Socket.io par `sessionId` pour des notifications ciblées.
