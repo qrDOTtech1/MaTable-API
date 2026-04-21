@@ -34,6 +34,13 @@ model Restaurant {
   tipsEnabled             Boolean  @default(true)
   serviceCallEnabled      Boolean  @default(true)
   reviewsEnabled          Boolean  @default(true)
+  // NovaTech IA Subscription
+  subscription            SubscriptionPlan @default(STARTER)
+  ollamaApiKey            String?
+  ollamaLangModel         String?  @default("gpt-oss:120b")
+  ollamaVisionModel       String?  @default("llama3.2-vision:11b")
+  subscriptionStartedAt   DateTime?
+  subscriptionExpiresAt   DateTime?
   createdAt               DateTime @default(now())
   updatedAt               DateTime @default(now()) @updatedAt
 
@@ -411,4 +418,10 @@ enum Diet {
   PORK_FREE
   LOW_CAL
   SPICY
+}
+
+enum SubscriptionPlan {
+  STARTER
+  PRO
+  PRO_IA
 }
