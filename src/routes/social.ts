@@ -1,7 +1,7 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { prisma } from "../db.js";
-import { emitToSession, emitToSessionDirectly } from "../realtime.js";
+import { emitToSession } from "../realtime.js";
 
 // Note: Direct session emission needs a way to find the session.
 // In our current setup, we emit to rooms.
