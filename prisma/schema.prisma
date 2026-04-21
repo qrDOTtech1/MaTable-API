@@ -204,15 +204,41 @@ model Server {
   name         String
   photoUrl     String?
   active       Boolean    @default(true)
+  pin          String?    // 4-digit PIN for server portal login
   restaurant   Restaurant @relation(fields: [restaurantId], references: [id], onDelete: Cascade)
   restaurantId String
   schedules    ServerSchedule[]
   sessions     TableSession[]
   orders       Order[]
   reviews      ServerReview[]
+  notes        ServerNote[]
+  challenges   ServerChallenge[]
   createdAt    DateTime   @default(now())
 
   @@index([restaurantId, active])
+}
+
+model ServerNote {
+  id        String   @id @default(uuid())
+  server    Server   @relation(fields: [serverId], references: [id], onDelete: Cascade)
+  serverId  String
+  content   String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([serverId])
+}
+
+model ServerChallenge {
+  id        String   @id @default(uuid())
+  server    Server   @relation(fields: [serverId], references: [id], onDelete: Cascade)
+  serverId  String
+  title     String
+  done      Boolean  @default(false)
+  dueDate   DateTime?
+  createdAt DateTime @default(now())
+
+  @@index([serverId])
 }
 
 model ServerSchedule {

@@ -465,6 +465,7 @@ export async function proRoutes(app: FastifyInstance) {
       name: z.string().optional(),
       photoUrl: z.string().url().optional().or(z.literal("")),
       active: z.boolean().optional(),
+      pin: z.string().min(4).max(6).regex(/^\d+$/).nullable().optional(),
     }).parse(req.body);
     if ((data as any).photoUrl === "") (data as any).photoUrl = null;
     await prisma.server.updateMany({ where: { id, restaurantId: me.restaurantId }, data: data as any });
