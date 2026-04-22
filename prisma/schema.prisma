@@ -67,12 +67,12 @@ model Restaurant {
 // Users
 // ---------------------------------------------------------------------------
 model User {
-  id           String     @id @default(uuid())
-  email        String     @unique
-  passwordHash String
-  restaurant   Restaurant @relation(fields: [restaurantId], references: [id], onDelete: Cascade)
-  restaurantId String
-  createdAt    DateTime   @default(now())
+  id           String      @id @default(uuid())
+  email        String      @unique
+  passwordHash String?     // nullable: shared DB with RSMATABLE (social users have no passwordHash)
+  restaurant   Restaurant? @relation(fields: [restaurantId], references: [id], onDelete: Cascade)
+  restaurantId String?     // nullable: social users are not tied to a restaurant
+  createdAt    DateTime    @default(now())
 
   @@index([restaurantId])
 }
