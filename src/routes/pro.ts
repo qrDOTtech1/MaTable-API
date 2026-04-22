@@ -52,8 +52,8 @@ export async function proRoutes(app: FastifyInstance) {
     
     console.log("[login] attempt for email:", email);
     const user = await prisma.user.findUnique({ where: { email } });
-    if (!user) {
-      console.log("[login] user not found:", email);
+    if (!user || !user.passwordHash || !user.restaurantId) {
+      console.log("[login] user not found / no password / no restaurant:", email);
       return reply.code(401).send({ error: "invalid_credentials" });
     }
 
