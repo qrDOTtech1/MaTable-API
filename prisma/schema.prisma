@@ -23,8 +23,10 @@ model Restaurant {
   phone                   String?
   email                   String?
   website                 String?
-  coverImageUrl           String?
-  logoUrl                 String?
+  logoId                  String?
+  logo                    Media?   @relation("RestaurantLogo", fields: [logoId], references: [id])
+  coverImageId            String?
+  coverImage              Media?   @relation("RestaurantCoverImage", fields: [coverImageId], references: [id])
   acceptReservations      Boolean  @default(false)
   depositPerGuestCents    Int      @default(0)
   avgPrepMinutes          Int      @default(90)
@@ -34,7 +36,7 @@ model Restaurant {
   tipsEnabled             Boolean  @default(true)
   serviceCallEnabled      Boolean  @default(true)
   reviewsEnabled          Boolean  @default(true)
-  
+   
   // NovaTech IA Subscription
   subscription            SubscriptionPlan @default(STARTER)
   ollamaApiKey            String?
@@ -42,10 +44,10 @@ model Restaurant {
   ollamaVisionModel       String?  @default("llama3.2-vision:11b")
   subscriptionStartedAt   DateTime?
   subscriptionExpiresAt   DateTime?
-  
+   
   createdAt               DateTime @default(now())
   updatedAt               DateTime @default(now()) @updatedAt
-
+ 
   users          User[]
   tables         Table[]
   menuItems      MenuItem[]
@@ -57,10 +59,25 @@ model Restaurant {
   serverReviews  ServerReview[]
   stockMovements StockMovement[]
   media          Media[]
+  photos         Photo[] @relation("RestaurantPhotos")
   testimonial    Testimonial?
   socialProfiles SocialProfile[] // Active profiles in this restaurant
-
+ 
   @@index([slug])
+}
+
+model Photo {
+  id           String   @id @default(uuid())
+  restaurant   Restaurant @relation("RestaurantPhotos", fields: [restaurantId], references: [id], onDelete: Cascade)
+  restaurantId String
+  bytes        Bytes
+  mimeType     String
+  size         Int
+  originalName String?
+  sha256       String?
+  createdAt    DateTime @default(now())
+
+  @@index([restaurantId])
 }
 
 // ---------------------------------------------------------------------------
@@ -384,6 +401,10 @@ model Media {
   originalName String?
   sha256       String?
   createdAt    DateTime   @default(now())
+  
+  // Inverse relations for logo and coverImage
+  logoOfRestaurant? Restaurant @relation("RestaurantLogo")
+  coverImageOfRestaurant? Restaurant @relation("RestaurantCoverImage")
 
   @@index([restaurantId])
 }

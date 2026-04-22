@@ -102,30 +102,55 @@ export async function proRoutes(app: FastifyInstance) {
     return { testimonial };
   });
 
-  // ---------------------------------------------------------------------------
-  // Upload image (stockage Postgres via Media)
-  // ---------------------------------------------------------------------------
-  app.post("/uploads/image", async (req, reply) => {
-    const me = await requirePro(req, reply);
-    const part = await (req as any).file();
-    if (!part) return reply.code(400).send({ error: "missing_file" });
-    if (typeof part.mimetype !== "string" || !part.mimetype.startsWith("image/"))
-      return reply.code(400).send({ error: "invalid_mime" });
-    const buf: Buffer = await part.toBuffer();
-    if (!buf.length) return reply.code(400).send({ error: "empty_file" });
-    const sha256 = crypto.createHash("sha256").update(buf).digest("hex");
-    const media = await prisma.media.create({
-      data: {
-        restaurantId: me.restaurantId,
-        mimeType: part.mimetype,
-        bytes: buf,
-        size: buf.length,
-        originalName: part.filename,
-        sha256,
-      },
-    });
-    return { id: media.id, path: `/api/media/${media.id}` };
-  });
+   // ---------------------------------------------------------------------------
+   // Upload image (stockage Postgres via Media) - for general use
+   // ---------------------------------------------------------------------------
+   app.post("/uploads/image", async (req, reply) => {
+     const me = await requirePro(req, reply);
+     const part = await (req as any).file();
+     if (!part) return reply.code(400).send({ error: "missing_file" });
+     if (typeof part.mimetype !== "string" || !part.mimetype.startsWith("image/"))
+       return reply.code(400).send({ error: "invalid_mime" });
+     const buf: Buffer = await part.toBuffer();
+     if (!buf.length) return reply.code(400).send({ error: "empty_file" });
+     const sha256 = crypto.createHash("sha256").update(buf).digest("hex");
+     const media = await prisma.media.create({
+       data: {
+         restaurantId: me.restaurantId,
+         mimeType: part.mimetype,
+         bytes: buf,
+         size: buf.length,
+         originalName: part.filename,
+         sha256,
+       },
+     });
+     return { id: media.id, path: `/api/media/${media.id}` };
+   });
+
+   // ---------------------------------------------------------------------------
+   // Upload restaurant photo (for slideshow on public page and social app)
+   // ---------------------------------------------------------------------------
+   app.post("/uploads/restaurant-photo", async (req, reply) => {
+     const me = await requirePro(req, reply);
+     const part = await (req as any).file();
+     if (!part) return reply.code(400).send({ error: "missing_file" });
+     if (typeof part.mimetype !== "string" || !part.mimetype.startsWith("image/"))
+       return reply.code(400).send({ error: "invalid_mime" });
+     const buf: Buffer = await part.toBuffer();
+     if (!buf.length) return reply.code(400).send({ error: "empty_file" });
+     const sha256 = crypto.createHash("sha256").update(buf).digest("hex");
+     const photo = await prisma.photo.create({
+       data: {
+         restaurantId: me.restaurantId,
+         mimeType: part.mimetype,
+         bytes: buf,
+         size: buf.length,
+         originalName: part.filename,
+         sha256,
+       },
+     });
+     return { id: photo.id, path: `/api/photo/${photo.id}` };
+   });
 
   app.get("/me", async (req, reply) => {
     const me = await requirePro(req, reply);
