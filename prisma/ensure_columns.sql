@@ -53,6 +53,30 @@ END $$;
 CREATE INDEX IF NOT EXISTS "Photo_restaurantId_kind_idx" ON "Photo"("restaurantId", kind);
 CREATE INDEX IF NOT EXISTS "Photo_menuItemId_idx" ON "Photo"("menuItemId");
 
+-- Prospect table (CRM de prospection)
+CREATE TABLE IF NOT EXISTS "Prospect" (
+  id TEXT NOT NULL,
+  name TEXT NOT NULL,
+  city TEXT,
+  address TEXT,
+  phone TEXT,
+  email TEXT,
+  description TEXT,
+  website TEXT,
+  category TEXT,
+  "imageUrl" TEXT,
+  "sourceUrl" TEXT,
+  status TEXT NOT NULL DEFAULT 'NEW',
+  "restaurantId" TEXT,
+  notes TEXT,
+  "activatedAt" TIMESTAMP(3),
+  "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  "updatedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT "Prospect_pkey" PRIMARY KEY (id)
+);
+CREATE INDEX IF NOT EXISTS "Prospect_status_idx" ON "Prospect"(status);
+CREATE INDEX IF NOT EXISTS "Prospect_city_idx" ON "Prospect"(city);
+
 -- Table: indexes for zone
 CREATE INDEX IF NOT EXISTS "Table_restaurantId_zone_idx" ON "Table"("restaurantId", zone);
 

@@ -55,10 +55,15 @@ export async function publicRoutes(app: FastifyInstance) {
     const table = await prisma.table.findUnique({
       where: { id: tableId },
       include: {
+        assignedServer: { select: { id: true, name: true, photoUrl: true } },
         restaurant: {
           select: {
             id: true,
             name: true,
+            slug: true,
+            tipsEnabled: true,
+            reviewsEnabled: true,
+            serviceCallEnabled: true,
             openingHours: { orderBy: { dayOfWeek: "asc" } },
             menuItems: { where: { available: true }, orderBy: { category: "asc" } },
           },
@@ -66,14 +71,31 @@ export async function publicRoutes(app: FastifyInstance) {
       },
     });
     if (!table) return reply.code(404).send({ error: "table_not_found" });
+
+    // Also check for an active session's server (may differ from default)
+    let sessionServer = null;
+    const activeSession = await prisma.tableSession.findFirst({
+      where: { tableId, active: true },
+      include: { server: { select: { id: true, name: true, photoUrl: true } } },
+      orderBy: { createdAt: "desc" },
+    });
+    if (activeSession?.server) sessionServer = activeSession.server;
+
+    const server = sessionServer ?? table.assignedServer ?? null;
+
     return {
-      table: { id: table.id, number: table.number },
+      table: { id: table.id, number: table.number, zone: (table as any).zone },
       restaurant: {
         id: table.restaurant.id,
         name: table.restaurant.name,
+        slug: (table.restaurant as any).slug,
+        tipsEnabled: (table.restaurant as any).tipsEnabled ?? false,
+        reviewsEnabled: (table.restaurant as any).reviewsEnabled ?? false,
+        serviceCallEnabled: (table.restaurant as any).serviceCallEnabled ?? false,
         openingHours: table.restaurant.openingHours,
       },
       menu: table.restaurant.menuItems,
+      server: server ? { id: server.id, name: server.name, photoUrl: server.photoUrl } : null,
     };
   });
 
@@ -290,5 +312,123 @@ export async function publicRoutes(app: FastifyInstance) {
     });
 
     return { ok: true };
+  });
+
+  // ── Tip ─────────────────────────────────────────────────────────────────────
+  app.post("/tip", async (req, reply) => {
+    const decoded = await requireSessionToken(req, reply);
+    const { amountCents } = z.object({ amountCents: z.number().int().min(50).max(50000) }).parse(req.body);
+
+    const session = await prisma.tableSession.findUnique({ where: { id: decoded.sessionId } });
+    if (!session) return reply.code(404).send({ error: "session_not_found" });
+
+    await prisma.tableSession.update({
+      where: { id: decoded.sessionId },
+      data: { tipCents: (session.tipCents ?? 0) + amountCents },
+    });
+
+    // Also credit the server if assigned
+    if (session.serverId) {
+      // Update any open orders to include tip (spread across latest order)
+      const latestOrder = await prisma.order.findFirst({
+        where: { sessionId: decoded.sessionId, status: { not: "CANCELLED" } },
+        orderBy: { createdAt: "desc" },
+      });
+      if (latestOrder) {
+        await prisma.order.update({
+          where: { id: latestOrder.id },
+          data: { tipCents: (latestOrder.tipCents ?? 0) + amountCents },
+        });
+      }
+    }
+
+    emitToRestaurant(decoded.restaurantId, "tip:received", {
+      tableId: decoded.tableId,
+      sessionId: decoded.sessionId,
+      amountCents,
+      serverId: session.serverId,
+    });
+
+    return { ok: true, totalTipCents: (session.tipCents ?? 0) + amountCents };
+  });
+
+  // ── Reviews ─────────────────────────────────────────────────────────────────
+  app.post("/reviews", async (req, reply) => {
+    const decoded = await requireSessionToken(req, reply);
+    const body = z.object({
+      serverRating: z.number().int().min(1).max(5).optional(),
+      serverComment: z.string().max(500).optional(),
+      dishReviews: z.array(z.object({
+        menuItemId: z.string(),
+        rating: z.number().int().min(1).max(5),
+        comment: z.string().max(500).optional(),
+      })).optional(),
+    }).parse(req.body);
+
+    const session = await prisma.tableSession.findUnique({ where: { id: decoded.sessionId } });
+    if (!session) return reply.code(404).send({ error: "session_not_found" });
+
+    // Find the latest order for this session
+    const latestOrder = await prisma.order.findFirst({
+      where: { sessionId: decoded.sessionId, status: { not: "CANCELLED" } },
+      orderBy: { createdAt: "desc" },
+    });
+
+    // Server review
+    if (body.serverRating && session.serverId) {
+      await prisma.serverReview.create({
+        data: {
+          restaurantId: decoded.restaurantId,
+          serverId: session.serverId,
+          orderId: latestOrder?.id,
+          rating: body.serverRating,
+          comment: body.serverComment ?? null,
+        },
+      });
+    }
+
+    // Dish reviews
+    if (body.dishReviews && body.dishReviews.length > 0) {
+      for (const dr of body.dishReviews) {
+        await prisma.dishReview.create({
+          data: {
+            restaurantId: decoded.restaurantId,
+            menuItemId: dr.menuItemId,
+            orderId: latestOrder?.id,
+            rating: dr.rating,
+            comment: dr.comment ?? null,
+          },
+        });
+      }
+    }
+
+    return { ok: true };
+  });
+
+  // ── Service call ────────────────────────────────────────────────────────────
+  app.post("/service-call", async (req, reply) => {
+    const decoded = await requireSessionToken(req, reply);
+    const { reason } = z.object({ reason: z.string().max(200).default("Appel serveur") }).parse(req.body ?? {});
+
+    const table = await prisma.table.findUnique({ where: { id: decoded.tableId } });
+    if (!table) return reply.code(404).send({ error: "table_not_found" });
+
+    const call = await prisma.serviceCall.create({
+      data: {
+        restaurantId: decoded.restaurantId,
+        tableId: decoded.tableId,
+        sessionId: decoded.sessionId,
+        reason,
+      },
+    });
+
+    emitToRestaurant(decoded.restaurantId, "service:called", {
+      id: call.id,
+      tableId: decoded.tableId,
+      tableNumber: table.number,
+      reason,
+    });
+
+    return { ok: true, callId: call.id };
   });
 }

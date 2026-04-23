@@ -561,3 +561,29 @@ enum SubscriptionPlan {
   PRO
   PRO_IA
 }
+
+// ---------------------------------------------------------------------------
+// Prospection CRM
+// ---------------------------------------------------------------------------
+model Prospect {
+  id           String    @id @default(uuid())
+  name         String
+  city         String?
+  address      String?
+  phone        String?
+  email        String?
+  description  String?   @db.Text
+  website      String?
+  category     String?
+  imageUrl     String?
+  sourceUrl    String?
+  status       String    @default("NEW") // NEW | CONTACTED | ACTIVATED | IGNORED
+  restaurantId String?
+  notes        String?
+  activatedAt  DateTime?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @default(now()) @updatedAt
+
+  @@index([status])
+  @@index([city])
+}
