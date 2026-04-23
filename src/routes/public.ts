@@ -109,6 +109,7 @@ export async function publicRoutes(app: FastifyInstance) {
       include: {
         menuItems: { where: { available: true }, orderBy: { category: "asc" } },
         openingHours: { orderBy: { dayOfWeek: "asc" } },
+        photos: { orderBy: { position: "asc" } },
         servers: {
           include: { schedules: { orderBy: { dayOfWeek: "asc" } } },
         },
@@ -134,8 +135,16 @@ export async function publicRoutes(app: FastifyInstance) {
         logoUrl: restaurant.logoId ? `/api/media/${restaurant.logoId}` : null,
         acceptReservations: restaurant.acceptReservations,
         depositPerGuestCents: restaurant.depositPerGuestCents,
-        menuItems: restaurant.menuItems,
+        menuItems: restaurant.menuItems.map((m) => ({
+          ...m,
+          photos: (restaurant as any).photos
+            ?.filter((p: any) => p.menuItemId === m.id)
+            .map((p: any) => ({ id: p.id, url: `/api/photo/${p.id}` })) ?? [],
+        })),
         openingHours: restaurant.openingHours,
+        photos: (restaurant as any).photos
+          ?.filter((p: any) => !p.menuItemId)
+          .map((p: any) => ({ id: p.id, url: `/api/photo/${p.id}` })) ?? [],
         servers: restaurant.servers,
       },
       reviews: {
