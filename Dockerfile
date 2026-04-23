@@ -19,4 +19,4 @@ COPY --from=build /app/dist ./dist
 COPY --from=build /app/prisma ./prisma
 COPY --from=build /app/package.json ./package.json
 
-CMD ["sh", "-c", "npx prisma db push --accept-data-loss && npx tsx prisma/seed.ts && node dist/server.js"]
+CMD ["sh", "-c", "npx prisma db push --accept-data-loss; npx tsx prisma/seed.ts || true; node dist/server.js"]
