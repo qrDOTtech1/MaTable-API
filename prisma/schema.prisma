@@ -23,9 +23,9 @@ model Restaurant {
   phone                   String?
   email                   String?
   website                 String?
-  logoId                  String?
+  logoId                  String?  @unique
   logo                    Media?   @relation("RestaurantLogo", fields: [logoId], references: [id])
-  coverImageId            String?
+  coverImageId            String?  @unique
   coverImage              Media?   @relation("RestaurantCoverImage", fields: [coverImageId], references: [id])
   acceptReservations      Boolean  @default(false)
   depositPerGuestCents    Int      @default(0)
@@ -67,17 +67,22 @@ model Restaurant {
 }
 
 model Photo {
-  id           String   @id @default(uuid())
-  restaurant   Restaurant @relation("RestaurantPhotos", fields: [restaurantId], references: [id], onDelete: Cascade)
+  id           String     @id @default(uuid())
   restaurantId String
-  bytes        Bytes
+  restaurant   Restaurant @relation("RestaurantPhotos", fields: [restaurantId], references: [id], onDelete: Cascade)
+  menuItemId   String?
+  menuItem     MenuItem?  @relation("MenuItemPhotos", fields: [menuItemId], references: [id], onDelete: Cascade)
+  kind         String     @default("RESTAURANT") // RESTAURANT | DISH
   mimeType     String
+  bytes        Bytes
   size         Int
   originalName String?
   sha256       String?
-  createdAt    DateTime @default(now())
+  position     Int        @default(0)
+  createdAt    DateTime   @default(now())
 
-  @@index([restaurantId])
+  @@index([restaurantId, kind])
+  @@index([menuItemId])
 }
 
 // ---------------------------------------------------------------------------
@@ -413,28 +418,6 @@ model Media {
   coverImageOfRestaurant Restaurant? @relation("RestaurantCoverImage")
 
   @@index([restaurantId])
-}
-
-// ---------------------------------------------------------------------------
-// Photo — images multiples (profil resto + plats)
-// ---------------------------------------------------------------------------
-model Photo {
-  id           String     @id @default(uuid())
-  restaurantId String
-  restaurant   Restaurant @relation("RestaurantPhotos", fields: [restaurantId], references: [id], onDelete: Cascade)
-  menuItemId   String?
-  menuItem     MenuItem?  @relation("MenuItemPhotos", fields: [menuItemId], references: [id], onDelete: Cascade)
-  kind         String     @default("RESTAURANT") // RESTAURANT | DISH
-  mimeType     String
-  bytes        Bytes
-  size         Int
-  originalName String?
-  sha256       String?
-  position     Int        @default(0)
-  createdAt    DateTime   @default(now())
-
-  @@index([restaurantId, kind])
-  @@index([menuItemId])
 }
 
 // ---------------------------------------------------------------------------
