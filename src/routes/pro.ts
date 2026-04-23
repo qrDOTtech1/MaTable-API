@@ -192,7 +192,7 @@ export async function proRoutes(app: FastifyInstance) {
         dayOfWeek: z.number().int().min(0).max(6),
         openMin: z.number().int().min(0).max(1440),
         closeMin: z.number().int().min(0).max(1440),
-        service: z.string().optional(),
+        service: z.string().nullable().optional(),
       })).optional(),
     }).parse(req.body);
 
@@ -239,7 +239,7 @@ export async function proRoutes(app: FastifyInstance) {
         dayOfWeek: z.number().int().min(0).max(6),
         openMin: z.number().int().min(0).max(1440),
         closeMin: z.number().int().min(0).max(1440),
-        service: z.string().optional(),
+        service: z.string().nullable().optional(),
       })),
     }).parse(req.body);
     await prisma.openingHour.deleteMany({ where: { restaurantId: me.restaurantId } });
