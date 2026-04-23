@@ -34,3 +34,32 @@ CREATE TABLE IF NOT EXISTS "Photo" (
   "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
   CONSTRAINT "Photo_pkey" PRIMARY KEY (id)
 );
+
+-- Photo: foreign keys
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'Photo_restaurantId_fkey') THEN
+    ALTER TABLE "Photo" ADD CONSTRAINT "Photo_restaurantId_fkey"
+      FOREIGN KEY ("restaurantId") REFERENCES "Restaurant"(id) ON DELETE CASCADE ON UPDATE CASCADE;
+  END IF;
+END $$;
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'Photo_menuItemId_fkey') THEN
+    ALTER TABLE "Photo" ADD CONSTRAINT "Photo_menuItemId_fkey"
+      FOREIGN KEY ("menuItemId") REFERENCES "MenuItem"(id) ON DELETE CASCADE ON UPDATE CASCADE;
+  END IF;
+END $$;
+
+-- Photo: indexes
+CREATE INDEX IF NOT EXISTS "Photo_restaurantId_kind_idx" ON "Photo"("restaurantId", kind);
+CREATE INDEX IF NOT EXISTS "Photo_menuItemId_idx" ON "Photo"("menuItemId");
+
+-- Table: indexes for zone
+CREATE INDEX IF NOT EXISTS "Table_restaurantId_zone_idx" ON "Table"("restaurantId", zone);
+
+-- Table: foreign key for assignedServerId
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'Table_assignedServerId_fkey') THEN
+    ALTER TABLE "Table" ADD CONSTRAINT "Table_assignedServerId_fkey"
+      FOREIGN KEY ("assignedServerId") REFERENCES "Server"(id) ON DELETE SET NULL ON UPDATE CASCADE;
+  END IF;
+END $$;
