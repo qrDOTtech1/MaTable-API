@@ -98,20 +98,33 @@ export async function serverPortalRoutes(app: FastifyInstance) {
   });
 
   // ── GET /api/server/tables ─────────────────────────────────────────────────
-  // Returns: active sessions assigned to me + empty tables assigned to me + all tables overview
+  // Returns:
+  //   sessions    → ALL active sessions of the restaurant (not just mine)
+  //                 Sessions assigned to me come first, unassigned second.
+  //                 This way servers see orders even when no serverId is set.
+  //   allTables   → All tables with their active session state
+  //   myEmptyTables → Tables assigned to me with no active session
   app.get("/tables", async (req, reply) => {
     const me = await requireServer(req, reply);
 
-    // Active sessions where I am the assigned server
-    const sessions = await prisma.tableSession.findMany({
-      where: { serverId: me.serverId, active: true },
+    // All active sessions for the entire restaurant — sorted: mine first, then unassigned, then others
+    const allSessions = await prisma.tableSession.findMany({
+      where: { table: { restaurantId: me.restaurantId }, active: true },
       include: {
-        table: true,
+        table: { select: { id: true, number: true, seats: true } },
         orders: {
           where: { status: { in: ["PENDING", "COOKING", "SERVED"] } },
           orderBy: { createdAt: "desc" },
         },
       },
+      orderBy: { createdAt: "asc" },
+    });
+
+    // Sort: mine first, unassigned second, others last
+    const sessions = allSessions.sort((a, b) => {
+      const aMine = a.serverId === me.serverId ? 0 : a.serverId === null ? 1 : 2;
+      const bMine = b.serverId === me.serverId ? 0 : b.serverId === null ? 1 : 2;
+      return aMine - bMine;
     });
 
     // All tables of the restaurant with session state
@@ -134,6 +147,24 @@ export async function serverPortalRoutes(app: FastifyInstance) {
     );
 
     return { sessions, allTables, myEmptyTables };
+  });
+
+  // ── POST /api/server/tables/:sessionId/claim ──────────────────────────────
+  // Server claims an unassigned (or reassignable) session
+  app.post("/tables/:sessionId/claim", async (req, reply) => {
+    const me = await requireServer(req, reply);
+    const { sessionId } = req.params as { sessionId: string };
+
+    const session = await prisma.tableSession.findFirst({
+      where: { id: sessionId, table: { restaurantId: me.restaurantId }, active: true },
+    });
+    if (!session) return reply.code(404).send({ error: "SESSION_NOT_FOUND" });
+
+    const updated = await prisma.tableSession.update({
+      where: { id: sessionId },
+      data: { serverId: me.serverId },
+    });
+    return { ok: true, session: updated };
   });
 
   // ── GET /api/server/stats ──────────────────────────────────────────────────
