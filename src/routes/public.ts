@@ -41,6 +41,15 @@ export async function publicRoutes(app: FastifyInstance) {
     return reply.send(Buffer.from(media.bytes as any));
   });
 
+  app.get("/photo/:id", async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const photo = await prisma.photo.findUnique({ where: { id } });
+    if (!photo) return reply.code(404).send({ error: "not_found" });
+    reply.header("Content-Type", photo.mimeType);
+    reply.header("Cache-Control", "public, max-age=31536000, immutable");
+    return reply.send(Buffer.from(photo.bytes as any));
+  });
+
   app.get("/tables/:tableId", async (req, reply) => {
     const { tableId } = req.params as { tableId: string };
     const table = await prisma.table.findUnique({

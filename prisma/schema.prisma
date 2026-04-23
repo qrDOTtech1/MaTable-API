@@ -98,20 +98,24 @@ model User {
 // Tables & sessions
 // ---------------------------------------------------------------------------
 model Table {
-  id           String         @id @default(uuid())
-  number       Int
-  seats        Int            @default(2)
-  label        String?
-  restaurant   Restaurant     @relation(fields: [restaurantId], references: [id], onDelete: Cascade)
-  restaurantId String
-  sessions     TableSession[]
-  orders       Order[]
-  reservations Reservation[]
-  serviceCalls ServiceCall[]
-  createdAt    DateTime       @default(now())
+  id               String         @id @default(uuid())
+  number           Int
+  seats            Int            @default(2)
+  label            String?
+  zone             String?        // "Salle principale", "Terrasse", "Mezzanine", "VIP"…
+  assignedServerId String?
+  assignedServer   Server?        @relation("TableAssignedServer", fields: [assignedServerId], references: [id], onDelete: SetNull)
+  restaurant       Restaurant     @relation(fields: [restaurantId], references: [id], onDelete: Cascade)
+  restaurantId     String
+  sessions         TableSession[]
+  orders           Order[]
+  reservations     Reservation[]
+  serviceCalls     ServiceCall[]
+  createdAt        DateTime       @default(now())
 
   @@unique([restaurantId, number])
   @@index([restaurantId])
+  @@index([restaurantId, zone])
 }
 
 model TableSession {
@@ -189,6 +193,7 @@ model MenuItem {
   modifierGroups ModifierGroup[]
   dishReviews    DishReview[]
   stockMovements StockMovement[]
+  photos         Photo[] @relation("MenuItemPhotos")
 
   @@index([restaurantId])
   @@index([restaurantId, category])
@@ -236,6 +241,7 @@ model Server {
   reviews      ServerReview[]
   notes        ServerNote[]
   challenges   ServerChallenge[]
+  assignedTables Table[]          @relation("TableAssignedServer")
   createdAt    DateTime   @default(now())
 
   @@index([restaurantId, active])
@@ -401,12 +407,34 @@ model Media {
   originalName String?
   sha256       String?
   createdAt    DateTime   @default(now())
-  
-  // Inverse relations for logo and coverImage
-  logoOfRestaurant? Restaurant @relation("RestaurantLogo")
-  coverImageOfRestaurant? Restaurant @relation("RestaurantCoverImage")
+
+  // Inverse relations for Restaurant.logo / Restaurant.coverImage
+  logoOfRestaurant       Restaurant? @relation("RestaurantLogo")
+  coverImageOfRestaurant Restaurant? @relation("RestaurantCoverImage")
 
   @@index([restaurantId])
+}
+
+// ---------------------------------------------------------------------------
+// Photo — images multiples (profil resto + plats)
+// ---------------------------------------------------------------------------
+model Photo {
+  id           String     @id @default(uuid())
+  restaurantId String
+  restaurant   Restaurant @relation("RestaurantPhotos", fields: [restaurantId], references: [id], onDelete: Cascade)
+  menuItemId   String?
+  menuItem     MenuItem?  @relation("MenuItemPhotos", fields: [menuItemId], references: [id], onDelete: Cascade)
+  kind         String     @default("RESTAURANT") // RESTAURANT | DISH
+  mimeType     String
+  bytes        Bytes
+  size         Int
+  originalName String?
+  sha256       String?
+  position     Int        @default(0)
+  createdAt    DateTime   @default(now())
+
+  @@index([restaurantId, kind])
+  @@index([menuItemId])
 }
 
 // ---------------------------------------------------------------------------

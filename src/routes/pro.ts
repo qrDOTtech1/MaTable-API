@@ -268,13 +268,22 @@ export async function proRoutes(app: FastifyInstance) {
     const body = z.object({
       seats: z.number().int().min(1).max(20).optional(),
       label: z.string().max(40).optional(),
+      zone: z.string().max(40).optional(),
+      assignedServerId: z.string().nullable().optional(),
     }).default({}).parse(req.body ?? {});
     const last = await prisma.table.findFirst({
       where: { restaurantId: me.restaurantId },
       orderBy: { number: "desc" },
     });
     const table = await prisma.table.create({
-      data: { number: (last?.number ?? 0) + 1, restaurantId: me.restaurantId, seats: body.seats ?? 2, label: body.label },
+      data: {
+        number: (last?.number ?? 0) + 1,
+        restaurantId: me.restaurantId,
+        seats: body.seats ?? 2,
+        label: body.label,
+        zone: body.zone,
+        assignedServerId: body.assignedServerId ?? null,
+      },
     });
     return { table };
   });
@@ -282,9 +291,31 @@ export async function proRoutes(app: FastifyInstance) {
   app.patch("/tables/:id", async (req, reply) => {
     const me = await requirePro(req, reply);
     const { id } = req.params as { id: string };
-    const data = z.object({ seats: z.number().int().min(1).max(20).optional(), label: z.string().max(40).optional() }).parse(req.body);
+    const data = z.object({
+      seats: z.number().int().min(1).max(20).optional(),
+      label: z.string().max(40).nullable().optional(),
+      zone: z.string().max(40).nullable().optional(),
+      assignedServerId: z.string().nullable().optional(),
+    }).parse(req.body);
     await prisma.table.updateMany({ where: { id, restaurantId: me.restaurantId }, data });
     return { ok: true };
+  });
+
+  app.delete("/tables/:id", async (req, reply) => {
+    const me = await requirePro(req, reply);
+    const { id } = req.params as { id: string };
+    await prisma.table.deleteMany({ where: { id, restaurantId: me.restaurantId } });
+    return { ok: true };
+  });
+
+  app.get("/zones", async (req, reply) => {
+    const me = await requirePro(req, reply);
+    const rows = await prisma.table.findMany({
+      where: { restaurantId: me.restaurantId, zone: { not: null } },
+      select: { zone: true },
+      distinct: ["zone"],
+    });
+    return { zones: rows.map((r) => r.zone).filter(Boolean) };
   });
 
   app.post("/tables/:id/reset", async (req, reply) => {
@@ -664,5 +695,107 @@ export async function proRoutes(app: FastifyInstance) {
     });
     emitToRestaurant(me.restaurantId, "reservation:updated", { id: updated.id, status: updated.status });
     return { reservation: updated };
+  });
+
+  // ---------------------------------------------------------------------------
+  // Photos multi (restaurant + plat)
+  // ---------------------------------------------------------------------------
+
+  // Liste les photos : optionnellement filtrées par menuItemId
+  app.get("/photos", async (req, reply) => {
+    const me = await requirePro(req, reply);
+    const q = z.object({
+      menuItemId: z.string().optional(),
+      kind: z.enum(["RESTAURANT", "DISH"]).optional(),
+    }).parse(req.query ?? {});
+    const where: any = { restaurantId: me.restaurantId };
+    if (q.menuItemId) where.menuItemId = q.menuItemId;
+    if (q.kind) where.kind = q.kind;
+    const photos = await prisma.photo.findMany({
+      where,
+      orderBy: [{ position: "asc" }, { createdAt: "asc" }],
+      select: { id: true, kind: true, menuItemId: true, mimeType: true, size: true, position: true, createdAt: true },
+    });
+    return { photos: photos.map((p) => ({ ...p, path: `/api/photo/${p.id}` })) };
+  });
+
+  // Upload multi-fichier (drag & drop / input multiple)
+  // POST /api/pro/photos?menuItemId=xxx&kind=DISH (ou RESTAURANT par défaut)
+  app.post("/photos", async (req, reply) => {
+    const me = await requirePro(req, reply);
+    const q = z.object({
+      menuItemId: z.string().optional(),
+      kind: z.enum(["RESTAURANT", "DISH"]).optional(),
+    }).parse(req.query ?? {});
+    const kind = q.kind ?? (q.menuItemId ? "DISH" : "RESTAURANT");
+
+    // Si DISH : vérifier que le menuItem appartient bien au resto
+    if (q.menuItemId) {
+      const dish = await prisma.menuItem.findFirst({
+        where: { id: q.menuItemId, restaurantId: me.restaurantId },
+        select: { id: true },
+      });
+      if (!dish) return reply.code(404).send({ error: "menu_item_not_found" });
+    }
+
+    const parts = (req as any).parts() as AsyncIterable<any>;
+    const created: any[] = [];
+    let lastPosQ = await prisma.photo.findFirst({
+      where: { restaurantId: me.restaurantId, kind, menuItemId: q.menuItemId ?? null },
+      orderBy: { position: "desc" },
+      select: { position: true },
+    });
+    let nextPos = (lastPosQ?.position ?? -1) + 1;
+
+    for await (const part of parts) {
+      if (part.type !== "file") continue;
+      if (typeof part.mimetype !== "string" || !part.mimetype.startsWith("image/")) continue;
+      const buf: Buffer = await part.toBuffer();
+      if (!buf.length || buf.length > 8 * 1024 * 1024) continue; // cap 8 MB
+      const sha256 = crypto.createHash("sha256").update(buf).digest("hex");
+      const photo = await prisma.photo.create({
+        data: {
+          restaurantId: me.restaurantId,
+          menuItemId: q.menuItemId ?? null,
+          kind,
+          mimeType: part.mimetype,
+          bytes: buf,
+          size: buf.length,
+          originalName: part.filename,
+          sha256,
+          position: nextPos++,
+        },
+        select: { id: true, kind: true, menuItemId: true, mimeType: true, size: true, position: true },
+      });
+      created.push({ ...photo, path: `/api/photo/${photo.id}` });
+    }
+
+    if (created.length === 0) return reply.code(400).send({ error: "no_valid_image_uploaded" });
+    return { photos: created };
+  });
+
+  app.delete("/photos/:id", async (req, reply) => {
+    const me = await requirePro(req, reply);
+    const { id } = req.params as { id: string };
+    const photo = await prisma.photo.findFirst({ where: { id, restaurantId: me.restaurantId }, select: { id: true } });
+    if (!photo) return reply.code(404).send({ error: "not_found" });
+    await prisma.photo.delete({ where: { id } });
+    return { ok: true };
+  });
+
+  app.patch("/photos/reorder", async (req, reply) => {
+    const me = await requirePro(req, reply);
+    const body = z.object({
+      order: z.array(z.object({ id: z.string(), position: z.number().int().min(0) })).min(1),
+    }).parse(req.body);
+    await prisma.$transaction(
+      body.order.map((o) =>
+        prisma.photo.updateMany({
+          where: { id: o.id, restaurantId: me.restaurantId },
+          data: { position: o.position },
+        })
+      )
+    );
+    return { ok: true };
   });
 }
