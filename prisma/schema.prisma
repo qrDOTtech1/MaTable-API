@@ -90,11 +90,17 @@ model Photo {
 // ---------------------------------------------------------------------------
 model User {
   id           String      @id @default(uuid())
-  email        String      @unique
+  email        String?     @unique
   passwordHash String?     // nullable: shared DB with RSMATABLE (social users have no passwordHash)
+  // --- shadow columns owned by RSMATABLE / MaTableAdmin (do NOT remove) ---
+  name          String?
+  emailVerified DateTime?
+  image         String?
+  password      String?
+  // ------------------------------------------------------------------------
   restaurant   Restaurant? @relation(fields: [restaurantId], references: [id], onDelete: Cascade)
   restaurantId String?     // nullable: social users are not tied to a restaurant
-  createdAt    DateTime    @default(now())
+  createdAt    DateTime?   @default(now())
 
   @@index([restaurantId])
 }
