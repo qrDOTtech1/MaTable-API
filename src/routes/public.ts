@@ -87,7 +87,13 @@ export async function publicRoutes(app: FastifyInstance) {
       orderBy: { createdAt: "desc" },
     });
     if (!session) {
-      session = await prisma.tableSession.create({ data: { tableId } });
+      // Auto-assign the table's default server to the new session
+      session = await prisma.tableSession.create({
+        data: {
+          tableId,
+          serverId: (table as any).assignedServerId ?? null,
+        },
+      });
     }
 
     const token = await reply.jwtSign(

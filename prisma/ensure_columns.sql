@@ -15,6 +15,10 @@ ALTER TABLE "User" ADD COLUMN IF NOT EXISTS "image" TEXT;
 ALTER TABLE "User" ADD COLUMN IF NOT EXISTS "password" TEXT;
 ALTER TABLE "User" ADD COLUMN IF NOT EXISTS "emailVerified" TIMESTAMP(3);
 
+-- ServerChallenge: global AI challenges
+ALTER TABLE "ServerChallenge" ADD COLUMN IF NOT EXISTS "isGlobal" BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE "ServerChallenge" ADD COLUMN IF NOT EXISTS "restaurantId" TEXT;
+
 -- Photo gallery table
 CREATE TABLE IF NOT EXISTS "Photo" (
   id TEXT NOT NULL,

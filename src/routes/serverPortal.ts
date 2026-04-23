@@ -62,29 +62,47 @@ export async function serverPortalRoutes(app: FastifyInstance) {
   // ── GET /api/server/me ─────────────────────────────────────────────────────
   app.get("/me", async (req, reply) => {
     const me = await requireServer(req, reply);
-    const server = await prisma.server.findUnique({
-      where: { id: me.serverId },
-      include: {
-        schedules: { orderBy: [{ dayOfWeek: "asc" }] },
-        notes: { orderBy: { updatedAt: "desc" }, take: 20 },
-        challenges: { orderBy: { createdAt: "desc" } },
-      },
-    });
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const tomorrow = new Date(today); tomorrow.setDate(tomorrow.getDate() + 1);
+
+    const [server, restaurant, globalChallenges] = await Promise.all([
+      prisma.server.findUnique({
+        where: { id: me.serverId },
+        include: {
+          schedules: { orderBy: [{ dayOfWeek: "asc" }] },
+          notes: { orderBy: { updatedAt: "desc" }, take: 20 },
+          challenges: {
+            where: { isGlobal: false },
+            orderBy: { createdAt: "desc" },
+          },
+        },
+      }),
+      prisma.restaurant.findUnique({
+        where: { id: me.restaurantId },
+        select: { name: true, subscription: true },
+      }),
+      // Global AI challenges generated today for this restaurant
+      prisma.serverChallenge.findMany({
+        where: {
+          serverId: me.serverId,
+          isGlobal: true,
+          createdAt: { gte: today, lt: tomorrow },
+        },
+        orderBy: { createdAt: "asc" },
+      }),
+    ]);
+
     if (!server) return reply.code(404).send({ error: "NOT_FOUND" });
-
-    const restaurant = await prisma.restaurant.findUnique({
-      where: { id: me.restaurantId },
-      select: { name: true, subscription: true },
-    });
-
-    return { server, restaurant };
+    return { server: { ...server, globalChallenges }, restaurant };
   });
 
   // ── GET /api/server/tables ─────────────────────────────────────────────────
-  // Returns tables assigned to this server (active sessions) + all orders
+  // Returns: active sessions assigned to me + empty tables assigned to me + all tables overview
   app.get("/tables", async (req, reply) => {
     const me = await requireServer(req, reply);
 
+    // Active sessions where I am the assigned server
     const sessions = await prisma.tableSession.findMany({
       where: { serverId: me.serverId, active: true },
       include: {
@@ -96,7 +114,7 @@ export async function serverPortalRoutes(app: FastifyInstance) {
       },
     });
 
-    // Also get all active tables for context
+    // All tables of the restaurant with session state
     const allTables = await prisma.table.findMany({
       where: { restaurantId: me.restaurantId },
       include: {
@@ -109,7 +127,13 @@ export async function serverPortalRoutes(app: FastifyInstance) {
       orderBy: { number: "asc" },
     });
 
-    return { sessions, allTables };
+    // My assigned empty tables (no active session yet but table is mine by default)
+    const activeSessionTableIds = new Set(sessions.map((s) => s.tableId));
+    const myEmptyTables = allTables.filter(
+      (t) => (t as any).assignedServerId === me.serverId && !activeSessionTableIds.has(t.id)
+    );
+
+    return { sessions, allTables, myEmptyTables };
   });
 
   // ── GET /api/server/stats ──────────────────────────────────────────────────
@@ -203,6 +227,106 @@ export async function serverPortalRoutes(app: FastifyInstance) {
     const { id } = req.params as { id: string };
     await prisma.serverChallenge.deleteMany({ where: { id, serverId: me.serverId } });
     return { ok: true };
+  });
+
+  // ── AI Daily Challenges — generate for all servers (PRO_IA only) ──────────
+  // Generates 3 competitive cross-server challenges once per day
+  app.post("/challenges/generate-daily", async (req, reply) => {
+    const me = await requireServer(req, reply);
+
+    const restaurant = await prisma.restaurant.findUnique({
+      where: { id: me.restaurantId },
+      select: { name: true, subscription: true, ollamaApiKey: true, ollamaLangModel: true },
+    });
+
+    if (!restaurant || restaurant.subscription !== "PRO_IA") {
+      return reply.code(403).send({ error: "IA_NOT_SUBSCRIBED" });
+    }
+
+    // Check if already generated today
+    const today = new Date(); today.setHours(0, 0, 0, 0);
+    const tomorrow = new Date(today); tomorrow.setDate(tomorrow.getDate() + 1);
+    const existing = await prisma.serverChallenge.findFirst({
+      where: { restaurantId: me.restaurantId, isGlobal: true, createdAt: { gte: today, lt: tomorrow } },
+    });
+    if (existing) {
+      // Already generated — just return today's challenges for this server
+      const challenges = await prisma.serverChallenge.findMany({
+        where: { serverId: me.serverId, isGlobal: true, createdAt: { gte: today, lt: tomorrow } },
+      });
+      return { challenges, alreadyGenerated: true };
+    }
+
+    // Get all active servers
+    const servers = await prisma.server.findMany({
+      where: { restaurantId: me.restaurantId, active: true },
+      select: { id: true, name: true },
+    });
+
+    // Generate challenges via AI
+    let challengeTitles: string[] = [];
+    if (restaurant.ollamaApiKey) {
+      try {
+        const today_label = new Date().toLocaleDateString("fr-FR", { weekday: "long", day: "numeric", month: "long" });
+        const prompt = `Tu es un chef de salle qui organise des défis quotidiens entre serveurs pour maintenir la motivation.
+Aujourd'hui c'est ${today_label} au restaurant "${restaurant.name}".
+Génère exactement 3 défis de service compétitifs, originaux et mesurables pour la journée.
+Les défis doivent être amusants, stimulants, réalisables en service et créer de la saine compétition.
+Format: retourne UNIQUEMENT 3 lignes, une par défi, sans numérotation, sans explication.
+Exemples: "Proposer un dessert à chaque table et en vendre au moins 3", "Obtenir 2 compliments spontanés clients notés", "Mémoriser et réciter la composition de 5 plats sans carte"`;
+
+        const response = await fetch("https://ollama.com/api/chat", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: `Bearer ${restaurant.ollamaApiKey}` },
+          body: JSON.stringify({
+            model: restaurant.ollamaLangModel ?? "gpt-oss:120b",
+            messages: [
+              { role: "system", content: "Tu génères des défis de restaurant. Réponds en français avec exactement 3 lignes." },
+              { role: "user", content: prompt },
+            ],
+            stream: false,
+          }),
+        });
+        if (response.ok) {
+          const data = await response.json() as { message: { content: string } };
+          challengeTitles = data.message.content
+            .split("\n")
+            .map((l: string) => l.trim().replace(/^[-•*]\s*/, ""))
+            .filter((l: string) => l.length > 5)
+            .slice(0, 3);
+        }
+      } catch {}
+    }
+
+    // Fallback challenges if AI unavailable
+    if (challengeTitles.length < 3) {
+      const fallbacks = [
+        "Proposer un dessert à chaque table — vendre au moins 3 desserts",
+        "Obtenir 2 compliments spontanés de clients",
+        "Mémoriser et réciter la composition de 5 plats sans consulter la carte",
+      ];
+      while (challengeTitles.length < 3) challengeTitles.push(fallbacks[challengeTitles.length]);
+    }
+
+    // Create one challenge per server per title
+    const dueDate = tomorrow;
+    const createData = servers.flatMap((server) =>
+      challengeTitles.map((title) => ({
+        id: require("crypto").randomUUID(),
+        serverId: server.id,
+        title,
+        isGlobal: true,
+        restaurantId: me.restaurantId,
+        dueDate,
+        done: false,
+        createdAt: new Date(),
+      }))
+    );
+    await prisma.serverChallenge.createMany({ data: createData });
+
+    // Return this server's challenges
+    const myChallenges = createData.filter((c) => c.serverId === me.serverId);
+    return { challenges: myChallenges, alreadyGenerated: false };
   });
 
   // ── IA Planning Suggestion (PRO_IA only) ──────────────────────────────────

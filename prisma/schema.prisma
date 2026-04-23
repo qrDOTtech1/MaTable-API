@@ -270,15 +270,18 @@ model ServerNote {
 }
 
 model ServerChallenge {
-  id        String   @id @default(uuid())
-  server    Server   @relation(fields: [serverId], references: [id], onDelete: Cascade)
-  serverId  String
-  title     String
-  done      Boolean  @default(false)
-  dueDate   DateTime?
-  createdAt DateTime @default(now())
+  id           String   @id @default(uuid())
+  server       Server   @relation(fields: [serverId], references: [id], onDelete: Cascade)
+  serverId     String
+  title        String
+  done         Boolean  @default(false)
+  dueDate      DateTime?
+  isGlobal     Boolean  @default(false)  // true = AI-generated restaurant-wide daily challenge
+  restaurantId String?                   // set for global challenges
+  createdAt    DateTime @default(now())
 
   @@index([serverId])
+  @@index([restaurantId, isGlobal, dueDate])
 }
 
 model ServerSchedule {
