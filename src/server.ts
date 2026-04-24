@@ -5,6 +5,7 @@ import jwt from "@fastify/jwt";
 import multipart from "@fastify/multipart";
 import rateLimit from "@fastify/rate-limit";
 import compress from "@fastify/compress";
+import { randomUUID } from "crypto";
 import { env } from "./env.js";
 import { prisma } from "./db.js";
 import { initRealtime } from "./realtime.js";
@@ -18,7 +19,17 @@ import { socialRoutes } from "./routes/social.js";
 
 async function build() {
   const app = Fastify({
-    logger: { transport: env.NODE_ENV === "development" ? { target: "pino-pretty" } : undefined },
+    // Reuse X-Request-Id from client if present, else generate UUID
+    genReqId: (req) => (req.headers["x-request-id"] as string) || randomUUID(),
+    logger: {
+      transport: env.NODE_ENV === "development" ? { target: "pino-pretty" } : undefined,
+      // In production, pino emits structured JSON — each log line includes reqId automatically
+    },
+  });
+
+  // Propagate correlation ID back to the caller
+  app.addHook("onSend", async (req, reply) => {
+    reply.header("X-Request-Id", req.id);
   });
 
   app.addContentTypeParser(
@@ -35,8 +46,20 @@ async function build() {
     }
   );
 
+  const allowedOrigins = new Set([
+    env.PUBLIC_WEB_URL,
+    "http://localhost:3000",
+    "http://localhost:3001",
+    "http://localhost:3002",
+    "http://localhost:3003",
+    ...(env.EXTRA_ALLOWED_ORIGINS?.split(",").map((o) => o.trim()).filter(Boolean) ?? []),
+  ]);
   await app.register(cors, {
-    origin: true,
+    origin: (origin, cb) => {
+      // Allow requests with no origin (mobile apps, server-to-server, curl)
+      if (!origin || allowedOrigins.has(origin)) return cb(null, true);
+      cb(new Error("CORS: origin not allowed"), false);
+    },
     credentials: true,
     methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allowedHeaders: ["Content-Type", "Authorization"],

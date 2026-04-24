@@ -24,7 +24,9 @@ export async function proRoutes(app: FastifyInstance) {
   // ---------------------------------------------------------------------------
   // Auth
   // ---------------------------------------------------------------------------
-  app.post("/register", async (req, reply) => {
+  const authRateLimit = { config: { rateLimit: { max: 10, timeWindow: "1 minute" } } };
+
+  app.post("/register", authRateLimit, async (req, reply) => {
     const { email, password, restaurantName } = z.object({
       email: z.string().email(),
       password: z.string().min(6),
@@ -44,7 +46,7 @@ export async function proRoutes(app: FastifyInstance) {
     return { ok: true, restaurantId: restaurant.id, slug };
   });
 
-  app.post("/login", async (req, reply) => {
+  app.post("/login", authRateLimit, async (req, reply) => {
     const { email, password } = z.object({
       email: z.string().email(),
       password: z.string().min(6),

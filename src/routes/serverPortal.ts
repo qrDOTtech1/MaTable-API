@@ -162,8 +162,10 @@ async function requireServer(req: any, reply: any): Promise<ServerJwtPayload> {
 }
 
 export async function serverPortalRoutes(app: FastifyInstance) {
+  const authRateLimit = { config: { rateLimit: { max: 10, timeWindow: "1 minute" } } };
+
   // ── POST /api/server/login ─────────────────────────────────────────────────
-  app.post("/login", async (req, reply) => {
+  app.post("/login", authRateLimit, async (req, reply) => {
     const { slug, pin } = z.object({
       slug: z.string(),
       pin: z.string().min(4).max(6),
