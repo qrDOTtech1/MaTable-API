@@ -49,12 +49,19 @@ export async function caissePortalRoutes(app: FastifyInstance) {
 
     const restaurant = await prisma.restaurant.findUnique({
       where: { slug },
-      select: { id: true, name: true, caissePin: true } as any,
+      select: { id: true, name: true },
     });
 
     if (!restaurant) return reply.code(404).send({ error: "RESTAURANT_NOT_FOUND" });
-    if (!(restaurant as any).caissePin) return reply.code(503).send({ error: "CAISSE_NOT_CONFIGURED", message: "PIN caisse non configuré. Contactez le gérant." });
-    if ((restaurant as any).caissePin !== pin) return reply.code(401).send({ error: "INVALID_PIN" });
+
+    // caissePin is added via ensure_columns.sql — not yet in generated Prisma client
+    const rows = await prisma.$queryRaw<Array<{ caissePin: string | null }>>`
+      SELECT "caissePin" FROM "Restaurant" WHERE id = ${restaurant.id}
+    `;
+    const storedPin = rows[0]?.caissePin ?? null;
+
+    if (!storedPin) return reply.code(503).send({ error: "CAISSE_NOT_CONFIGURED", message: "PIN caisse non configuré. Contactez le gérant." });
+    if (storedPin !== pin) return reply.code(401).send({ error: "INVALID_PIN" });
 
     const token = signCaisseToken({ restaurantId: restaurant.id, role: "caisse" });
     return { token, restaurant: { id: restaurant.id, name: restaurant.name } };
