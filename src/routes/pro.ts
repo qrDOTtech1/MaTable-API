@@ -46,18 +46,24 @@ export async function proRoutes(app: FastifyInstance) {
     return { ok: true, restaurantId: restaurant.id, slug };
   });
 
-  app.post("/login", authRateLimit, async (req, reply) => {
+   app.post("/login", authRateLimit, async (req, reply) => {
     const { email, password } = z.object({
       email: z.string().email(),
       password: z.string().min(6),
     }).parse(req.body);
     
     const user = await prisma.user.findUnique({ where: { email } });
-    if (!user || !user.passwordHash || !user.restaurantId) {
+    if (!user || !user.restaurantId) {
       return reply.code(401).send({ error: "invalid_credentials" });
     }
 
-    const matches = await bcrypt.compare(password, user.passwordHash);
+    // Support both passwordHash (pro register) and password (RSMATABLE register)
+    const hash = user.passwordHash ?? (user as any).password;
+    if (!hash) {
+      return reply.code(401).send({ error: "invalid_credentials" });
+    }
+
+    const matches = await bcrypt.compare(password, hash);
     if (!matches) {
       return reply.code(401).send({ error: "invalid_credentials" });
     }
