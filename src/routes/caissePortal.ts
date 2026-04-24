@@ -72,7 +72,6 @@ export async function caissePortalRoutes(app: FastifyInstance) {
         server: { select: { id: true, name: true } },
         orders: {
           where: { status: { in: ["PENDING", "COOKING", "SERVED"] } },
-          include: { items: true },
           orderBy: { createdAt: "desc" },
         },
       },
@@ -81,8 +80,8 @@ export async function caissePortalRoutes(app: FastifyInstance) {
 
     // Compute totals
     const enriched = sessions.map((s) => {
-      const totalCents = s.orders.reduce((sum, o) => sum + o.totalCents, 0);
-      const hasUnserved = s.orders.some(o => o.status !== "SERVED");
+      const totalCents = (s.orders as any[]).reduce((sum: number, o: any) => sum + o.totalCents, 0);
+      const hasUnserved = (s.orders as any[]).some((o: any) => o.status !== "SERVED");
       return { ...s, totalCents, hasUnserved };
     });
 
