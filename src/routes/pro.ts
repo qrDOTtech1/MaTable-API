@@ -50,16 +50,13 @@ export async function proRoutes(app: FastifyInstance) {
       password: z.string().min(6),
     }).parse(req.body);
     
-    console.log("[login] attempt for email:", email);
     const user = await prisma.user.findUnique({ where: { email } });
     if (!user || !user.passwordHash || !user.restaurantId) {
-      console.log("[login] user not found / no password / no restaurant:", email);
       return reply.code(401).send({ error: "invalid_credentials" });
     }
 
     const matches = await bcrypt.compare(password, user.passwordHash);
     if (!matches) {
-      console.log("[login] password mismatch for:", email);
       return reply.code(401).send({ error: "invalid_credentials" });
     }
 
@@ -67,7 +64,6 @@ export async function proRoutes(app: FastifyInstance) {
       { kind: "pro", userId: user.id, restaurantId: user.restaurantId },
       { expiresIn: "7d" }
     );
-    console.log("[login] success for:", email);
     return { ok: true, token, restaurantId: user.restaurantId };
   });
 
@@ -745,33 +741,41 @@ export async function proRoutes(app: FastifyInstance) {
       orderBy: { position: "desc" },
       select: { position: true },
     });
-    let nextPos = (lastPosQ?.position ?? -1) + 1;
+    const basePos = (lastPosQ?.position ?? -1) + 1;
 
+    type FileEntry = { mimetype: string; buf: Buffer; filename: string };
+    const entries: FileEntry[] = [];
     for await (const part of parts) {
       if (part.type !== "file") continue;
       if (typeof part.mimetype !== "string" || !part.mimetype.startsWith("image/")) continue;
       const buf: Buffer = await part.toBuffer();
-      if (!buf.length || buf.length > 8 * 1024 * 1024) continue; // cap 8 MB
-      const sha256 = crypto.createHash("sha256").update(buf).digest("hex");
-      const photo = await prisma.photo.create({
-        data: {
-          restaurantId: me.restaurantId,
-          menuItemId: q.menuItemId ?? null,
-          kind,
-          mimeType: part.mimetype,
-          bytes: buf,
-          size: buf.length,
-          originalName: part.filename,
-          sha256,
-          position: nextPos++,
-        },
-        select: { id: true, kind: true, menuItemId: true, mimeType: true, size: true, position: true },
-      });
-      created.push({ ...photo, path: `/api/photo/${photo.id}` });
+      if (!buf.length || buf.length > 8 * 1024 * 1024) continue;
+      entries.push({ mimetype: part.mimetype, buf, filename: part.filename });
     }
 
-    if (created.length === 0) return reply.code(400).send({ error: "no_valid_image_uploaded" });
-    return { photos: created };
+    if (entries.length === 0) return reply.code(400).send({ error: "no_valid_image_uploaded" });
+
+    const photos = await Promise.all(
+      entries.map((e, i) => {
+        const sha256 = crypto.createHash("sha256").update(e.buf).digest("hex");
+        return prisma.photo.create({
+          data: {
+            restaurantId: me.restaurantId,
+            menuItemId: q.menuItemId ?? null,
+            kind,
+            mimeType: e.mimetype,
+            bytes: e.buf,
+            size: e.buf.length,
+            originalName: e.filename,
+            sha256,
+            position: basePos + i,
+          },
+          select: { id: true, kind: true, menuItemId: true, mimeType: true, size: true, position: true },
+        });
+      })
+    );
+
+    return { photos: photos.map((p) => ({ ...p, path: `/api/photo/${p.id}` })) };
   });
 
   app.delete("/photos/:id", async (req, reply) => {

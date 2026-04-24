@@ -4,13 +4,16 @@ import cookie from "@fastify/cookie";
 import jwt from "@fastify/jwt";
 import multipart from "@fastify/multipart";
 import rateLimit from "@fastify/rate-limit";
+import compress from "@fastify/compress";
 import { env } from "./env.js";
+import { prisma } from "./db.js";
 import { initRealtime } from "./realtime.js";
 import { publicRoutes } from "./routes/public.js";
 import { proRoutes } from "./routes/pro.js";
 import { stripeRoutes } from "./routes/stripe.js";
 import { aiRoutes } from "./routes/ai.js";
 import { serverPortalRoutes } from "./routes/serverPortal.js";
+import { caissePortalRoutes } from "./routes/caissePortal.js";
 import { socialRoutes } from "./routes/social.js";
 
 async function build() {
@@ -47,15 +50,21 @@ async function build() {
     },
   });
   await app.register(jwt, { secret: env.JWT_SECRET });
+  await app.register(compress, { global: true });
   await app.register(rateLimit, { max: 120, timeWindow: "1 minute" });
 
-  app.get("/health", async () => ({ ok: true }));
+  app.get("/health", async () => {
+    const t0 = Date.now();
+    await prisma.$queryRaw`SELECT 1`;
+    return { ok: true, dbLatencyMs: Date.now() - t0, uptime: Math.floor(process.uptime()), memMb: Math.round(process.memoryUsage().rss / 1048576) };
+  });
 
   await app.register(publicRoutes, { prefix: "/api" });
   await app.register(proRoutes, { prefix: "/api/pro" });
   await app.register(stripeRoutes, { prefix: "/api/stripe" });
   await app.register(aiRoutes, { prefix: "/api/pro" });
   await app.register(serverPortalRoutes, { prefix: "/api/server" });
+  await app.register(caissePortalRoutes, { prefix: "/api/caisse" });
   await app.register(socialRoutes, { prefix: "/api" });
 
   return app;
