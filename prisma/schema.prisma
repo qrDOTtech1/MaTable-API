@@ -40,10 +40,11 @@ model Restaurant {
   // NovaTech IA Subscription
   subscription            SubscriptionPlan @default(STARTER)
   ollamaApiKey            String?
-  ollamaLangModel         String?  @default("gpt-oss:120b")
-  ollamaVisionModel       String?  @default("llama3.2-vision:11b")
+  ollamaLangModel         String?  @default("gpt-4o-mini")
+  ollamaVisionModel       String?  @default("gpt-4o")
   subscriptionStartedAt   DateTime?
   subscriptionExpiresAt   DateTime?
+  caissePin               String?  // PIN 4-8 chiffres pour l'accès caisse
    
   createdAt               DateTime @default(now())
   updatedAt               DateTime @default(now()) @updatedAt

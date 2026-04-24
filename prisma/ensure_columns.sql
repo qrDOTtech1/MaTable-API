@@ -5,9 +5,10 @@
 ALTER TABLE "Table" ADD COLUMN IF NOT EXISTS zone TEXT;
 ALTER TABLE "Table" ADD COLUMN IF NOT EXISTS "assignedServerId" TEXT;
 
--- Restaurant: coverImageId, logoId (in case previous push failed)
+-- Restaurant: coverImageId, logoId, caissePin, updated model defaults
 ALTER TABLE "Restaurant" ADD COLUMN IF NOT EXISTS "coverImageId" TEXT;
 ALTER TABLE "Restaurant" ADD COLUMN IF NOT EXISTS "logoId" TEXT;
+ALTER TABLE "Restaurant" ADD COLUMN IF NOT EXISTS "caissePin" TEXT;
 
 -- User: shadow columns owned by RSMATABLE
 ALTER TABLE "User" ADD COLUMN IF NOT EXISTS "name" TEXT;
