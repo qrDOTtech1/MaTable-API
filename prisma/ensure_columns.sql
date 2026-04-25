@@ -51,6 +51,12 @@ CREATE INDEX IF NOT EXISTS "TableSession_customerEmail_idx" ON "TableSession"("c
 ALTER TABLE "TableSession" ADD COLUMN IF NOT EXISTS "billConfirmedAt" TIMESTAMP(3);
 ALTER TABLE "TableSession" ADD COLUMN IF NOT EXISTS "billConfirmedBy" TEXT;
 
+-- MenuItem: wait time in minutes (0 = instant)
+ALTER TABLE "MenuItem" ADD COLUMN IF NOT EXISTS "waitMinutes" INTEGER NOT NULL DEFAULT 0;
+
+-- Order: expected ready time (computed at order creation)
+ALTER TABLE "Order" ADD COLUMN IF NOT EXISTS "expectedReadyAt" TIMESTAMP(3);
+
 -- ServerChallenge: global AI challenges
 ALTER TABLE "ServerChallenge" ADD COLUMN IF NOT EXISTS "isGlobal" BOOLEAN NOT NULL DEFAULT false;
 ALTER TABLE "ServerChallenge" ADD COLUMN IF NOT EXISTS "restaurantId" TEXT;

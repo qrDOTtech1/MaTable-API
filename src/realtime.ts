@@ -6,7 +6,7 @@ let io: SocketServer | null = null;
 
 export function initRealtime(app: FastifyInstance) {
   io = new SocketServer(app.server, {
-    cors: { origin: env.PUBLIC_WEB_URL, credentials: true },
+    cors: { origin: true, credentials: true },
   });
 
   io.on("connection", (socket) => {

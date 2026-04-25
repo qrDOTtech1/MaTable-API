@@ -13,7 +13,7 @@ import { z } from "zod";
 import { prisma } from "../db.js";
 import { env } from "../env.js";
 import jwt from "jsonwebtoken";
-import { emitToRestaurant } from "../realtime.js";
+import { emitToRestaurant, emitToSession } from "../realtime.js";
 
 type CuisineJwt = { restaurantId: string; role: "cuisine" };
 
@@ -115,11 +115,15 @@ export async function cuisinePortalRoutes(app: FastifyInstance) {
 
     const order = await prisma.order.findFirst({
       where: { id, table: { restaurantId: me.restaurantId }, status: "PENDING" },
+      include: { table: { select: { number: true } } },
     });
     if (!order) return reply.code(404).send({ error: "ORDER_NOT_FOUND" });
 
     await prisma.order.update({ where: { id }, data: { status: "COOKING" } });
-    emitToRestaurant(me.restaurantId, "order:updated", { orderId: id, status: "COOKING" });
+
+    const payload = { id, status: "COOKING", tableNumber: order.table.number };
+    emitToRestaurant(me.restaurantId, "order:updated", payload);
+    if (order.sessionId) emitToSession(order.sessionId, "order:updated", payload);
 
     return { ok: true };
   });
@@ -131,12 +135,35 @@ export async function cuisinePortalRoutes(app: FastifyInstance) {
 
     const order = await prisma.order.findFirst({
       where: { id, table: { restaurantId: me.restaurantId }, status: "COOKING" },
+      include: { table: { select: { number: true } } },
     });
     if (!order) return reply.code(404).send({ error: "ORDER_NOT_FOUND" });
 
     await prisma.order.update({ where: { id }, data: { status: "SERVED" } });
-    emitToRestaurant(me.restaurantId, "order:updated", { orderId: id, status: "SERVED" });
 
+    const payload = { id, status: "SERVED", tableNumber: order.table.number };
+    emitToRestaurant(me.restaurantId, "order:updated", payload);
+    if (order.sessionId) emitToSession(order.sessionId, "order:updated", payload);
+
+    return { ok: true };
+  });
+
+  // ── POST /api/cuisine/orders/:id/overdue — client signals timer expired ────
+  app.post("/orders/:id/overdue", async (req, reply) => {
+    const { id } = req.params as { id: string };
+
+    // Find order to get restaurantId (no auth — called from client page)
+    const order = await prisma.order.findUnique({
+      where: { id },
+      include: { table: { select: { number: true, restaurantId: true } } },
+    });
+    if (!order || order.status === "SERVED" || order.status === "PAID") return { ok: true };
+
+    emitToRestaurant(order.table.restaurantId, "order:overdue", {
+      id,
+      tableNumber: order.table.number,
+      status: order.status,
+    });
     return { ok: true };
   });
 }

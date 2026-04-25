@@ -459,7 +459,18 @@ export async function proRoutes(app: FastifyInstance) {
       orderBy: [{ category: "asc" }, { position: "asc" }, { name: "asc" }],
       include: { modifierGroups: { include: { options: true }, orderBy: { position: "asc" } } },
     });
-    return { items };
+    // Attach waitMinutes from raw (column added via ensure_columns.sql)
+    const ids = items.map((i) => i.id);
+    type WaitRow = { id: string; waitMinutes: number };
+    let waitRows: WaitRow[] = [];
+    if (ids.length > 0) {
+      waitRows = await prisma.$queryRaw<WaitRow[]>`
+        SELECT id, COALESCE("waitMinutes", 0)::int AS "waitMinutes"
+        FROM "MenuItem" WHERE id = ANY(${ids}::text[])
+      `;
+    }
+    const waitMap = new Map(waitRows.map((r) => [r.id, r.waitMinutes]));
+    return { items: items.map((i) => ({ ...i, waitMinutes: waitMap.get(i.id) ?? 0 })) };
   });
 
   const menuInput = z.object({
@@ -474,24 +485,33 @@ export async function proRoutes(app: FastifyInstance) {
     stockEnabled: z.boolean().optional(),
     stockQty: z.number().int().min(0).optional().nullable(),
     lowStockThreshold: z.number().int().min(0).optional().nullable(),
+    waitMinutes: z.number().int().min(0).max(180).optional(),
     position: z.number().int().optional(),
   });
 
   app.post("/menu", async (req, reply) => {
     const me = await requirePro(req, reply);
-    const data = menuInput.parse(req.body);
+    const { waitMinutes, ...data } = menuInput.parse(req.body);
     const item = await prisma.menuItem.create({
       data: { ...data, imageUrl: data.imageUrl || null, restaurantId: me.restaurantId } as any,
     });
-    return { item };
+    // waitMinutes is managed via ensure_columns.sql (not in Prisma schema)
+    if (waitMinutes !== undefined) {
+      await prisma.$executeRaw`UPDATE "MenuItem" SET "waitMinutes" = ${waitMinutes} WHERE id = ${item.id}`;
+    }
+    return { item: { ...item, waitMinutes: waitMinutes ?? 0 } };
   });
 
   app.patch("/menu/:id", async (req, reply) => {
     const me = await requirePro(req, reply);
     const { id } = req.params as { id: string };
-    const data = menuInput.partial().parse(req.body);
+    const { waitMinutes, ...data } = menuInput.partial().parse(req.body);
     if (data.imageUrl === "") (data as any).imageUrl = null;
     await prisma.menuItem.updateMany({ where: { id, restaurantId: me.restaurantId }, data: data as any });
+    // waitMinutes is managed via ensure_columns.sql
+    if (waitMinutes !== undefined) {
+      await prisma.$executeRaw`UPDATE "MenuItem" SET "waitMinutes" = ${waitMinutes} WHERE id = ${id}`;
+    }
     return { ok: true };
   });
 

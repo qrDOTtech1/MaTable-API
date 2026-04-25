@@ -95,7 +95,19 @@ export async function publicRoutes(app: FastifyInstance) {
         serviceCallEnabled: (table.restaurant as any).serviceCallEnabled ?? false,
         openingHours: table.restaurant.openingHours,
       },
-      menu: table.restaurant.menuItems,
+      menu: await (async () => {
+        const ids = table.restaurant.menuItems.map((m) => m.id);
+        type WR = { id: string; waitMinutes: number };
+        let wr: WR[] = [];
+        if (ids.length > 0) {
+          wr = await prisma.$queryRaw<WR[]>`
+            SELECT id, COALESCE("waitMinutes", 0)::int AS "waitMinutes"
+            FROM "MenuItem" WHERE id = ANY(${ids}::text[])
+          `;
+        }
+        const wm = new Map(wr.map((r) => [r.id, r.waitMinutes]));
+        return table.restaurant.menuItems.map((m) => ({ ...m, waitMinutes: wm.get(m.id) ?? 0 }));
+      })(),
       server: server ? { id: server.id, name: server.name, photoUrl: server.photoUrl } : null,
     };
   });
@@ -313,6 +325,21 @@ export async function publicRoutes(app: FastifyInstance) {
     });
     const totalCents = lines.reduce((s, l) => s + l.priceCents * l.quantity, 0);
 
+    // Compute expectedReadyAt: now + max(waitMinutes) across ordered items
+    // waitMinutes is added via ensure_columns.sql, use raw query to read it
+    const menuItemIds = body.items.map((i) => i.menuItemId);
+    type WaitRow = { id: string; waitMinutes: number };
+    let waitRows: WaitRow[] = [];
+    if (menuItemIds.length > 0) {
+      waitRows = await prisma.$queryRaw<WaitRow[]>`
+        SELECT id, COALESCE("waitMinutes", 0)::int AS "waitMinutes"
+        FROM "MenuItem" WHERE id = ANY(${menuItemIds}::text[])
+      `;
+    }
+    const waitMap = new Map(waitRows.map((r) => [r.id, r.waitMinutes]));
+    const maxWait = Math.max(0, ...body.items.map((i) => waitMap.get(i.menuItemId) ?? 0));
+    const expectedReadyAt = maxWait > 0 ? new Date(Date.now() + maxWait * 60_000) : null;
+
     const order = await prisma.order.create({
       data: {
         tableId: decoded.tableId,
@@ -323,6 +350,13 @@ export async function publicRoutes(app: FastifyInstance) {
       include: { table: true },
     });
 
+    // Store expectedReadyAt via raw (column added by ensure_columns.sql)
+    if (expectedReadyAt) {
+      await prisma.$executeRaw`
+        UPDATE "Order" SET "expectedReadyAt" = ${expectedReadyAt} WHERE id = ${order.id}
+      `;
+    }
+
     emitToRestaurant(decoded.restaurantId, "order:new", {
       id: order.id,
       tableId: order.tableId,
@@ -331,9 +365,10 @@ export async function publicRoutes(app: FastifyInstance) {
       totalCents,
       createdAt: order.createdAt,
       status: order.status,
+      expectedReadyAt,
     });
 
-    return { orderId: order.id, totalCents };
+    return { orderId: order.id, totalCents, expectedReadyAt };
   });
 
   app.get("/orders/mine", async (req, reply) => {
@@ -342,7 +377,24 @@ export async function publicRoutes(app: FastifyInstance) {
       where: { sessionId: decoded.sessionId },
       orderBy: { createdAt: "desc" },
     });
-    return { orders };
+
+    // Attach expectedReadyAt from raw (column added by ensure_columns.sql)
+    const ids = orders.map((o) => o.id);
+    type EtaRow = { id: string; expectedReadyAt: Date | null };
+    let etaRows: EtaRow[] = [];
+    if (ids.length > 0) {
+      etaRows = await prisma.$queryRaw<EtaRow[]>`
+        SELECT id, "expectedReadyAt" FROM "Order" WHERE id = ANY(${ids}::text[])
+      `;
+    }
+    const etaMap = new Map(etaRows.map((r) => [r.id, r.expectedReadyAt]));
+
+    return {
+      orders: orders.map((o) => ({
+        ...o,
+        expectedReadyAt: etaMap.get(o.id) ?? null,
+      })),
+    };
   });
 
   app.post("/bill/request", async (req, reply) => {
