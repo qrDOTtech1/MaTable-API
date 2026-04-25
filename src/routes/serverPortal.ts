@@ -10,6 +10,7 @@ import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { prisma } from "../db.js";
 import { env } from "../env.js";
+import { emitToRestaurant } from "../realtime.js";
 import jwt from "jsonwebtoken";
 
 type ServerJwtPayload = { serverId: string; restaurantId: string };
@@ -251,12 +252,39 @@ export async function serverPortalRoutes(app: FastifyInstance) {
           where: { status: { in: ["PENDING", "COOKING", "SERVED"] } },
           orderBy: { createdAt: "desc" },
         },
+        server: { select: { id: true, name: true } },
       },
       orderBy: { createdAt: "asc" },
     });
 
+    // Attach bill fields via raw query (added via ensure_columns.sql)
+    type BillRow = {
+      id: string;
+      billPaymentMode: string | null;
+      billRequestedAt: Date | null;
+      billConfirmedAt: Date | null;
+      billConfirmedBy: string | null;
+    };
+    const sessionIds = allSessions.map((s) => s.id);
+    let billRows: BillRow[] = [];
+    if (sessionIds.length > 0) {
+      billRows = await prisma.$queryRaw<BillRow[]>`
+        SELECT id, "billPaymentMode", "billRequestedAt", "billConfirmedAt", "billConfirmedBy"
+        FROM "TableSession"
+        WHERE id = ANY(${sessionIds}::text[])
+      `;
+    }
+    const billMap = new Map(billRows.map((r) => [r.id, r]));
+    const allSessionsWithBill = allSessions.map((s) => ({
+      ...s,
+      billPaymentMode: billMap.get(s.id)?.billPaymentMode ?? null,
+      billRequestedAt: billMap.get(s.id)?.billRequestedAt ?? null,
+      billConfirmedAt: billMap.get(s.id)?.billConfirmedAt ?? null,
+      billConfirmedBy: billMap.get(s.id)?.billConfirmedBy ?? null,
+    }));
+
     // Sort: mine first, unassigned second, others last
-    const sessions = allSessions.sort((a, b) => {
+    const sessions = allSessionsWithBill.sort((a, b) => {
       const aMine = a.serverId === me.serverId ? 0 : a.serverId === null ? 1 : 2;
       const bMine = b.serverId === me.serverId ? 0 : b.serverId === null ? 1 : 2;
       return aMine - bMine;
@@ -300,6 +328,40 @@ export async function serverPortalRoutes(app: FastifyInstance) {
       data: { serverId: me.serverId },
     });
     return { ok: true, session: updated };
+  });
+
+  // ── POST /api/server/tables/:sessionId/bill-confirm ─────────────────────────
+  // Server confirms they've brought the bill/TPE to the table
+  app.post("/tables/:sessionId/bill-confirm", async (req, reply) => {
+    const me = await requireServer(req, reply);
+    const { sessionId } = req.params as { sessionId: string };
+
+    const server = await prisma.server.findUnique({
+      where: { id: me.serverId },
+      select: { name: true },
+    });
+    if (!server) return reply.code(404).send({ error: "SERVER_NOT_FOUND" });
+
+    const session = await prisma.tableSession.findFirst({
+      where: { id: sessionId, table: { restaurantId: me.restaurantId }, active: true },
+      include: { table: { select: { number: true } } },
+    });
+    if (!session) return reply.code(404).send({ error: "SESSION_NOT_FOUND" });
+
+    await prisma.$executeRaw`
+      UPDATE "TableSession"
+      SET "billConfirmedAt" = ${new Date()}, "billConfirmedBy" = ${server.name}
+      WHERE id = ${sessionId}
+    `;
+
+    // Emit to caisse + all connected staff
+    emitToRestaurant(me.restaurantId, "bill:confirmed", {
+      sessionId,
+      tableNumber: session.table.number,
+      serverName: server.name,
+    });
+
+    return { ok: true, serverName: server.name };
   });
 
   // ── GET /api/server/stats ──────────────────────────────────────────────────

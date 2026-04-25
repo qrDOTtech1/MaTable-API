@@ -47,6 +47,10 @@ ALTER TABLE "TableSession" ADD COLUMN IF NOT EXISTS "customerEmail" TEXT;
 ALTER TABLE "TableSession" ADD COLUMN IF NOT EXISTS "tipCents" INTEGER NOT NULL DEFAULT 0;
 CREATE INDEX IF NOT EXISTS "TableSession_customerEmail_idx" ON "TableSession"("customerEmail");
 
+-- TableSession: bill confirmation by server
+ALTER TABLE "TableSession" ADD COLUMN IF NOT EXISTS "billConfirmedAt" TIMESTAMP(3);
+ALTER TABLE "TableSession" ADD COLUMN IF NOT EXISTS "billConfirmedBy" TEXT;
+
 -- ServerChallenge: global AI challenges
 ALTER TABLE "ServerChallenge" ADD COLUMN IF NOT EXISTS "isGlobal" BOOLEAN NOT NULL DEFAULT false;
 ALTER TABLE "ServerChallenge" ADD COLUMN IF NOT EXISTS "restaurantId" TEXT;

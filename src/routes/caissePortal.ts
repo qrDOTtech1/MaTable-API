@@ -85,11 +85,43 @@ export async function caissePortalRoutes(app: FastifyInstance) {
       orderBy: { createdAt: "asc" },
     });
 
+    // Fetch bill fields (added via ensure_columns.sql)
+    type BillRow = {
+      id: string;
+      billPaymentMode: string | null;
+      billRequestedAt: Date | null;
+      billConfirmedAt: Date | null;
+      billConfirmedBy: string | null;
+      tipCents: number;
+    };
+    const sessionIds = sessions.map((s) => s.id);
+    let billRows: BillRow[] = [];
+    if (sessionIds.length > 0) {
+      billRows = await prisma.$queryRaw<BillRow[]>`
+        SELECT id, "billPaymentMode", "billRequestedAt", "billConfirmedAt", "billConfirmedBy", "tipCents"
+        FROM "TableSession"
+        WHERE id = ANY(${sessionIds}::text[])
+      `;
+    }
+    const billMap = new Map(billRows.map((r) => [r.id, r]));
+
     // Compute totals
     const enriched = sessions.map((s) => {
-      const totalCents = (s.orders as any[]).reduce((sum: number, o: any) => sum + o.totalCents, 0);
+      const subtotalCents = (s.orders as any[]).reduce((sum: number, o: any) => sum + o.totalCents, 0);
+      const tipCents = billMap.get(s.id)?.tipCents ?? 0;
+      const totalCents = subtotalCents + tipCents;
       const hasUnserved = (s.orders as any[]).some((o: any) => o.status !== "SERVED");
-      return { ...s, totalCents, hasUnserved };
+      return {
+        ...s,
+        subtotalCents,
+        tipCents,
+        totalCents,
+        hasUnserved,
+        billPaymentMode: billMap.get(s.id)?.billPaymentMode ?? null,
+        billRequestedAt: billMap.get(s.id)?.billRequestedAt ?? null,
+        billConfirmedAt: billMap.get(s.id)?.billConfirmedAt ?? null,
+        billConfirmedBy: billMap.get(s.id)?.billConfirmedBy ?? null,
+      };
     });
 
     return { sessions: enriched };
