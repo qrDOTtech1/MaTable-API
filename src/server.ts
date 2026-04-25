@@ -47,20 +47,9 @@ async function build() {
     }
   );
 
-  const allowedOrigins = new Set([
-    env.PUBLIC_WEB_URL,
-    "http://localhost:3000",
-    "http://localhost:3001",
-    "http://localhost:3002",
-    "http://localhost:3003",
-    ...(env.EXTRA_ALLOWED_ORIGINS?.split(",").map((o) => o.trim()).filter(Boolean) ?? []),
-  ]);
   await app.register(cors, {
-    origin: (origin, cb) => {
-      // Allow requests with no origin (mobile apps, server-to-server, curl)
-      if (!origin || allowedOrigins.has(origin)) return cb(null, true);
-      cb(new Error("CORS: origin not allowed"), false);
-    },
+    // Reflect the request origin — JWT auth is the security layer, not CORS origin-checking
+    origin: true,
     credentials: true,
     methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allowedHeaders: ["Content-Type", "Authorization"],
