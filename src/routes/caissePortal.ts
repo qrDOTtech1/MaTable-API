@@ -93,12 +93,15 @@ export async function caissePortalRoutes(app: FastifyInstance) {
       billConfirmedAt: Date | null;
       billConfirmedBy: string | null;
       tipCents: number;
+      billSplits: any;
     };
     const sessionIds = sessions.map((s) => s.id);
     let billRows: BillRow[] = [];
     if (sessionIds.length > 0) {
       billRows = await prisma.$queryRaw<BillRow[]>`
-        SELECT id, "billPaymentMode", "billRequestedAt", "billConfirmedAt", "billConfirmedBy", "tipCents"
+        SELECT id, "billPaymentMode", "billRequestedAt", "billConfirmedAt", "billConfirmedBy",
+               COALESCE("tipCents", 0) AS "tipCents",
+               COALESCE("billSplits", '[]'::jsonb) AS "billSplits"
         FROM "TableSession"
         WHERE id = ANY(${sessionIds}::text[])
       `;
@@ -121,6 +124,7 @@ export async function caissePortalRoutes(app: FastifyInstance) {
         billRequestedAt: billMap.get(s.id)?.billRequestedAt ?? null,
         billConfirmedAt: billMap.get(s.id)?.billConfirmedAt ?? null,
         billConfirmedBy: billMap.get(s.id)?.billConfirmedBy ?? null,
+        billSplits: Array.isArray(billMap.get(s.id)?.billSplits) ? billMap.get(s.id)!.billSplits : [],
       };
     });
 

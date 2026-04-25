@@ -257,31 +257,45 @@ export async function serverPortalRoutes(app: FastifyInstance) {
       orderBy: { createdAt: "asc" },
     });
 
-    // Attach bill fields via raw query (added via ensure_columns.sql)
+    // Attach bill + split fields via raw query (added via ensure_columns.sql)
     type BillRow = {
       id: string;
       billPaymentMode: string | null;
       billRequestedAt: Date | null;
       billConfirmedAt: Date | null;
       billConfirmedBy: string | null;
+      billSplits: any;
+      tipCents: number;
     };
     const sessionIds = allSessions.map((s) => s.id);
     let billRows: BillRow[] = [];
     if (sessionIds.length > 0) {
       billRows = await prisma.$queryRaw<BillRow[]>`
-        SELECT id, "billPaymentMode", "billRequestedAt", "billConfirmedAt", "billConfirmedBy"
+        SELECT id, "billPaymentMode", "billRequestedAt", "billConfirmedAt", "billConfirmedBy",
+               COALESCE("billSplits", '[]'::jsonb) AS "billSplits",
+               COALESCE("tipCents", 0) AS "tipCents"
         FROM "TableSession"
         WHERE id = ANY(${sessionIds}::text[])
       `;
     }
     const billMap = new Map(billRows.map((r) => [r.id, r]));
-    const allSessionsWithBill = allSessions.map((s) => ({
-      ...s,
-      billPaymentMode: billMap.get(s.id)?.billPaymentMode ?? null,
-      billRequestedAt: billMap.get(s.id)?.billRequestedAt ?? null,
-      billConfirmedAt: billMap.get(s.id)?.billConfirmedAt ?? null,
-      billConfirmedBy: billMap.get(s.id)?.billConfirmedBy ?? null,
-    }));
+    const allSessionsWithBill = allSessions.map((s) => {
+      const b = billMap.get(s.id);
+      const orders = s.orders as any[];
+      const subtotalCents = orders.reduce((sum: number, o: any) => sum + o.totalCents, 0);
+      const tipCents = b?.tipCents ?? 0;
+      return {
+        ...s,
+        subtotalCents,
+        tipCents,
+        totalCents: subtotalCents + tipCents,
+        billPaymentMode: b?.billPaymentMode ?? null,
+        billRequestedAt: b?.billRequestedAt ?? null,
+        billConfirmedAt: b?.billConfirmedAt ?? null,
+        billConfirmedBy: b?.billConfirmedBy ?? null,
+        billSplits: Array.isArray(b?.billSplits) ? b!.billSplits : [],
+      };
+    });
 
     // Sort: mine first, unassigned second, others last
     const sessions = allSessionsWithBill.sort((a, b) => {
@@ -362,6 +376,114 @@ export async function serverPortalRoutes(app: FastifyInstance) {
     });
 
     return { ok: true, serverName: server.name };
+  });
+
+  // ── POST /api/server/tables/:sessionId/close ─────────────────────────────
+  // Server closes the session (same logic as caisse)
+  app.post("/tables/:sessionId/close", async (req, reply) => {
+    const me = await requireServer(req, reply);
+    const { sessionId } = req.params as { sessionId: string };
+    const { paymentMode } = z.object({
+      paymentMode: z.enum(["CARD", "CASH", "COUNTER"]).default("CARD"),
+    }).parse(req.body ?? {});
+
+    const session = await prisma.tableSession.findFirst({
+      where: { id: sessionId, table: { restaurantId: me.restaurantId }, active: true },
+    });
+    if (!session) return reply.code(404).send({ error: "SESSION_NOT_FOUND" });
+
+    await prisma.$transaction([
+      prisma.order.updateMany({
+        where: { sessionId, status: { in: ["PENDING", "COOKING", "SERVED"] } },
+        data: { status: "PAID" },
+      }),
+      prisma.tableSession.update({
+        where: { id: sessionId },
+        data: { active: false, closedAt: new Date(), billPaymentMode: paymentMode },
+      }),
+    ]);
+
+    emitToRestaurant(me.restaurantId, "order:paid", { sessionId });
+    return { ok: true };
+  });
+
+  // ── PUT /api/server/tables/:sessionId/splits ──────────────────────────────
+  // Define split parts for a session
+  app.put("/tables/:sessionId/splits", async (req, reply) => {
+    const me = await requireServer(req, reply);
+    const { sessionId } = req.params as { sessionId: string };
+
+    const splitSchema = z.array(z.object({
+      id: z.string(),
+      label: z.string().min(1).max(50),
+      amountCents: z.number().int().min(0),
+      paid: z.boolean().default(false),
+      paidAt: z.string().optional().nullable(),
+      paymentMode: z.enum(["CARD", "CASH", "COUNTER"]).optional().nullable(),
+    })).min(2).max(20);
+
+    const splits = splitSchema.parse(req.body);
+
+    const session = await prisma.tableSession.findFirst({
+      where: { id: sessionId, table: { restaurantId: me.restaurantId }, active: true },
+    });
+    if (!session) return reply.code(404).send({ error: "SESSION_NOT_FOUND" });
+
+    await prisma.$executeRaw`
+      UPDATE "TableSession" SET "billSplits" = ${JSON.stringify(splits)}::jsonb WHERE id = ${sessionId}
+    `;
+
+    emitToRestaurant(me.restaurantId, "splits:updated", { sessionId, splits });
+    return { ok: true, splits };
+  });
+
+  // ── PATCH /api/server/tables/:sessionId/splits/:splitId/pay ──────────────
+  // Mark one split as paid; auto-close session if all splits are paid
+  app.patch("/tables/:sessionId/splits/:splitId/pay", async (req, reply) => {
+    const me = await requireServer(req, reply);
+    const { sessionId, splitId } = req.params as { sessionId: string; splitId: string };
+    const { paymentMode } = z.object({
+      paymentMode: z.enum(["CARD", "CASH", "COUNTER"]).default("CARD"),
+    }).parse(req.body ?? {});
+
+    type SplitRow = { id: string; billSplits: any };
+    const rows = await prisma.$queryRaw<SplitRow[]>`
+      SELECT id, COALESCE("billSplits", '[]'::jsonb) AS "billSplits"
+      FROM "TableSession" WHERE id = ${sessionId}
+        AND active = true
+    `;
+    if (rows.length === 0) return reply.code(404).send({ error: "SESSION_NOT_FOUND" });
+
+    const splits: any[] = Array.isArray(rows[0].billSplits) ? rows[0].billSplits : [];
+    const idx = splits.findIndex((s: any) => s.id === splitId);
+    if (idx === -1) return reply.code(404).send({ error: "SPLIT_NOT_FOUND" });
+
+    splits[idx] = { ...splits[idx], paid: true, paidAt: new Date().toISOString(), paymentMode };
+
+    await prisma.$executeRaw`
+      UPDATE "TableSession" SET "billSplits" = ${JSON.stringify(splits)}::jsonb WHERE id = ${sessionId}
+    `;
+
+    const allPaid = splits.every((s: any) => s.paid);
+
+    if (allPaid) {
+      // Auto-close: mark all orders PAID and close session
+      await prisma.$transaction([
+        prisma.order.updateMany({
+          where: { sessionId, status: { in: ["PENDING", "COOKING", "SERVED"] } },
+          data: { status: "PAID" },
+        }),
+        prisma.tableSession.update({
+          where: { id: sessionId },
+          data: { active: false, closedAt: new Date(), billPaymentMode: paymentMode },
+        }),
+      ]);
+      emitToRestaurant(me.restaurantId, "order:paid", { sessionId });
+    } else {
+      emitToRestaurant(me.restaurantId, "splits:updated", { sessionId, splits });
+    }
+
+    return { ok: true, splits, allPaid };
   });
 
   // ── GET /api/server/stats ──────────────────────────────────────────────────

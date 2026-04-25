@@ -57,6 +57,9 @@ ALTER TABLE "MenuItem" ADD COLUMN IF NOT EXISTS "waitMinutes" INTEGER NOT NULL D
 -- Order: expected ready time (computed at order creation)
 ALTER TABLE "Order" ADD COLUMN IF NOT EXISTS "expectedReadyAt" TIMESTAMP(3);
 
+-- TableSession: split payment (JSON array of split parts)
+ALTER TABLE "TableSession" ADD COLUMN IF NOT EXISTS "billSplits" JSONB NOT NULL DEFAULT '[]'::jsonb;
+
 -- ServerChallenge: global AI challenges
 ALTER TABLE "ServerChallenge" ADD COLUMN IF NOT EXISTS "isGlobal" BOOLEAN NOT NULL DEFAULT false;
 ALTER TABLE "ServerChallenge" ADD COLUMN IF NOT EXISTS "restaurantId" TEXT;
