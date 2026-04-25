@@ -232,8 +232,8 @@ export async function proRoutes(app: FastifyInstance) {
   app.patch("/service-pins", async (req, reply) => {
     const me = await requirePro(req, reply);
     const { caissePin, cuisinePin } = z.object({
-      caissePin:  z.string().regex(/^\d{4,8}$/).nullable().optional(),
-      cuisinePin: z.string().regex(/^\d{4,8}$/).nullable().optional(),
+      caissePin:  z.union([z.string().regex(/^\d{4,8}$/), z.null()]).optional(),
+      cuisinePin: z.union([z.string().regex(/^\d{4,8}$/), z.null()]).optional(),
     }).parse(req.body);
 
     const updates: Record<string, string | null> = {};
