@@ -615,7 +615,7 @@ export async function serverPortalRoutes(app: FastifyInstance) {
 
     // Generate challenges via AI
     let challengeTitles: string[] = [];
-    if (restaurant.ollamaApiKey) {
+    if (restaurant.ollamaApiKey && restaurant.ollamaLangModel) {
       try {
         const today_label = new Date().toLocaleDateString("fr-FR", { weekday: "long", day: "numeric", month: "long" });
         const prompt = `Tu es un chef de salle qui organise des défis quotidiens entre serveurs pour maintenir la motivation.
@@ -625,23 +625,45 @@ Les défis doivent être amusants, stimulants, réalisables en service et créer
 Format: retourne UNIQUEMENT 3 lignes, une par défi, sans numérotation, sans explication.
 Exemples: "Proposer un dessert à chaque table et en vendre au moins 3", "Obtenir 2 compliments spontanés clients notés", "Mémoriser et réciter la composition de 5 plats sans carte"`;
 
-        const response = await fetch("https://ollama.com/api/chat", {
-          method: "POST",
-          headers: { "Content-Type": "application/json", Authorization: `Bearer ${restaurant.ollamaApiKey}` },
-          body: JSON.stringify({
-            model: restaurant.ollamaLangModel ?? "gpt-oss:120b",
-            messages: [
-              { role: "system", content: "Tu génères des défis de restaurant. Réponds en français avec exactement 3 lignes." },
-              { role: "user", content: prompt },
-            ],
-            stream: false,
-          }),
-        });
-        if (response.ok) {
-          const data = await response.json() as { message: { content: string } };
-          challengeTitles = data.message.content
+        const model = restaurant.ollamaLangModel;
+        const apiKey = restaurant.ollamaApiKey;
+        const provider = model.startsWith("claude-") ? "anthropic"
+          : model.startsWith("gemini-") ? "google"
+          : model.startsWith("mistral") ? "mistral"
+          : "openai";
+
+        const headers: Record<string, string> = { "Content-Type": "application/json" };
+        let text = "";
+
+        if (provider === "openai" || provider === "mistral") {
+          const base = provider === "openai" ? "https://api.openai.com/v1" : "https://api.mistral.ai/v1";
+          headers["Authorization"] = `Bearer ${apiKey}`;
+          const res = await fetch(`${base}/chat/completions`, {
+            method: "POST", headers,
+            body: JSON.stringify({ model, messages: [{ role: "user", content: prompt }], max_tokens: 200 }),
+          });
+          if (res.ok) { const d = await res.json() as any; text = d.choices[0].message.content; }
+        } else if (provider === "anthropic") {
+          headers["x-api-key"] = apiKey;
+          headers["anthropic-version"] = "2023-06-01";
+          const res = await fetch("https://api.anthropic.com/v1/messages", {
+            method: "POST", headers,
+            body: JSON.stringify({ model, max_tokens: 200, messages: [{ role: "user", content: prompt }] }),
+          });
+          if (res.ok) { const d = await res.json() as any; text = d.content[0].text; }
+        } else if (provider === "google") {
+          const res = await fetch(
+            `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
+            { method: "POST", headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ contents: [{ role: "user", parts: [{ text: prompt }] }], generationConfig: { maxOutputTokens: 200 } }) }
+          );
+          if (res.ok) { const d = await res.json() as any; text = d.candidates[0].content.parts[0].text; }
+        }
+
+        if (text) {
+          challengeTitles = text
             .split("\n")
-            .map((l: string) => l.trim().replace(/^[-•*]\s*/, ""))
+            .map((l: string) => l.trim().replace(/^[-•*\d.]\s*/, ""))
             .filter((l: string) => l.length > 5)
             .slice(0, 3);
         }
@@ -700,7 +722,8 @@ Exemples: "Proposer un dessert à chaque table et en vendre au moins 3", "Obteni
       currentPlanning: z.string().max(2000).optional(),
     }).parse(req.body);
 
-    const model = restaurant.ollamaLangModel ?? "gpt-oss:120b";
+    const model = restaurant.ollamaLangModel ?? "gpt-4o-mini";
+    const apiKey = restaurant.ollamaApiKey!;
 
     const server = await prisma.server.findUnique({
       where: { id: me.serverId },
@@ -713,29 +736,47 @@ ${currentPlanning ? `Planning actuel : ${currentPlanning}` : ""}
 Génère 2-3 suggestions concrètes d'amélioration du planning ou des plats du jour basées sur ce retour terrain.
 Réponds de façon concise en français, en bullet points.`;
 
-    try {
-      const response = await fetch("https://ollama.com/api/chat", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${restaurant.ollamaApiKey}`,
-        },
-        body: JSON.stringify({
-          model,
-          messages: [
-            { role: "system", content: "Tu es un assistant restauration. Réponds en français, de façon concise et actionnable." },
-            { role: "user", content: prompt },
-          ],
-          stream: false,
-        }),
-      });
+    const provider = model.startsWith("claude-") ? "anthropic"
+      : model.startsWith("gemini-") ? "google"
+      : model.startsWith("mistral") ? "mistral"
+      : "openai";
 
-      if (!response.ok) {
-        return reply.code(502).send({ error: "OLLAMA_ERROR" });
+    try {
+      const headers: Record<string, string> = { "Content-Type": "application/json" };
+      let text = "";
+
+      if (provider === "openai" || provider === "mistral") {
+        const base = provider === "openai" ? "https://api.openai.com/v1" : "https://api.mistral.ai/v1";
+        headers["Authorization"] = `Bearer ${apiKey}`;
+        const res = await fetch(`${base}/chat/completions`, {
+          method: "POST", headers,
+          body: JSON.stringify({ model, messages: [{ role: "user", content: prompt }], max_tokens: 400 }),
+        });
+        if (!res.ok) return reply.code(502).send({ error: "AI_PROVIDER_ERROR" });
+        const d = await res.json() as any;
+        text = d.choices[0].message.content;
+      } else if (provider === "anthropic") {
+        headers["x-api-key"] = apiKey;
+        headers["anthropic-version"] = "2023-06-01";
+        const res = await fetch("https://api.anthropic.com/v1/messages", {
+          method: "POST", headers,
+          body: JSON.stringify({ model, max_tokens: 400, messages: [{ role: "user", content: prompt }] }),
+        });
+        if (!res.ok) return reply.code(502).send({ error: "AI_PROVIDER_ERROR" });
+        const d = await res.json() as any;
+        text = d.content[0].text;
+      } else if (provider === "google") {
+        const res = await fetch(
+          `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
+          { method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ contents: [{ role: "user", parts: [{ text: prompt }] }], generationConfig: { maxOutputTokens: 400 } }) }
+        );
+        if (!res.ok) return reply.code(502).send({ error: "AI_PROVIDER_ERROR" });
+        const d = await res.json() as any;
+        text = d.candidates[0].content.parts[0].text;
       }
 
-      const data = await response.json() as { message: { content: string } };
-      return { suggestions: data.message.content };
+      return { suggestions: text };
     } catch (err: any) {
       return reply.code(500).send({ error: "AI_SERVICE_UNAVAILABLE" });
     }
