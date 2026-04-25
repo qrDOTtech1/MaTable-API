@@ -3,6 +3,7 @@ import { z } from "zod";
 import { prisma } from "../db.js";
 import { requireSessionToken } from "../auth.js";
 import { emitToRestaurant } from "../realtime.js";
+import { sendEmail, reservationConfirmationHtml, canSendEmail } from "../email.js";
 
 export async function publicRoutes(app: FastifyInstance) {
   app.get("/testimonials", async (req) => {
@@ -236,7 +237,10 @@ export async function publicRoutes(app: FastifyInstance) {
       guests: z.number().int().min(1),
     }).parse(req.body);
 
-    const restaurant = await prisma.restaurant.findUnique({ where: { slug } });
+    const restaurant = await prisma.restaurant.findUnique({
+      where: { slug },
+      select: { id: true, name: true, address: true, phone: true },
+    });
     if (!restaurant) {
       return reply.code(404).send({ error: "restaurant_not_found" });
     }
@@ -256,6 +260,27 @@ export async function publicRoutes(app: FastifyInstance) {
         status: "PENDING",
       },
     });
+
+    // Send confirmation email if customer provided email + Resend is configured
+    if (input.email && canSendEmail()) {
+      const dateFormatted = startsAt.toLocaleDateString("fr-FR", { weekday: "long", day: "numeric", month: "long", year: "numeric" });
+      const html = reservationConfirmationHtml({
+        restaurantName: restaurant.name,
+        customerName: input.name,
+        date: dateFormatted,
+        time: input.time,
+        guests: input.guests,
+        restaurantAddress: (restaurant as any).address ?? null,
+        restaurantPhone: (restaurant as any).phone ?? null,
+      });
+      // Non-blocking — don't fail the request if email fails
+      sendEmail({
+        to: input.email,
+        from: "reservations@matable.pro",
+        subject: `Réservation confirmée · ${restaurant.name}`,
+        html,
+      }).catch(err => console.error("[email] reservation confirmation failed:", err));
+    }
 
     return { ok: true, reservationId: reservation.id };
   });

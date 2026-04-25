@@ -12,6 +12,7 @@ import { z } from "zod";
 import { prisma } from "../db.js";
 import { requirePro } from "../auth.js";
 import { env } from "../env.js";
+import { sendEmail, invoiceHtml, canSendEmail } from "../email.js";
 
 export async function invoiceRoutes(app: FastifyInstance) {
 
@@ -85,74 +86,70 @@ export async function invoiceRoutes(app: FastifyInstance) {
     const { sessionId } = req.params as { sessionId: string };
     const { email } = z.object({ email: z.string().email() }).parse(req.body);
 
-    // Store email on session for future reference
+    // Always store email on session
     await prisma.$executeRaw`
       UPDATE "TableSession" SET "customerEmail" = ${email} WHERE id = ${sessionId}
     `;
 
-    // Send via Resend if configured
-    const resendKey = (env as any).RESEND_API_KEY;
-    if (!resendKey) {
-      // Store email but can't send — return success anyway
-      return { ok: true, sent: false, message: "Email sauvegardé (service email non configuré)" };
+    if (!canSendEmail()) {
+      return { ok: true, sent: false, message: "Email sauvegardé. Service email non configuré (RESEND_API_KEY manquant)." };
     }
-
-    const invoiceUrl = `${env.PUBLIC_WEB_URL}/invoice/${sessionId}`;
 
     const session = await prisma.tableSession.findUnique({
       where: { id: sessionId },
       include: {
-        table: { select: { number: true, restaurant: { select: { name: true } } } },
-        orders: { where: { status: { in: ["PAID","SERVED"] } }, select: { items: true, totalCents: true } },
+        table: {
+          select: {
+            number: true,
+            zone: true,
+            restaurant: { select: { name: true, address: true, phone: true } },
+          },
+        },
+        orders: {
+          where: { status: { in: ["PAID","SERVED"] } },
+          select: { items: true, totalCents: true },
+        },
       },
     });
-
     if (!session) return reply.code(404).send({ error: "SESSION_NOT_FOUND" });
 
     const tipCents: number = (session as any).tipCents ?? 0;
-    const subtotal = (session.orders as any[]).reduce((s: number, o: any) => s + o.totalCents, 0);
-    const total = subtotal + tipCents;
-    const fmt = (c: number) => (c / 100).toFixed(2) + " €";
+    const subtotalCents = (session.orders as any[]).reduce((s: number, o: any) => s + o.totalCents, 0);
+    const totalCents = subtotalCents + tipCents;
+    const allLines: { name: string; quantity: number; priceCents: number }[] = (session.orders as any[])
+      .flatMap((o: any) => Array.isArray(o.items) ? o.items : []);
 
-    const lines = (session.orders as any[])
-      .flatMap((o: any) => (Array.isArray(o.items) ? o.items : []))
-      .map((item: any) => `<tr><td>${item.quantity}× ${item.name}</td><td style="text-align:right">${fmt(item.quantity * item.priceCents)}</td></tr>`)
-      .join("");
+    const closedAt = session.closedAt ?? new Date();
+    const dateStr = closedAt.toLocaleDateString("fr-FR", { day: "numeric", month: "long", year: "numeric" }) +
+                    " à " + closedAt.toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" });
 
-    const html = `
-      <div style="font-family:monospace;max-width:480px;margin:auto;padding:32px;border:1px solid #eee;border-radius:12px">
-        <h1 style="text-align:center;margin-bottom:4px">${session.table.restaurant.name}</h1>
-        <p style="text-align:center;color:#888;font-size:12px;margin-bottom:24px">TICKET DE CAISSE</p>
-        <table style="width:100%;border-collapse:collapse;margin-bottom:16px">
-          <tbody>${lines}</tbody>
-        </table>
-        <hr style="border:1px dashed #ddd;margin:12px 0"/>
-        <table style="width:100%"><tbody>
-          ${tipCents > 0 ? `<tr><td>Sous-total</td><td style="text-align:right">${fmt(subtotal)}</td></tr><tr><td>Pourboire</td><td style="text-align:right">${fmt(tipCents)}</td></tr>` : ""}
-          <tr><td><strong>TOTAL</strong></td><td style="text-align:right"><strong>${fmt(total)}</strong></td></tr>
-        </tbody></table>
-        <hr style="border:1px dashed #ddd;margin:12px 0"/>
-        <p style="text-align:center;font-size:11px;color:#aaa">Merci pour votre visite · MaTable</p>
-        <p style="text-align:center;margin-top:8px"><a href="${invoiceUrl}">Voir le ticket en ligne</a></p>
-      </div>`;
+    const invoiceUrl = `${env.PUBLIC_WEB_URL}/order/_/receipt?sessionId=${sessionId}`;
 
-    const resendRes = await fetch("https://api.resend.com/emails", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${resendKey}` },
-      body: JSON.stringify({
-        from: "Votre-ticket@matable.pro",
-        to: [email],
-        subject: `Votre ticket · ${session.table.restaurant.name} · Table ${session.table.number}`,
-        html,
-      }),
+    const html = invoiceHtml({
+      restaurantName: session.table.restaurant.name,
+      restaurantAddress: (session.table.restaurant as any).address ?? null,
+      restaurantPhone: (session.table.restaurant as any).phone ?? null,
+      tableNumber: session.table.number,
+      tableZone: (session.table as any).zone ?? null,
+      date: dateStr,
+      paymentMode: (session as any).billPaymentMode ?? null,
+      lines: allLines,
+      subtotalCents,
+      tipCents,
+      totalCents,
+      invoiceUrl,
     });
 
-    if (!resendRes.ok) {
-      const err = await resendRes.text();
-      return reply.code(500).send({ error: "EMAIL_FAILED", detail: err });
-    }
+    const result = await sendEmail({
+      to: email,
+      from: "Votre-ticket@matable.pro",
+      subject: `Votre ticket · ${session.table.restaurant.name} · Table ${session.table.number}`,
+      html,
+    });
 
-    return { ok: true, sent: true };
+    if (!result.ok) return reply.code(500).send({ error: "EMAIL_FAILED", detail: result.error });
+
+    return { ok: true, sent: true, emailId: result.id };
   });
 
   // ── GET /api/pro/invoices ──────────────────────────────────────────────────
