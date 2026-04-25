@@ -42,6 +42,11 @@ ALTER TABLE "User" ADD COLUMN IF NOT EXISTS "image" TEXT;
 ALTER TABLE "User" ADD COLUMN IF NOT EXISTS "password" TEXT;
 ALTER TABLE "User" ADD COLUMN IF NOT EXISTS "emailVerified" TIMESTAMP(3);
 
+-- TableSession: customer email for invoice + tip tracking
+ALTER TABLE "TableSession" ADD COLUMN IF NOT EXISTS "customerEmail" TEXT;
+ALTER TABLE "TableSession" ADD COLUMN IF NOT EXISTS "tipCents" INTEGER NOT NULL DEFAULT 0;
+CREATE INDEX IF NOT EXISTS "TableSession_customerEmail_idx" ON "TableSession"("customerEmail");
+
 -- ServerChallenge: global AI challenges
 ALTER TABLE "ServerChallenge" ADD COLUMN IF NOT EXISTS "isGlobal" BOOLEAN NOT NULL DEFAULT false;
 ALTER TABLE "ServerChallenge" ADD COLUMN IF NOT EXISTS "restaurantId" TEXT;

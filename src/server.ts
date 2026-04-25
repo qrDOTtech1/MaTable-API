@@ -16,6 +16,7 @@ import { aiRoutes } from "./routes/ai.js";
 import { serverPortalRoutes } from "./routes/serverPortal.js";
 import { caissePortalRoutes } from "./routes/caissePortal.js";
 import { cuisinePortalRoutes } from "./routes/cuisinePortal.js";
+import { invoiceRoutes } from "./routes/invoice.js";
 import { socialRoutes } from "./routes/social.js";
 
 async function build() {
@@ -79,6 +80,7 @@ async function build() {
   await app.register(serverPortalRoutes, { prefix: "/api/server" });
   await app.register(caissePortalRoutes, { prefix: "/api/caisse" });
   await app.register(cuisinePortalRoutes, { prefix: "/api/cuisine" });
+  await app.register(invoiceRoutes, { prefix: "/api" });
   await app.register(socialRoutes, { prefix: "/api" });
 
   return app;
