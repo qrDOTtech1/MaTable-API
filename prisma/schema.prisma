@@ -45,6 +45,7 @@ model Restaurant {
   subscriptionStartedAt   DateTime?
   subscriptionExpiresAt   DateTime?
   caissePin               String?  // PIN 4-8 chiffres pour l'accès caisse
+  isPartner               Boolean  @default(true)
    
   createdAt               DateTime @default(now())
   updatedAt               DateTime @default(now()) @updatedAt

@@ -185,12 +185,44 @@ export async function publicRoutes(app: FastifyInstance) {
 
   app.get("/r/:slug/availability", async (req, reply) => {
     const { slug } = req.params as { slug: string };
-    const restaurant = await prisma.restaurant.findUnique({ where: { slug } });
-    if (!restaurant) {
-      return reply.code(404).send({ error: "restaurant_not_found" });
+    const { date } = z.object({
+      date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).default(() => new Date().toISOString().split("T")[0]),
+    }).parse(req.query ?? {});
+
+    const restaurant = await prisma.restaurant.findUnique({
+      where: { slug },
+      include: { openingHours: true },
+    });
+    if (!restaurant) return reply.code(404).send({ error: "restaurant_not_found" });
+    if (!(restaurant as any).acceptReservations) return { slots: [] };
+
+    const d = new Date(date + "T12:00:00"); // noon to avoid TZ issues
+    const dayOfWeek = d.getDay(); // 0=Sunday
+
+    const dayHours = restaurant.openingHours.filter((h) => h.dayOfWeek === dayOfWeek);
+    if (!dayHours.length) return { slots: [] };
+
+    const slotMin: number = (restaurant as any).reservationSlotMinutes ?? 30;
+    const leadMin: number = (restaurant as any).reservationLeadMinutes ?? 60;
+    const mealMin: number = (restaurant as any).avgPrepMinutes ?? 90;
+
+    const now = new Date();
+    const slots: { date: string; time: string; available: boolean }[] = [];
+
+    for (const period of dayHours) {
+      let cur: number = period.openMin;
+      const lastSlot = period.closeMin - mealMin;
+      while (cur <= lastSlot) {
+        const slotDate = new Date(date + "T00:00:00");
+        slotDate.setHours(Math.floor(cur / 60), cur % 60, 0, 0);
+        const time = `${String(Math.floor(cur / 60)).padStart(2, "0")}:${String(cur % 60).padStart(2, "0")}`;
+        const available = slotDate.getTime() > now.getTime() + leadMin * 60_000;
+        slots.push({ date, time, available });
+        cur += slotMin;
+      }
     }
 
-    return { available: true, message: "Available" };
+    return { slots };
   });
 
   app.post("/r/:slug/reservations", async (req, reply) => {

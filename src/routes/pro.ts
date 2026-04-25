@@ -41,8 +41,11 @@ export async function proRoutes(app: FastifyInstance) {
     while (await prisma.restaurant.findUnique({ where: { slug } })) slug = `${base}-${++i}`;
 
     const passwordHash = await bcrypt.hash(password, 10);
-    const restaurant = await prisma.restaurant.create({ data: { name: restaurantName, slug } });
-    await prisma.user.create({ data: { email, passwordHash, restaurantId: restaurant.id } });
+    const { restaurant, user } = await prisma.$transaction(async (tx) => {
+      const restaurant = await tx.restaurant.create({ data: { name: restaurantName, slug } });
+      const user = await tx.user.create({ data: { email, passwordHash, restaurantId: restaurant.id } });
+      return { restaurant, user };
+    });
     return { ok: true, restaurantId: restaurant.id, slug };
   });
 
@@ -58,7 +61,7 @@ export async function proRoutes(app: FastifyInstance) {
     }
 
     // Support both passwordHash (pro register) and password (RSMATABLE register)
-    const hash = user.passwordHash ?? (user as any).password;
+    const hash = user.passwordHash ?? user.password;
     if (!hash) {
       return reply.code(401).send({ error: "invalid_credentials" });
     }
@@ -181,8 +184,7 @@ export async function proRoutes(app: FastifyInstance) {
       phone: z.string().optional(),
       email: z.string().email().optional(),
       website: z.string().url().optional(),
-      coverImageUrl: z.string().url().optional(),
-      logoUrl: z.string().url().optional(),
+      isPartner: z.boolean().optional(),
       acceptReservations: z.boolean().optional(),
       avgPrepMinutes: z.number().int().min(30).max(300).optional(),
       reservationLeadMinutes: z.number().int().min(0).max(2880).optional(),
@@ -222,6 +224,55 @@ export async function proRoutes(app: FastifyInstance) {
     }
     const [restaurant] = await prisma.$transaction(ops);
     return { restaurant };
+  });
+
+  // ---------------------------------------------------------------------------
+  // Service PINs (caisse + cuisine) — manager self-service
+  // ---------------------------------------------------------------------------
+  app.patch("/service-pins", async (req, reply) => {
+    const me = await requirePro(req, reply);
+    const { caissePin, cuisinePin } = z.object({
+      caissePin:  z.string().regex(/^\d{4,8}$/).nullable().optional(),
+      cuisinePin: z.string().regex(/^\d{4,8}$/).nullable().optional(),
+    }).parse(req.body);
+
+    const updates: Record<string, string | null> = {};
+    if (caissePin  !== undefined) updates.caissePin  = caissePin;
+    if (cuisinePin !== undefined) updates.cuisinePin = cuisinePin;
+
+    if (Object.keys(updates).length === 0) return { ok: true };
+
+    // Use raw SQL since columns may not be in generated client yet
+    if (updates.caissePin !== undefined) {
+      if (updates.caissePin) {
+        await prisma.$executeRaw`UPDATE "Restaurant" SET "caissePin" = ${updates.caissePin} WHERE id = ${me.restaurantId}`;
+      } else {
+        await prisma.$executeRaw`UPDATE "Restaurant" SET "caissePin" = NULL WHERE id = ${me.restaurantId}`;
+      }
+    }
+    if (updates.cuisinePin !== undefined) {
+      if (updates.cuisinePin) {
+        await prisma.$executeRaw`UPDATE "Restaurant" SET "cuisinePin" = ${updates.cuisinePin} WHERE id = ${me.restaurantId}`;
+      } else {
+        await prisma.$executeRaw`UPDATE "Restaurant" SET "cuisinePin" = NULL WHERE id = ${me.restaurantId}`;
+      }
+    }
+
+    return { ok: true };
+  });
+
+  app.get("/service-pins", async (req, reply) => {
+    const me = await requirePro(req, reply);
+    const rows = await prisma.$queryRaw<Array<{ caissePin: string | null; cuisinePin: string | null }>>`
+      SELECT "caissePin", "cuisinePin" FROM "Restaurant" WHERE id = ${me.restaurantId}
+    `;
+    return {
+      caissePinSet:  !!rows[0]?.caissePin,
+      cuisinePinSet: !!rows[0]?.cuisinePin,
+      // Return actual PIN only so manager can see/update it
+      caissePin:  rows[0]?.caissePin ?? null,
+      cuisinePin: rows[0]?.cuisinePin ?? null,
+    };
   });
 
   // ---------------------------------------------------------------------------
