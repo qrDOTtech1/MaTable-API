@@ -881,4 +881,36 @@ export async function proRoutes(app: FastifyInstance) {
     );
     return { ok: true };
   });
+
+  // ---------------------------------------------------------------------------
+  // SAV — Support tickets (restaurant → admin)
+  // ---------------------------------------------------------------------------
+  app.post("/support", async (req, reply) => {
+    const me = await requirePro(req, reply);
+    const body = z.object({
+      subject: z.string().min(1).max(200),
+      message: z.string().min(1).max(5000),
+      priority: z.enum(["LOW", "NORMAL", "URGENT"]).default("NORMAL"),
+    }).parse(req.body);
+
+    const id = crypto.randomUUID();
+    await prisma.$executeRaw`
+      INSERT INTO "SupportTicket" (id, "restaurantId", "userId", subject, message, priority, status, "createdAt", "updatedAt")
+      VALUES (${id}, ${me.restaurantId}, ${me.userId}, ${body.subject}, ${body.message}, ${body.priority}, 'OPEN', NOW(), NOW())
+    `;
+    return { ok: true, ticketId: id };
+  });
+
+  app.get("/support", async (req, reply) => {
+    const me = await requirePro(req, reply);
+    type Ticket = { id: string; subject: string; message: string; status: string; priority: string; adminReply: string | null; repliedAt: Date | null; createdAt: Date };
+    const tickets = await prisma.$queryRaw<Ticket[]>`
+      SELECT id, subject, message, status, priority, "adminReply", "repliedAt", "createdAt"
+      FROM "SupportTicket"
+      WHERE "restaurantId" = ${me.restaurantId}
+      ORDER BY "createdAt" DESC
+      LIMIT 50
+    `;
+    return { tickets };
+  });
 }

@@ -148,4 +148,22 @@ DO $$ BEGIN
   END IF;
 END $$;
 
+-- SupportTicket: SAV messages from restaurants to admin
+CREATE TABLE IF NOT EXISTS "SupportTicket" (
+  id TEXT NOT NULL,
+  "restaurantId" TEXT NOT NULL,
+  "userId" TEXT,
+  subject TEXT NOT NULL,
+  message TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'OPEN',
+  priority TEXT NOT NULL DEFAULT 'NORMAL',
+  "adminReply" TEXT,
+  "repliedAt" TIMESTAMP(3),
+  "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  "updatedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT "SupportTicket_pkey" PRIMARY KEY (id)
+);
+CREATE INDEX IF NOT EXISTS "SupportTicket_restaurantId_idx" ON "SupportTicket"("restaurantId");
+CREATE INDEX IF NOT EXISTS "SupportTicket_status_idx" ON "SupportTicket"(status);
+
 -- (duplicate GlobalConfig removed — defined above)
