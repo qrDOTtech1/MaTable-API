@@ -19,4 +19,4 @@ COPY --from=build /app/dist ./dist
 COPY --from=build /app/prisma ./prisma
 COPY --from=build /app/package.json ./package.json
 
-CMD ["sh", "-c", "echo '--- ensure_columns.sql ---' && npx prisma db execute --url=$DATABASE_URL --file=./prisma/ensure_columns.sql && echo 'columns ok' || echo 'SQL FAILED'; echo '--- prisma db push ---' && npx prisma db push --skip-generate --accept-data-loss && echo 'push ok' || echo 'push warn'; npx tsx prisma/seed.ts || true; node dist/server.js"]
+CMD ["sh", "-c", "echo '--- prisma db push ---' && npx prisma db push --skip-generate --accept-data-loss && echo 'push ok' || echo 'push warn'; echo '--- ensure_columns.sql ---' && npx prisma db execute --url=$DATABASE_URL --file=./prisma/ensure_columns.sql && echo 'columns ok' || echo 'SQL FAILED'; npx tsx prisma/seed.ts || true; node dist/server.js"]

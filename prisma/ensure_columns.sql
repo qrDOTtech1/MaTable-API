@@ -99,6 +99,7 @@ CREATE INDEX IF NOT EXISTS "Photo_restaurantId_kind_idx" ON "Photo"("restaurantI
 CREATE INDEX IF NOT EXISTS "Photo_menuItemId_idx" ON "Photo"("menuItemId");
 
 -- GlobalConfig: single-row table for platform-wide Ollama Cloud settings
+-- IMPORTANT: this table is NOT in schema.prisma to prevent prisma db push from dropping it
 CREATE TABLE IF NOT EXISTS "GlobalConfig" (
   id TEXT NOT NULL DEFAULT 'global',
   "updatedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -109,7 +110,7 @@ ALTER TABLE "GlobalConfig" ADD COLUMN IF NOT EXISTS "ollamaApiKey" TEXT;
 ALTER TABLE "GlobalConfig" ADD COLUMN IF NOT EXISTS "ollamaLangModel" TEXT NOT NULL DEFAULT 'gpt-oss:120b';
 ALTER TABLE "GlobalConfig" ADD COLUMN IF NOT EXISTS "ollamaVisionModel" TEXT NOT NULL DEFAULT 'qwen3-vl:235b';
 
--- Ensure exactly one global config row exists
+-- Ensure exactly one global config row exists (NEVER overwrite existing data)
 INSERT INTO "GlobalConfig" (id) VALUES ('global') ON CONFLICT (id) DO NOTHING;
 
 -- Prospect table (CRM de prospection)

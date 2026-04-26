@@ -48,8 +48,13 @@ export async function getGlobalIaConfig(): Promise<GlobalIaConfig> {
       SELECT "ollamaApiKey", "ollamaLangModel", "ollamaVisionModel"
       FROM "GlobalConfig" WHERE id = 'global' LIMIT 1
     `;
-    if (rows.length === 0) return DEFAULTS;
-    return rows[0];
+    if (rows.length === 0) {
+      console.warn("[globalIaConfig] No row found — returning DEFAULTS (key=null)");
+      return DEFAULTS;
+    }
+    const cfg = rows[0];
+    console.log(`[globalIaConfig] loaded — key=${cfg.ollamaApiKey ? "SET(" + cfg.ollamaApiKey.slice(0, 8) + "...)" : "NULL"} lang=${cfg.ollamaLangModel} vision=${cfg.ollamaVisionModel}`);
+    return cfg;
   } catch (e) {
     console.error("[globalIaConfig] query error:", e);
     return DEFAULTS;
