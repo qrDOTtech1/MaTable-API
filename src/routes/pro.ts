@@ -194,9 +194,6 @@ export async function proRoutes(app: FastifyInstance) {
       tipsEnabled: z.boolean().optional(),
       serviceCallEnabled: z.boolean().optional(),
       reviewsEnabled: z.boolean().optional(),
-      ollamaApiKey: z.string().nullable().optional(),
-      ollamaLangModel: z.string().nullable().optional(),
-      ollamaVisionModel: z.string().nullable().optional(),
       openingHours: z.array(z.object({
         dayOfWeek: z.number().int().min(0).max(6),
         openMin: z.number().int().min(0).max(1440),
