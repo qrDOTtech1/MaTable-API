@@ -450,6 +450,12 @@ Analyse ce plat.`;
       // Same prompt as stock-analysis (reuse the comprehensive prompt)
       const prompt = `Tu es Nova Stock IA, un expert en gestion de stock pour restaurants. Tu dois etre TRES PRECIS et CONCRET.
 
+LANGUE OBLIGATOIRE : Tu DOIS répondre INTÉGRALEMENT EN FRANÇAIS.
+- Tous les noms d'ingrédients EN FRANÇAIS (ex: "Crème fraîche", "Oeufs", "Beurre", "Sel", "Huile d'olive", "Farine", "Lait")
+- Toutes les catégories EN FRANÇAIS (ex: "Produits laitiers", "Condiments", "Viandes", "Légumes", "Épicerie")
+- Toutes les raisons et descriptions EN FRANÇAIS
+- JAMAIS d'anglais (pas "Cream" → "Crème", pas "Egg" → "Oeuf", pas "Butter" → "Beurre", pas "Salt" → "Sel", pas "Milk" → "Lait", pas "Dairy" → "Produits laitiers", pas "Condiments" → "Condiments", pas "Olive oil" → "Huile d'olive", pas "Vinegar" → "Vinaigre", pas "Pepper" → "Poivre", pas "Whipped cream" → "Crème fouettée", pas "Yogurt" → "Yaourt", pas "Egg yolk" → "Jaune d'oeuf")
+
 REGLE ABSOLUE : si le stock est vide ou non declare, "alreadyHave" = 0 et "toBuy" = "estimatedNeeded" pour CHAQUE ingredient. Tu DOIS generer une shoppingList complete, jamais vide.
 
 Restaurant: ${restaurant.name}
@@ -488,26 +494,27 @@ Procede CATEGORIE PAR CATEGORIE. Pour chaque categorie du menu :
 
 Reponds UNIQUEMENT en JSON valide (sans markdown, sans commentaire, sans backticks) avec ce format EXACT:
 {
-  "summary": "Resume en 2-3 phrases",
-  "alerts": [{"item":"nom","issue":"probleme precis","urgency":"HIGH|MEDIUM|LOW"}],
-  "reorderSuggestions": [{"item":"nom","currentStock":0,"suggestedOrder":0,"reason":"courte explication"}],
-  "topSellers": [{"item":"nom","qtySold":0,"trend":"UP|STABLE|DOWN"}],
-  "deadStock": [{"item":"nom","qtySold":0,"suggestion":"action concrete"}],
-  "forecastNextWeek": [{"item":"nom","estimatedDemand":0}],
-  "shoppingList": [{"ingredient":"nom ingredient brut","category":"categorie ingredient","estimatedNeeded":0,"alreadyHave":0,"toBuy":0,"unit":"kg|L|piece|botte|douzaine|bouteille|cl","priority":"HIGH|MEDIUM|LOW","estimatedCost":0,"reason":"pour quels plats"}],
-  "promotions": [{"item":"nom plat","reason":"raison","suggestedDiscount":"-20%","urgency":"HIGH|MEDIUM|LOW","action":"description promo"}],
-  "freshProductAlerts": [{"product":"nom","expiresIn":"X jours","qty":"quantite","recommendation":"action","affectedDishes":["plat1"]}],
-  "supplierOrderNote": "strategie achat 2-3 phrases",
-  "costSavings": "conseil anti-gaspillage concret",
+  "summary": "Résumé en 2-3 phrases EN FRANÇAIS",
+  "alerts": [{"item":"nom EN FRANÇAIS","issue":"problème précis EN FRANÇAIS","urgency":"HIGH|MEDIUM|LOW"}],
+  "reorderSuggestions": [{"item":"nom EN FRANÇAIS","currentStock":0,"suggestedOrder":0,"reason":"explication EN FRANÇAIS"}],
+  "topSellers": [{"item":"nom EN FRANÇAIS","qtySold":0,"trend":"UP|STABLE|DOWN"}],
+  "deadStock": [{"item":"nom EN FRANÇAIS","qtySold":0,"suggestion":"action EN FRANÇAIS"}],
+  "forecastNextWeek": [{"item":"nom EN FRANÇAIS","estimatedDemand":0}],
+  "shoppingList": [{"ingredient":"nom ingrédient EN FRANÇAIS","category":"catégorie EN FRANÇAIS (Alcools, Dilutants & Mixers, Sirops & Liqueurs, Fruits & Garnitures, Viandes, Poissons, Légumes, Épicerie, Produits laitiers, Condiments, Consommables)","estimatedNeeded":0,"alreadyHave":0,"toBuy":0,"unit":"kg|L|pièce|botte|douzaine|bouteille|cl","priority":"HIGH|MEDIUM|LOW","estimatedCost":0,"reason":"pour quels plats EN FRANÇAIS"}],
+  "promotions": [{"item":"nom plat","reason":"raison EN FRANÇAIS","suggestedDiscount":"-20%","urgency":"HIGH|MEDIUM|LOW","action":"description promo EN FRANÇAIS"}],
+  "freshProductAlerts": [{"product":"nom EN FRANÇAIS","expiresIn":"X jours","qty":"quantité","recommendation":"action EN FRANÇAIS","affectedDishes":["plat1"]}],
+  "supplierOrderNote": "stratégie achat 2-3 phrases EN FRANÇAIS",
+  "costSavings": "conseil anti-gaspillage EN FRANÇAIS",
   "totalShoppingBudget": 0
 }
 
 Regles OBLIGATOIRES:
-1. shoppingList JAMAIS VIDE.
-2. MINIMUM 30 ingredients dans la shoppingList pour un menu de plus de 15 plats.
-3. Chaque ingredient a un champ "category" pour le regrouper.
-4. estimatedCost = prix d'achat reel estime.
-5. totalShoppingBudget = somme de tous les estimatedCost.`;
+1. TOUT EN FRANÇAIS — AUCUN mot en anglais dans la réponse.
+2. shoppingList JAMAIS VIDE.
+3. MINIMUM 30 ingredients dans la shoppingList pour un menu de plus de 15 plats.
+4. Chaque ingredient a un champ "category" EN FRANÇAIS pour le regrouper.
+5. estimatedCost = prix d'achat reel estime.
+6. totalShoppingBudget = somme de tous les estimatedCost.`;
 
       const raw = await ollamaCloudChatStream(
         iaConfig.ollamaApiKey, iaConfig.ollamaLangModel,
@@ -613,6 +620,12 @@ Regles OBLIGATOIRES:
 
     const prompt = `Tu es Nova Stock IA, un expert en gestion de stock pour restaurants. Tu dois etre TRES PRECIS et CONCRET.
 
+LANGUE OBLIGATOIRE : Tu DOIS répondre INTÉGRALEMENT EN FRANÇAIS.
+- Tous les noms d'ingrédients EN FRANÇAIS (ex: "Crème fraîche", "Oeufs", "Beurre", "Sel", "Huile d'olive", "Farine", "Lait")
+- Toutes les catégories EN FRANÇAIS (ex: "Produits laitiers", "Condiments", "Viandes", "Légumes", "Épicerie")
+- Toutes les raisons et descriptions EN FRANÇAIS
+- JAMAIS d'anglais (pas "Cream" → "Crème", pas "Egg" → "Oeuf", pas "Butter" → "Beurre", pas "Salt" → "Sel", pas "Milk" → "Lait", pas "Dairy" → "Produits laitiers", pas "Olive oil" → "Huile d'olive", pas "Vinegar" → "Vinaigre", pas "Pepper" → "Poivre", pas "Whipped cream" → "Crème fouettée", pas "Yogurt" → "Yaourt", pas "Egg yolk" → "Jaune d'oeuf")
+
 REGLE ABSOLUE : si le stock est vide ou non declare, "alreadyHave" = 0 et "toBuy" = "estimatedNeeded" pour CHAQUE ingredient. Tu DOIS generer une shoppingList complete, jamais vide.
 
 Restaurant: ${restaurant.name}
@@ -657,27 +670,28 @@ ATTENTION SPECIFIQUE aux categories Cocktails / Boissons :
 
 Reponds UNIQUEMENT en JSON valide (sans markdown, sans commentaire, sans backticks) avec ce format EXACT:
 {
-  "summary": "Resume en 2-3 phrases — mentionne si stock vide et liste complete generee",
-  "alerts": [{"item":"nom","issue":"probleme precis","urgency":"HIGH|MEDIUM|LOW"}],
-  "reorderSuggestions": [{"item":"nom","currentStock":0,"suggestedOrder":0,"reason":"courte explication"}],
-  "topSellers": [{"item":"nom","qtySold":0,"trend":"UP|STABLE|DOWN"}],
-  "deadStock": [{"item":"nom","qtySold":0,"suggestion":"action concrete"}],
-  "forecastNextWeek": [{"item":"nom","estimatedDemand":0}],
-  "shoppingList": [{"ingredient":"nom ingredient brut","category":"categorie ingredient (Alcools, Dilutants & Mixers, Sirops & Liqueurs, Fruits & Garnitures, Viandes, Poissons, Legumes, Epicerie, Produits laitiers, Consommables)","estimatedNeeded":0,"alreadyHave":0,"toBuy":0,"unit":"kg|L|piece|botte|douzaine|bouteille|cl","priority":"HIGH|MEDIUM|LOW","estimatedCost":0,"reason":"pour quels plats"}],
-  "promotions": [{"item":"nom plat","reason":"raison","suggestedDiscount":"-20%","urgency":"HIGH|MEDIUM|LOW","action":"description promo"}],
-  "freshProductAlerts": [{"product":"nom","expiresIn":"X jours","qty":"quantite","recommendation":"action","affectedDishes":["plat1"]}],
-  "supplierOrderNote": "strategie achat 2-3 phrases",
-  "costSavings": "conseil anti-gaspillage concret",
+  "summary": "Résumé en 2-3 phrases EN FRANÇAIS",
+  "alerts": [{"item":"nom EN FRANÇAIS","issue":"problème précis EN FRANÇAIS","urgency":"HIGH|MEDIUM|LOW"}],
+  "reorderSuggestions": [{"item":"nom EN FRANÇAIS","currentStock":0,"suggestedOrder":0,"reason":"explication EN FRANÇAIS"}],
+  "topSellers": [{"item":"nom EN FRANÇAIS","qtySold":0,"trend":"UP|STABLE|DOWN"}],
+  "deadStock": [{"item":"nom EN FRANÇAIS","qtySold":0,"suggestion":"action EN FRANÇAIS"}],
+  "forecastNextWeek": [{"item":"nom EN FRANÇAIS","estimatedDemand":0}],
+  "shoppingList": [{"ingredient":"nom ingrédient EN FRANÇAIS","category":"catégorie EN FRANÇAIS (Alcools, Dilutants & Mixers, Sirops & Liqueurs, Fruits & Garnitures, Viandes, Poissons, Légumes, Épicerie, Produits laitiers, Condiments, Consommables)","estimatedNeeded":0,"alreadyHave":0,"toBuy":0,"unit":"kg|L|pièce|botte|douzaine|bouteille|cl","priority":"HIGH|MEDIUM|LOW","estimatedCost":0,"reason":"pour quels plats EN FRANÇAIS"}],
+  "promotions": [{"item":"nom plat","reason":"raison EN FRANÇAIS","suggestedDiscount":"-20%","urgency":"HIGH|MEDIUM|LOW","action":"description promo EN FRANÇAIS"}],
+  "freshProductAlerts": [{"product":"nom EN FRANÇAIS","expiresIn":"X jours","qty":"quantité","recommendation":"action EN FRANÇAIS","affectedDishes":["plat1"]}],
+  "supplierOrderNote": "stratégie achat 2-3 phrases EN FRANÇAIS",
+  "costSavings": "conseil anti-gaspillage EN FRANÇAIS",
   "totalShoppingBudget": 0
 }
 
 Regles OBLIGATOIRES:
-1. shoppingList JAMAIS VIDE : deduis les ingredients bruts de TOUS les plats de TOUTES les categories. Si 0 en stock, toBuy = estimatedNeeded complet pour la semaine.
-2. MINIMUM 30 ingredients dans la shoppingList pour un menu de plus de 15 plats.
-3. Chaque ingredient a un champ "category" pour le regrouper (Alcools, Dilutants & Mixers, Sirops & Liqueurs, Fruits & Garnitures, Viandes, etc.)
-4. estimatedCost = prix d'achat reel estime (pas prix de vente).
-5. totalShoppingBudget = somme de tous les estimatedCost.
-6. Si budget donne et depassable, note-le dans supplierOrderNote.`;
+1. TOUT EN FRANÇAIS — AUCUN mot en anglais dans la réponse.
+2. shoppingList JAMAIS VIDE : deduis les ingredients bruts de TOUS les plats de TOUTES les categories. Si 0 en stock, toBuy = estimatedNeeded complet pour la semaine.
+3. MINIMUM 30 ingredients dans la shoppingList pour un menu de plus de 15 plats.
+4. Chaque ingredient a un champ "category" EN FRANÇAIS pour le regrouper (Alcools, Dilutants & Mixers, Sirops & Liqueurs, Fruits & Garnitures, Viandes, etc.)
+5. estimatedCost = prix d'achat reel estime (pas prix de vente).
+6. totalShoppingBudget = somme de tous les estimatedCost.
+7. Si budget donne et depassable, note-le dans supplierOrderNote.`;
 
     try {
       let raw = (await ollamaCloudChat(iaConfig.ollamaApiKey, iaConfig.ollamaLangModel, [
@@ -775,6 +789,11 @@ Regles OBLIGATOIRES:
 
       const prompt = `Tu es Nova Stock IA. Analyse ce menu et ces ventes pour identifier TOUS les INGREDIENTS BRUTS que ce restaurant doit gérer en stock.
 
+LANGUE OBLIGATOIRE : Tu DOIS répondre INTÉGRALEMENT EN FRANÇAIS.
+- Tous les noms d'ingrédients DOIVENT être en français (ex: "Crème fraîche", "Oeufs", "Beurre", "Sel", "Huile d'olive", "Farine", "Lait", "Poivre", "Vinaigre", "Moutarde", "Oignon", "Ail")
+- Toutes les catégories DOIVENT être en français (ex: "Produits laitiers", "Condiments", "Viandes", "Légumes", "Épicerie")
+- JAMAIS de noms en anglais (pas "Cream" mais "Crème", pas "Egg" mais "Oeuf", pas "Butter" mais "Beurre", pas "Salt" mais "Sel", pas "Milk" mais "Lait")
+
 Restaurant: ${restaurant.name}
 
 === MENU PAR CATEGORIE (${menuItems.length} plats) ===
@@ -787,8 +806,8 @@ Retourne UNIQUEMENT un JSON valide (sans markdown) avec ce format EXACT:
 {
   "items": [
     {
-      "name": "Nom ingrédient ou article",
-      "unit": "kg|L|piece|botte|douzaine|sachet|bouteille|cl",
+      "name": "Nom ingrédient EN FRANÇAIS",
+      "unit": "kg|L|pièce|botte|douzaine|sachet|bouteille|cl",
       "category": "Viandes|Poissons|Légumes|Fruits|Produits laitiers|Alcools|Dilutants & Mixers|Sirops & Liqueurs|Fruits & Garnitures|Épicerie|Boulangerie|Consommables|Autres",
       "isFresh": true,
       "linkedDishes": ["plat1", "plat2"],
@@ -813,6 +832,7 @@ METHODE OBLIGATOIRE — procède CATEGORIE PAR CATEGORIE :
 3. Agrège les quantités unitaires × nombre de plats qui utilisent l'ingrédient
 
 Règles ABSOLUES :
+- TOUT EN FRANÇAIS — noms, catégories, raisons, unités
 - Liste TOUS les ingrédients bruts, PAS les plats finis
 - weeklyEstimate = estimation basée sur les ventes réelles (ou estimation si pas de ventes)
 - isFresh = true si périssable (viande, poisson, légumes, laitages, fruits frais)
