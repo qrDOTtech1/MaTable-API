@@ -50,11 +50,15 @@ export async function proRoutes(app: FastifyInstance) {
   });
 
    app.post("/login", authRateLimit, async (req, reply) => {
-    const { email, password } = z.object({
-      email: z.string().email(),
-      password: z.string().min(6),
-    }).parse(req.body);
-    
+    // Lenient validation — don't crash on slightly invalid emails
+    const body = req.body as Record<string, unknown> ?? {};
+    const email = String(body.email ?? "").trim().toLowerCase();
+    const password = String(body.password ?? "");
+
+    if (!email || !password || password.length < 6) {
+      return reply.code(401).send({ error: "invalid_credentials" });
+    }
+
     const user = await prisma.user.findUnique({ where: { email } });
     if (!user || !user.restaurantId) {
       return reply.code(401).send({ error: "invalid_credentials" });
