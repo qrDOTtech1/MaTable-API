@@ -183,21 +183,29 @@ export async function aiRoutes(app: FastifyInstance) {
 
     const model = iaConfig.ollamaVisionModel;
 
-    const systemPrompt = `Tu es un expert culinaire. Analyse cette photo de plat et reponds UNIQUEMENT en JSON valide (sans markdown) avec ce format exact :
+    // For vision models, merge the system prompt into the user message
+    // because some models (qwen3-vl, gemma4) don't support system role with images
+    const visionPrompt = `Tu es un expert culinaire. Analyse cette photo de plat et reponds UNIQUEMENT en JSON valide (sans markdown, sans backticks) avec ce format exact :
 {"suggestedName":"nom du plat","description":"description 3-4 phrases pour menu","suggestedPrice":"18,00€","allergens":["Gluten"],"diets":["Vegetarien"],"confidence":85}
 Allergenes possibles : Gluten, Crustaces, Oeufs, Poisson, Arachides, Soja, Lait, Fruits a coque, Celeri, Moutarde, Sesame, Sulfites, Lupin, Mollusques.
-Regimes possibles : Vegetarien, Vegan, Sans gluten, Sans lactose, Halal, Casher.`;
+Regimes possibles : Vegetarien, Vegan, Sans gluten, Sans lactose, Halal, Casher.
+
+Analyse ce plat.`;
 
     const cleanB64 = imageBase64.replace(/^data:[^;]+;base64,/, "");
 
     try {
+      // Single user message with images — no separate system message for vision
       const messages: OllamaMsg[] = [
-        { role: "system", content: systemPrompt },
-        { role: "user", content: "Analyse ce plat.", images: [cleanB64] },
+        { role: "user", content: visionPrompt, images: [cleanB64] },
       ];
 
-      const raw = (await ollamaCloudChat(iaConfig.ollamaApiKey, model, messages, VISION_TIMEOUT_MS))
-        .trim().replace(/^```json\n?|```$/g, "");
+      let raw = (await ollamaCloudChat(iaConfig.ollamaApiKey, model, messages, VISION_TIMEOUT_MS))
+        .trim().replace(/^```json\n?|```$/g, "").replace(/^```\n?|```$/g, "").trim();
+
+      // Some models wrap JSON in extra text — extract the JSON object
+      const jsonMatch = raw.match(/\{[\s\S]*\}/);
+      if (jsonMatch) raw = jsonMatch[0];
 
       let result: Record<string, unknown>;
       try { result = JSON.parse(raw); }
@@ -317,9 +325,13 @@ Regles OBLIGATOIRES:
 5. Si budget donne et depassable, note-le dans supplierOrderNote.`;
 
     try {
-      const raw = (await ollamaCloudChat(iaConfig.ollamaApiKey, iaConfig.ollamaLangModel, [
+      let raw = (await ollamaCloudChat(iaConfig.ollamaApiKey, iaConfig.ollamaLangModel, [
         { role: "user", content: prompt },
-      ])).trim().replace(/^```json\n?|```$/g, "").replace(/^```\n?|```$/g, "");
+      ])).trim().replace(/^```json\n?|```$/g, "").replace(/^```\n?|```$/g, "").trim();
+
+      // Extract JSON object from model output
+      const jsonMatch = raw.match(/\{[\s\S]*\}/);
+      if (jsonMatch) raw = jsonMatch[0];
 
       let analysis: Record<string, unknown>;
       try { analysis = JSON.parse(raw); }
@@ -413,9 +425,13 @@ Règles:
 - Maximum 20 ingrédients les plus importants.`;
 
     try {
-      const raw = (await ollamaCloudChat(iaConfig.ollamaApiKey, iaConfig.ollamaLangModel, [
+      let raw = (await ollamaCloudChat(iaConfig.ollamaApiKey, iaConfig.ollamaLangModel, [
         { role: "user", content: prompt },
-      ])).trim().replace(/^```json\n?|```$/g, "").replace(/^```\n?|```$/g, "");
+      ])).trim().replace(/^```json\n?|```$/g, "").replace(/^```\n?|```$/g, "").trim();
+
+      // Extract JSON object from model output
+      const jsonMatch = raw.match(/\{[\s\S]*\}/);
+      if (jsonMatch) raw = jsonMatch[0];
 
       let result: { items: any[] };
       try { result = JSON.parse(raw); }
@@ -551,8 +567,12 @@ Sois creatif, les descriptions doivent donner envie. Utilise des ingredients de 
       }
 
       const visionTimeout = imageMode ? VISION_TIMEOUT_MS : CHAT_TIMEOUT_MS;
-      const raw = (await ollamaCloudChat(iaConfig.ollamaApiKey, model, messages, visionTimeout))
-        .trim().replace(/^```json\n?|```$/g, "").replace(/^```\n?|```$/g, "");
+      let raw = (await ollamaCloudChat(iaConfig.ollamaApiKey, model, messages, visionTimeout))
+        .trim().replace(/^```json\n?|```$/g, "").replace(/^```\n?|```$/g, "").trim();
+
+      // Extract JSON object from model output (some models wrap in extra text)
+      const jsonMatch = raw.match(/\{[\s\S]*\}/);
+      if (jsonMatch) raw = jsonMatch[0];
 
       let result: { items: any[] };
       try { result = JSON.parse(raw); }
@@ -746,9 +766,13 @@ Règles:
 - weeklyTrend = agrège les données en semaines.`;
 
     try {
-      const raw = (await ollamaCloudChat(iaConfig.ollamaApiKey, iaConfig.ollamaLangModel, [
+      let raw = (await ollamaCloudChat(iaConfig.ollamaApiKey, iaConfig.ollamaLangModel, [
         { role: "user", content: prompt },
-      ])).trim().replace(/^```json\n?|```$/g, "").replace(/^```\n?|```$/g, "");
+      ])).trim().replace(/^```json\n?|```$/g, "").replace(/^```\n?|```$/g, "").trim();
+
+      // Extract JSON object from model output
+      const jsonMatch = raw.match(/\{[\s\S]*\}/);
+      if (jsonMatch) raw = jsonMatch[0];
 
       let advice: Record<string, unknown>;
       try { advice = JSON.parse(raw); }
