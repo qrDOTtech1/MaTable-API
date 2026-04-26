@@ -20,30 +20,55 @@ import { z } from "zod";
 // ── Ollama Cloud chat completion ──────────────────────────────────────────────
 type OllamaMsg = { role: "user" | "assistant" | "system"; content: string; images?: string[] };
 
+// Vision requests can take up to 3 minutes on large images
+const CHAT_TIMEOUT_MS  = 90_000;   // 90s for text
+const VISION_TIMEOUT_MS = 180_000; // 3min for vision
+
 async function ollamaCloudChat(
   apiKey: string,
   model: string,
-  messages: OllamaMsg[]
+  messages: OllamaMsg[],
+  timeoutMs = CHAT_TIMEOUT_MS
 ): Promise<string> {
-  const res = await fetch("https://ollama.com/api/chat", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "Authorization": `Bearer ${apiKey}`,
-    },
-    body: JSON.stringify({ model, messages, stream: false }),
-  });
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
 
-  if (!res.ok) {
-    const errorText = await res.text();
-    throw new Error(`ollama error ${res.status}: ${errorText}`);
+  try {
+    const res = await fetch("https://ollama.com/api/chat", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify({ model, messages, stream: false }),
+      signal: controller.signal,
+    });
+
+    if (!res.ok) {
+      const errorText = await res.text();
+      throw new Error(`ollama error ${res.status}: ${errorText}`);
+    }
+
+    const data = await res.json() as any;
+    return (data.message?.content ?? "") as string;
+  } catch (err: any) {
+    if (err.name === "AbortError") {
+      throw new Error(`ollama timeout after ${timeoutMs / 1000}s — image may be too large or server busy`);
+    }
+    throw err;
+  } finally {
+    clearTimeout(timer);
   }
-
-  const data = await res.json() as any;
-  return (data.message?.content ?? "") as string;
 }
 
 export async function aiRoutes(app: FastifyInstance) {
+  // Timeout global pour toutes les routes IA (vision = jusqu'à 3min)
+  app.addHook("onRequest", async (req) => {
+    if (req.url?.includes("/ia/")) {
+      (req.socket as any).setTimeout?.(210_000); // 3min30
+    }
+  });
+
   // ─────────────────────────────────────────────────────────────────────────────
   // POST /ia/chat  — chatbot / planning / descriptions
   // ─────────────────────────────────────────────────────────────────────────────
@@ -123,7 +148,7 @@ Regimes possibles : Vegetarien, Vegan, Sans gluten, Sans lactose, Halal, Casher.
         { role: "user", content: "Analyse ce plat.", images: [cleanB64] },
       ];
 
-      const raw = (await ollamaCloudChat(iaConfig.ollamaApiKey, model, messages))
+      const raw = (await ollamaCloudChat(iaConfig.ollamaApiKey, model, messages, VISION_TIMEOUT_MS))
         .trim().replace(/^```json\n?|```$/g, "");
 
       let result: Record<string, unknown>;
@@ -477,7 +502,8 @@ Sois creatif, les descriptions doivent donner envie. Utilise des ingredients de 
         messages.push({ role: "user", content: prompt });
       }
 
-      const raw = (await ollamaCloudChat(iaConfig.ollamaApiKey, model, messages))
+      const visionTimeout = imageMode ? VISION_TIMEOUT_MS : CHAT_TIMEOUT_MS;
+      const raw = (await ollamaCloudChat(iaConfig.ollamaApiKey, model, messages, visionTimeout))
         .trim().replace(/^```json\n?|```$/g, "").replace(/^```\n?|```$/g, "");
 
       let result: { items: any[] };
