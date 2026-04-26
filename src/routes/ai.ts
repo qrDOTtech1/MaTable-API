@@ -614,7 +614,163 @@ Sois creatif, les descriptions doivent donner envie. Utilise des ingredients de 
   });
 
   // ─────────────────────────────────────────────────────────────────────────────
-  // GET  /ia/history?type=STOCK|MENU|CHAT|PLANNING  — list IA history
+  // POST /ia/financial-advice — Conseiller Financier IA
+  // ─────────────────────────────────────────────────────────────────────────────
+  app.post("/ia/financial-advice", async (req, reply) => {
+    const me = await requirePro(req, reply);
+
+    const restaurant = await prisma.restaurant.findUnique({
+      where: { id: me.restaurantId },
+      select: { subscription: true, name: true },
+    });
+    if (!restaurant || restaurant.subscription !== "PRO_IA") {
+      return reply.code(403).send({ error: "IA_NOT_SUBSCRIBED" });
+    }
+
+    const iaConfig = await getGlobalIaConfig();
+    if (!iaConfig.ollamaApiKey) {
+      return reply.code(503).send({ error: "IA_KEY_MISSING" });
+    }
+
+    const body = z.object({
+      period: z.enum(["7d", "30d", "90d"]).default("30d"),
+      fixedCosts: z.number().optional(),        // charges fixes mensuelle (loyer, salaires…)
+      foodCostTarget: z.number().optional(),    // food cost cible % (ex: 30)
+      notes: z.string().max(1000).optional(),   // notes libres (événements, saisonnalité…)
+    }).parse(req.body ?? {});
+
+    const periodDays = body.period === "90d" ? 90 : body.period === "7d" ? 7 : 30;
+    const since = new Date(Date.now() - periodDays * 86400_000);
+
+    const menuItems = await prisma.menuItem.findMany({
+      where: { restaurantId: me.restaurantId },
+      select: { name: true, priceCents: true, category: true, available: true },
+    });
+
+    const orders = await prisma.order.findMany({
+      where: { table: { restaurantId: me.restaurantId }, createdAt: { gte: since }, status: { not: "CANCELLED" } },
+      select: { items: true, totalCents: true, createdAt: true },
+      orderBy: { createdAt: "asc" },
+      take: 1000,
+    });
+
+    // Aggregate revenue by day
+    const revenueByDay: Record<string, number> = {};
+    let totalRevenue = 0;
+    for (const o of orders) {
+      const day = o.createdAt.toISOString().slice(0, 10);
+      revenueByDay[day] = (revenueByDay[day] ?? 0) + (o.totalCents ?? 0);
+      totalRevenue += o.totalCents ?? 0;
+    }
+
+    // Sales map
+    const salesMap: Record<string, { qty: number; revenue: number; name: string }> = {};
+    for (const o of orders) {
+      const items = o.items as any[];
+      if (!Array.isArray(items)) continue;
+      for (const item of items) {
+        const key = item.menuItemId || item.name;
+        if (!salesMap[key]) salesMap[key] = { qty: 0, revenue: 0, name: item.name };
+        salesMap[key].qty += item.quantity || 1;
+        salesMap[key].revenue += (item.priceCents || 0) * (item.quantity || 1);
+      }
+    }
+
+    const topByRevenue = Object.values(salesMap)
+      .sort((a, b) => b.revenue - a.revenue)
+      .slice(0, 15)
+      .map(v => `- ${v.name}: ${v.qty} vendus · ${(v.revenue / 100).toFixed(2)}€ CA`);
+
+    const dailySummary = Object.entries(revenueByDay)
+      .slice(-14)
+      .map(([d, c]) => `${d}: ${(c / 100).toFixed(2)}€`)
+      .join("\n");
+
+    const prompt = `Tu es Nova Finance IA, conseiller financier expert pour restaurants. Tu analyses les données réelles du restaurant et fournis des recommandations concrètes et actionnables.
+
+Restaurant: ${restaurant.name}
+Période analysée: ${periodDays} derniers jours
+Commandes: ${orders.length}
+CA total période: ${(totalRevenue / 100).toFixed(2)}€
+CA moyen / jour: ${orders.length > 0 ? ((totalRevenue / 100) / periodDays).toFixed(2) : "0"}€
+CA moyen / commande: ${orders.length > 0 ? ((totalRevenue / 100) / orders.length).toFixed(2) : "0"}€
+${body.fixedCosts ? `Charges fixes déclarées: ${body.fixedCosts}€/mois` : "Charges fixes: non renseignées"}
+${body.foodCostTarget ? `Objectif food cost: ${body.foodCostTarget}%` : ""}
+${body.notes ? `Notes: ${body.notes}` : ""}
+
+=== CHIFFRE D'AFFAIRES (14 derniers jours) ===
+${dailySummary || "Aucune donnée"}
+
+=== TOP PLATS PAR CA ===
+${topByRevenue.join("\n") || "Aucune vente"}
+
+=== MENU (${menuItems.length} plats) ===
+${menuItems.map(m => `- ${m.name} | ${(m.priceCents / 100).toFixed(2)}€ | ${m.category ?? "sans catégorie"} | ${m.available ? "dispo" : "indispo"}`).join("\n")}
+
+Réponds UNIQUEMENT en JSON valide (sans markdown) avec ce format EXACT:
+{
+  "kpis": {
+    "totalRevenue": 0,
+    "avgRevenuePerDay": 0,
+    "avgTicket": 0,
+    "projectedMonthly": 0,
+    "projectedAnnual": 0,
+    "estimatedFoodCost": 0,
+    "estimatedMargin": 0,
+    "marginPercent": 0
+  },
+  "weeklyTrend": [{"week":"Semaine 1","revenue":0,"orders":0}],
+  "topDishes": [{"name":"nom","revenue":0,"qty":0,"revenueShare":0}],
+  "underperformers": [{"name":"nom","revenue":0,"qty":0,"issue":"raison","action":"recommandation"}],
+  "recommendations": [
+    {"type":"PRICING|MENU|MARKETING|COSTS|FORECAST","title":"titre","detail":"explication concrète 2-3 phrases","impact":"HIGH|MEDIUM|LOW","effort":"EASY|MEDIUM|HARD"}
+  ],
+  "forecast": {
+    "nextWeekRevenue": 0,
+    "nextMonthRevenue": 0,
+    "confidence": 70,
+    "risks": ["risque 1"],
+    "opportunities": ["opportunité 1"]
+  },
+  "offersProposed": [
+    {"dish":"nom plat","type":"HAPPY_HOUR|COMBO|PROMO_SEMAINE|FORMULE","description":"description de l'offre","discountPercent":15,"estimatedRevenueBoost":"% ou €","rationale":"pourquoi cette offre"}
+  ],
+  "summary": "Résumé exécutif en 3-4 phrases avec les chiffres clés et l'action prioritaire."
+}
+
+Règles:
+- Sois précis avec les chiffres réels fournis.
+- projectedMonthly = extrapolation sur 30j basée sur le CA/jour réel.
+- estimatedFoodCost = estimation % basée sur les prix de vente (hypothèse 28-35% pour un restaurant français standard).
+- offersProposed = 2-4 offres concrètes basées sur les données réelles (plats sous-performants, heures creuses, etc.)
+- weeklyTrend = agrège les données en semaines.`;
+
+    try {
+      const raw = (await ollamaCloudChat(iaConfig.ollamaApiKey, iaConfig.ollamaLangModel, [
+        { role: "user", content: prompt },
+      ])).trim().replace(/^```json\n?|```$/g, "").replace(/^```\n?|```$/g, "");
+
+      let advice: Record<string, unknown>;
+      try { advice = JSON.parse(raw); }
+      catch {
+        advice = { summary: raw, kpis: {}, recommendations: [], forecast: {}, offersProposed: [], topDishes: [], underperformers: [], weeklyTrend: [] };
+      }
+
+      const meta = { ordersAnalyzed: orders.length, totalRevenueCents: totalRevenue, period: body.period, restaurantName: restaurant.name };
+
+      const ca = (totalRevenue / 100).toFixed(0);
+      const title = `Finance ${new Date().toLocaleDateString("fr-FR", { day: "numeric", month: "short" })} — ${periodDays}j · ${ca}€ CA`;
+      await saveAiHistory(me.restaurantId, "FINANCE", title, { advice, meta });
+
+      return { advice, meta };
+    } catch (err: any) {
+      app.log.error(err);
+      return reply.code(502).send({ error: "AI_ERROR", details: err.message });
+    }
+  });
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // GET  /ia/history?type=STOCK|MENU|CHAT|PLANNING|FINANCE  — list IA history
   // POST /ia/history                                 — save from frontend (chat/planning)
   // DELETE /ia/history/:id                           — delete one entry
   // ─────────────────────────────────────────────────────────────────────────────
@@ -651,7 +807,7 @@ Sois creatif, les descriptions doivent donner envie. Utilise des ingredients de 
     const me = await requirePro(req, reply);
 
     const { type, title, outputData } = z.object({
-      type: z.enum(["CHAT", "PLANNING", "STOCK", "MENU"]),
+      type: z.enum(["CHAT", "PLANNING", "STOCK", "MENU", "FINANCE"]),
       title: z.string().max(200),
       outputData: z.any(),
     }).parse(req.body);
