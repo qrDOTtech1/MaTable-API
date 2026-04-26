@@ -101,17 +101,16 @@ CREATE INDEX IF NOT EXISTS "Photo_menuItemId_idx" ON "Photo"("menuItemId");
 -- GlobalConfig: single-row table for platform-wide Ollama Cloud settings
 CREATE TABLE IF NOT EXISTS "GlobalConfig" (
   id TEXT NOT NULL DEFAULT 'global',
-  "ollamaApiKey" TEXT,
-  "ollamaLangModel" TEXT NOT NULL DEFAULT 'gpt-oss:120b',
-  "ollamaVisionModel" TEXT NOT NULL DEFAULT 'qwen3-vl:235b',
   "updatedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
   CONSTRAINT "GlobalConfig_pkey" PRIMARY KEY (id)
 );
+-- Add columns if table existed without them (idempotent)
+ALTER TABLE "GlobalConfig" ADD COLUMN IF NOT EXISTS "ollamaApiKey" TEXT;
+ALTER TABLE "GlobalConfig" ADD COLUMN IF NOT EXISTS "ollamaLangModel" TEXT NOT NULL DEFAULT 'gpt-oss:120b';
+ALTER TABLE "GlobalConfig" ADD COLUMN IF NOT EXISTS "ollamaVisionModel" TEXT NOT NULL DEFAULT 'qwen3-vl:235b';
 
 -- Ensure exactly one global config row exists
-INSERT INTO "GlobalConfig" (id, "ollamaApiKey", "ollamaLangModel", "ollamaVisionModel", "updatedAt")
-VALUES ('global', NULL, 'gpt-oss:120b', 'qwen3-vl:235b', NOW())
-ON CONFLICT (id) DO NOTHING;
+INSERT INTO "GlobalConfig" (id) VALUES ('global') ON CONFLICT (id) DO NOTHING;
 
 -- Prospect table (CRM de prospection)
 CREATE TABLE IF NOT EXISTS "Prospect" (
