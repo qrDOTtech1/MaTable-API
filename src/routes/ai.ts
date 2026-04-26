@@ -201,18 +201,22 @@ async function ollamaCloudChatStream(
 /**
  * Helper: Set up a raw SSE response on a Fastify reply.
  * Returns a `send` function and a `close` function.
- * MUST call reply.hijack() first to prevent Fastify from managing the response.
+ *
+ * Uses Fastify's reply API to set headers (so CORS plugin adds its headers),
+ * then switches to reply.raw for streaming the body.
  */
 function setupSSE(reply: import("fastify").FastifyReply) {
-  // Hijack tells Fastify: "I'll handle the response myself, don't touch it"
-  reply.hijack();
+  // Use Fastify reply to set status + headers — this ensures CORS plugin hooks run
+  reply
+    .status(200)
+    .header("Content-Type", "text/event-stream")
+    .header("Cache-Control", "no-cache")
+    .header("Connection", "keep-alive")
+    .header("X-Accel-Buffering", "no");
 
-  reply.raw.writeHead(200, {
-    "Content-Type": "text/event-stream",
-    "Cache-Control": "no-cache",
-    "Connection": "keep-alive",
-    "X-Accel-Buffering": "no",
-  });
+  // Flush the headers to the client immediately
+  // reply.raw.flushHeaders() sends the status line + headers without ending the response
+  reply.raw.flushHeaders();
 
   const send = (data: Record<string, unknown>) => {
     try { reply.raw.write(`data: ${JSON.stringify(data)}\n\n`); } catch { /* connection closed */ }
@@ -359,6 +363,7 @@ Analyse ce plat.`;
   // POST /ia/stock-analysis/stream — SSE streaming variant for full stock analysis
   // ─────────────────────────────────────────────────────────────────────────────
   app.post("/ia/stock-analysis/stream", async (req, reply) => {
+    // --- Validate BEFORE starting SSE ---
     const me = await requirePro(req, reply);
 
     const restaurant = await prisma.restaurant.findUnique({
@@ -374,6 +379,7 @@ Analyse ce plat.`;
       return reply.code(503).send({ error: "IA_KEY_MISSING" });
     }
 
+    // --- All checks passed, NOW start SSE ---
     const { send: sendSSE, close: closeSSE } = setupSSE(reply);
 
     try {
@@ -694,6 +700,7 @@ Regles OBLIGATOIRES:
   // POST /ia/stock-items/stream — SSE streaming variant of stock-items detection
   // ─────────────────────────────────────────────────────────────────────────────
   app.post("/ia/stock-items/stream", async (req, reply) => {
+    // --- Validate BEFORE starting SSE (normal HTTP errors with CORS) ---
     const me = await requirePro(req, reply);
 
     const restaurant = await prisma.restaurant.findUnique({
@@ -709,6 +716,7 @@ Regles OBLIGATOIRES:
       return reply.code(503).send({ error: "IA_KEY_MISSING" });
     }
 
+    // --- All checks passed, NOW start SSE ---
     const { send: sendSSE, close: closeSSE } = setupSSE(reply);
 
     try {
@@ -988,6 +996,7 @@ Sois creatif, les descriptions doivent donner envie. Utilise des ingredients de 
   //         {"type":"error","message":"..."}
   // ─────────────────────────────────────────────────────────────────────────────
   app.post("/ia/menu-generate/stream", async (req, reply) => {
+    // --- Validate BEFORE starting SSE ---
     const me = await requirePro(req, reply);
 
     const restaurant = await prisma.restaurant.findUnique({
