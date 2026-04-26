@@ -89,19 +89,21 @@ async function ollamaCloudChat(
 }
 
 /**
- * Streaming variant — sends SSE events to the client while Ollama generates.
- * Keeps the HTTP connection alive so we never hit browser/proxy timeouts.
+ * Streaming variant — reads Ollama NDJSON stream token by token.
+ * Calls `onProgress(chars)` periodically so the caller can forward SSE events.
  *
- * Events:
- *   data: {"type":"chunk","content":"partial text"}
- *   data: {"type":"done","content":"full text"}
- *   data: {"type":"error","message":"..."}
+ * Ollama NDJSON format (discovered via curl):
+ *   {"message":{"role":"assistant","content":"","thinking":"..."},"done":false}
+ *   {"message":{"role":"assistant","content":"Hi"},"done":false}
+ *   {"message":{"role":"assistant","content":""},"done":true,"done_reason":"stop",...}
+ *
+ * `thinking` = chain-of-thought (ignored), `content` = actual output text.
  */
 async function ollamaCloudChatStream(
   apiKey: string,
   model: string,
   messages: OllamaMsg[],
-  reply: import("fastify").FastifyReply,
+  onProgress?: (chars: number) => void,
   timeoutMs = CHAT_TIMEOUT_MS,
 ): Promise<string> {
   let lastErr: Error | null = null;
@@ -144,31 +146,34 @@ async function ollamaCloudChatStream(
       const decoder = new TextDecoder();
       let fullContent = "";
       let chunkCount = 0;
+      let buffer = "";
 
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
 
-        const text = decoder.decode(value, { stream: true });
+        buffer += decoder.decode(value, { stream: true });
         // Ollama streams NDJSON — one JSON object per line
-        const lines = text.split("\n").filter(l => l.trim());
+        const lines = buffer.split("\n");
+        buffer = lines.pop() ?? ""; // keep incomplete last line in buffer
 
         for (const line of lines) {
+          if (!line.trim()) continue;
           try {
             const obj = JSON.parse(line);
+            // Only collect actual content, not thinking tokens
             const chunk = obj.message?.content ?? "";
             if (chunk) {
               fullContent += chunk;
               chunkCount++;
-              // Send progress to client every 5 chunks to avoid flooding
-              if (chunkCount % 5 === 0) {
-                reply.raw.write(`data: ${JSON.stringify({ type: "chunk", chars: fullContent.length })}\n\n`);
+              // Notify caller every 5 content chunks
+              if (chunkCount % 5 === 0 && onProgress) {
+                onProgress(fullContent.length);
               }
             }
-            // If Ollama signals done
             if (obj.done === true) break;
           } catch {
-            // Partial JSON line — skip
+            // Partial JSON — wait for next read
           }
         }
       }
@@ -191,6 +196,32 @@ async function ollamaCloudChatStream(
   }
 
   throw lastErr ?? new Error("ollama: max retries exceeded (429 persists)");
+}
+
+/**
+ * Helper: Set up a raw SSE response on a Fastify reply.
+ * Returns a `send` function and a `close` function.
+ * MUST call reply.hijack() first to prevent Fastify from managing the response.
+ */
+function setupSSE(reply: import("fastify").FastifyReply) {
+  // Hijack tells Fastify: "I'll handle the response myself, don't touch it"
+  reply.hijack();
+
+  reply.raw.writeHead(200, {
+    "Content-Type": "text/event-stream",
+    "Cache-Control": "no-cache",
+    "Connection": "keep-alive",
+    "X-Accel-Buffering": "no",
+  });
+
+  const send = (data: Record<string, unknown>) => {
+    try { reply.raw.write(`data: ${JSON.stringify(data)}\n\n`); } catch { /* connection closed */ }
+  };
+  const close = () => {
+    try { reply.raw.end(); } catch { /* already closed */ }
+  };
+
+  return { send, close };
 }
 
 // ── History helper ────────────────────────────────────────────────────────────
@@ -325,7 +356,177 @@ Analyse ce plat.`;
   });
 
   // ─────────────────────────────────────────────────────────────────────────────
-  // POST /ia/stock-analysis — Nova Stock IA
+  // POST /ia/stock-analysis/stream — SSE streaming variant for full stock analysis
+  // ─────────────────────────────────────────────────────────────────────────────
+  app.post("/ia/stock-analysis/stream", async (req, reply) => {
+    const me = await requirePro(req, reply);
+
+    const restaurant = await prisma.restaurant.findUnique({
+      where: { id: me.restaurantId },
+      select: { subscription: true, name: true },
+    });
+    if (!restaurant || restaurant.subscription !== "PRO_IA") {
+      return reply.code(403).send({ error: "IA_NOT_SUBSCRIBED" });
+    }
+
+    const iaConfig = await getGlobalIaConfig();
+    if (!iaConfig.ollamaApiKey) {
+      return reply.code(503).send({ error: "IA_KEY_MISSING" });
+    }
+
+    const { send: sendSSE, close: closeSSE } = setupSSE(reply);
+
+    try {
+      sendSSE({ type: "progress", phase: "loading", message: "Chargement des données..." });
+
+      const body = z.object({
+        existingStockNotes: z.string().max(4000).optional(),
+        purchaseConstraints: z.string().max(1500).optional(),
+        freshProducts: z.string().max(2000).optional(),
+        budget: z.number().optional(),
+      }).parse(req.body ?? {});
+
+      const menuItems = await prisma.menuItem.findMany({
+        where: { restaurantId: me.restaurantId },
+        select: { id: true, name: true, priceCents: true, category: true, stockEnabled: true, stockQty: true, lowStockThreshold: true, available: true },
+      });
+
+      const twoWeeksAgo = new Date(Date.now() - 14 * 86400_000);
+      const recentOrders = await prisma.order.findMany({
+        where: { table: { restaurantId: me.restaurantId }, createdAt: { gte: twoWeeksAgo }, status: { not: "CANCELLED" } },
+        select: { items: true, createdAt: true, totalCents: true },
+        orderBy: { createdAt: "desc" },
+        take: 500,
+      });
+
+      const salesMap: Record<string, { qty: number; revenue: number; name: string }> = {};
+      for (const order of recentOrders) {
+        const items = order.items as any[];
+        if (!Array.isArray(items)) continue;
+        for (const item of items) {
+          const key = item.menuItemId || item.name;
+          if (!salesMap[key]) salesMap[key] = { qty: 0, revenue: 0, name: item.name };
+          salesMap[key].qty += item.quantity || 1;
+          salesMap[key].revenue += (item.priceCents || 0) * (item.quantity || 1);
+        }
+      }
+
+      const hasTrackedStock = menuItems.some(m => m.stockEnabled);
+      const stockContext = body.existingStockNotes?.trim()
+        ? body.existingStockNotes.trim()
+        : hasTrackedStock
+          ? menuItems.filter(m => m.stockEnabled).map(m => `- ${m.name}: ${m.stockQty ?? 0} en stock`).join('\n')
+          : 'STOCK VIDE — Le restaurant na declare aucun stock. Considere que tous les ingredients sont a 0. Genere une liste de courses COMPLETE pour la semaine.';
+
+      const catMap: Record<string, typeof menuItems> = {};
+      for (const m of menuItems) {
+        const cat = m.category || "Autres";
+        (catMap[cat] ||= []).push(m);
+      }
+      const categoryBreakdown = Object.entries(catMap).map(([cat, items]) =>
+        `--- ${cat.toUpperCase()} (${items.length} plats) ---\n` +
+        items.map(m => `  - ${m.name} | ${(m.priceCents / 100).toFixed(2)}EUR | ${m.available ? "dispo" : "indispo"}`).join("\n")
+      ).join("\n\n");
+
+      sendSSE({ type: "progress", phase: "analyzing", message: `Analyse IA de ${menuItems.length} plats et ${recentOrders.length} commandes...` });
+
+      // Same prompt as stock-analysis (reuse the comprehensive prompt)
+      const prompt = `Tu es Nova Stock IA, un expert en gestion de stock pour restaurants. Tu dois etre TRES PRECIS et CONCRET.
+
+REGLE ABSOLUE : si le stock est vide ou non declare, "alreadyHave" = 0 et "toBuy" = "estimatedNeeded" pour CHAQUE ingredient. Tu DOIS generer une shoppingList complete, jamais vide.
+
+Restaurant: ${restaurant.name}
+Periode d'analyse: 14 derniers jours
+Commandes analysees: ${recentOrders.length}
+${body.budget ? `Budget courses maximum: ${body.budget}EUR` : 'Pas de budget maximum specifie'}
+
+=== MENU PAR CATEGORIE (${menuItems.length} plats, ${Object.keys(catMap).length} categories) ===
+${categoryBreakdown}
+
+=== VENTES 14 JOURS ===
+${Object.entries(salesMap).sort((a, b) => b[1].qty - a[1].qty).map(([, v]) => `- ${v.name}: ${v.qty} vendus (${(v.revenue / 100).toFixed(2)}EUR CA)`).join('\n') || 'Aucune vente enregistree — genere tout de meme une liste de courses basee sur le menu'}
+
+=== STOCK ACTUEL ===
+${stockContext}
+
+=== PRODUITS FRAIS ===
+${body.freshProducts?.trim() || 'Non renseigne'}
+
+=== CONTRAINTES ===
+${body.purchaseConstraints?.trim() || 'Aucune contrainte'}
+
+METHODE D'ANALYSE OBLIGATOIRE :
+Procede CATEGORIE PAR CATEGORIE. Pour chaque categorie du menu :
+1. Liste CHAQUE plat de la categorie
+2. Decompose CHAQUE plat en TOUS ses ingredients bruts :
+   - Ingredients principaux (viande, poisson, pates, riz...)
+   - Bases et alcools (rhum, vodka, gin, tequila, whisky...)
+   - Dilutants et mixers (jus d'orange, tonic, soda, ginger beer, eau gazeuse, cola...)
+   - Sirops et sucres (sirop de sucre, sirop de grenadine, sirop de menthe, triple sec, creme de mure...)
+   - Fruits et garnitures (citron, citron vert, menthe fraiche, ananas, cerise, olives...)
+   - Produits laitiers (lait, creme, beurre, fromage, coco...)
+   - Condiments et sauces (sel, poivre, huile, vinaigre, moutarde, ketchup...)
+   - Consommables (pailles, serviettes, glacons...)
+3. Agrege les quantites : un ingredient utilise dans 5 cocktails = 5x la quantite unitaire
+
+Reponds UNIQUEMENT en JSON valide (sans markdown, sans commentaire, sans backticks) avec ce format EXACT:
+{
+  "summary": "Resume en 2-3 phrases",
+  "alerts": [{"item":"nom","issue":"probleme precis","urgency":"HIGH|MEDIUM|LOW"}],
+  "reorderSuggestions": [{"item":"nom","currentStock":0,"suggestedOrder":0,"reason":"courte explication"}],
+  "topSellers": [{"item":"nom","qtySold":0,"trend":"UP|STABLE|DOWN"}],
+  "deadStock": [{"item":"nom","qtySold":0,"suggestion":"action concrete"}],
+  "forecastNextWeek": [{"item":"nom","estimatedDemand":0}],
+  "shoppingList": [{"ingredient":"nom ingredient brut","category":"categorie ingredient","estimatedNeeded":0,"alreadyHave":0,"toBuy":0,"unit":"kg|L|piece|botte|douzaine|bouteille|cl","priority":"HIGH|MEDIUM|LOW","estimatedCost":0,"reason":"pour quels plats"}],
+  "promotions": [{"item":"nom plat","reason":"raison","suggestedDiscount":"-20%","urgency":"HIGH|MEDIUM|LOW","action":"description promo"}],
+  "freshProductAlerts": [{"product":"nom","expiresIn":"X jours","qty":"quantite","recommendation":"action","affectedDishes":["plat1"]}],
+  "supplierOrderNote": "strategie achat 2-3 phrases",
+  "costSavings": "conseil anti-gaspillage concret",
+  "totalShoppingBudget": 0
+}
+
+Regles OBLIGATOIRES:
+1. shoppingList JAMAIS VIDE.
+2. MINIMUM 30 ingredients dans la shoppingList pour un menu de plus de 15 plats.
+3. Chaque ingredient a un champ "category" pour le regrouper.
+4. estimatedCost = prix d'achat reel estime.
+5. totalShoppingBudget = somme de tous les estimatedCost.`;
+
+      const raw = await ollamaCloudChatStream(
+        iaConfig.ollamaApiKey, iaConfig.ollamaLangModel,
+        [{ role: "user", content: prompt }],
+        (chars) => sendSSE({ type: "chunk", chars }),
+        CHAT_TIMEOUT_MS,
+      );
+
+      sendSSE({ type: "progress", phase: "parsing", message: "Extraction des résultats..." });
+
+      let cleaned = raw.trim().replace(/^```json\n?|```$/g, "").replace(/^```\n?|```$/g, "").trim();
+      const jsonMatch = cleaned.match(/\{[\s\S]*\}/);
+      if (jsonMatch) cleaned = jsonMatch[0];
+
+      let analysis: Record<string, unknown>;
+      try { analysis = JSON.parse(cleaned); }
+      catch { analysis = { summary: raw, alerts: [], reorderSuggestions: [], topSellers: [], deadStock: [], forecastNextWeek: [], shoppingList: [], promotions: [], freshProductAlerts: [], supplierOrderNote: "", costSavings: "", totalShoppingBudget: 0 }; }
+
+      const meta = { ordersAnalyzed: recentOrders.length, menuItemsCount: menuItems.length, period: "14d", restaurantName: restaurant.name };
+
+      const shopCount = (analysis.shoppingList as any[])?.length ?? 0;
+      const budgetEst = (analysis.totalShoppingBudget as number) ?? 0;
+      const title = `Stock ${new Date().toLocaleDateString("fr-FR", { day: "numeric", month: "short" })} — ${shopCount} articles · ~${budgetEst.toFixed(0)}€`;
+      await saveAiHistory(me.restaurantId, "STOCK", title, { analysis, meta });
+
+      sendSSE({ type: "result", analysis, meta });
+    } catch (err: any) {
+      app.log.error(err);
+      sendSSE({ type: "error", message: err.message || "Erreur serveur IA" });
+    } finally {
+      closeSSE();
+    }
+  });
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // POST /ia/stock-analysis — Nova Stock IA (non-streaming, kept for backward compat)
   // ─────────────────────────────────────────────────────────────────────────────
   app.post("/ia/stock-analysis", async (req, reply) => {
     const me = await requirePro(req, reply);
@@ -490,9 +691,9 @@ Regles OBLIGATOIRES:
   });
 
   // ─────────────────────────────────────────────────────────────────────────────
-  // POST /ia/stock-items — Étape 1 du wizard stock
+  // POST /ia/stock-items/stream — SSE streaming variant of stock-items detection
   // ─────────────────────────────────────────────────────────────────────────────
-  app.post("/ia/stock-items", async (req, reply) => {
+  app.post("/ia/stock-items/stream", async (req, reply) => {
     const me = await requirePro(req, reply);
 
     const restaurant = await prisma.restaurant.findUnique({
@@ -508,36 +709,55 @@ Regles OBLIGATOIRES:
       return reply.code(503).send({ error: "IA_KEY_MISSING" });
     }
 
-    const menuItems = await prisma.menuItem.findMany({
-      where: { restaurantId: me.restaurantId },
-      select: { name: true, priceCents: true, category: true, available: true },
-    });
+    const { send: sendSSE, close: closeSSE } = setupSSE(reply);
 
-    const twoWeeksAgo = new Date(Date.now() - 14 * 86400_000);
-    const recentOrders = await prisma.order.findMany({
-      where: { table: { restaurantId: me.restaurantId }, createdAt: { gte: twoWeeksAgo }, status: { not: "CANCELLED" } },
-      select: { items: true },
-      take: 300,
-    });
+    try {
+      sendSSE({ type: "progress", phase: "loading-menu", message: "Chargement du menu et des ventes..." });
 
-    const salesMap: Record<string, { qty: number; name: string }> = {};
-    for (const order of recentOrders) {
-      const items = order.items as any[];
-      if (!Array.isArray(items)) continue;
-      for (const item of items) {
-        const key = item.menuItemId || item.name;
-        if (!salesMap[key]) salesMap[key] = { qty: 0, name: item.name };
-        salesMap[key].qty += item.quantity || 1;
+      const menuItems = await prisma.menuItem.findMany({
+        where: { restaurantId: me.restaurantId },
+        select: { name: true, priceCents: true, category: true, available: true },
+      });
+
+      const twoWeeksAgo = new Date(Date.now() - 14 * 86400_000);
+      const recentOrders = await prisma.order.findMany({
+        where: { table: { restaurantId: me.restaurantId }, createdAt: { gte: twoWeeksAgo }, status: { not: "CANCELLED" } },
+        select: { items: true },
+        take: 300,
+      });
+
+      const salesMap: Record<string, { qty: number; name: string }> = {};
+      for (const order of recentOrders) {
+        const items = order.items as any[];
+        if (!Array.isArray(items)) continue;
+        for (const item of items) {
+          const key = item.menuItemId || item.name;
+          if (!salesMap[key]) salesMap[key] = { qty: 0, name: item.name };
+          salesMap[key].qty += item.quantity || 1;
+        }
       }
-    }
 
-    const prompt = `Tu es Nova Stock IA. Analyse ce menu et ces ventes pour identifier les INGREDIENTS BRUTS que ce restaurant doit gérer en stock.
+      // Group menu items by category for better analysis
+      const catMap: Record<string, typeof menuItems> = {};
+      for (const m of menuItems) {
+        const cat = m.category || "Autres";
+        (catMap[cat] ||= []).push(m);
+      }
+      const categoryBreakdown = Object.entries(catMap).map(([cat, items]) =>
+        `--- ${cat.toUpperCase()} (${items.length} plats) ---\n` +
+        items.map(m => `  - ${m.name}`).join("\n")
+      ).join("\n\n");
+
+      sendSSE({ type: "progress", phase: "analyzing", message: `Analyse de ${menuItems.length} plats en ${Object.keys(catMap).length} catégories...` });
+
+      const prompt = `Tu es Nova Stock IA. Analyse ce menu et ces ventes pour identifier TOUS les INGREDIENTS BRUTS que ce restaurant doit gérer en stock.
 
 Restaurant: ${restaurant.name}
-Menu (${menuItems.length} plats):
-${menuItems.map(m => `- ${m.name} (${m.category ?? "autre"})`).join("\n")}
 
-Ventes 14 jours:
+=== MENU PAR CATEGORIE (${menuItems.length} plats) ===
+${categoryBreakdown}
+
+=== VENTES 14 JOURS ===
 ${Object.values(salesMap).sort((a,b) => b.qty - a.qty).map(v => `- ${v.name}: ${v.qty} vendus`).join("\n") || "Aucune vente"}
 
 Retourne UNIQUEMENT un JSON valide (sans markdown) avec ce format EXACT:
@@ -545,8 +765,8 @@ Retourne UNIQUEMENT un JSON valide (sans markdown) avec ce format EXACT:
   "items": [
     {
       "name": "Nom ingrédient ou article",
-      "unit": "kg|L|piece|botte|douzaine|sachet",
-      "category": "Viandes|Poissons|Légumes|Fruits|Produits laitiers|Boissons|Épicerie|Boulangerie|Autres",
+      "unit": "kg|L|piece|botte|douzaine|sachet|bouteille|cl",
+      "category": "Viandes|Poissons|Légumes|Fruits|Produits laitiers|Alcools|Dilutants & Mixers|Sirops & Liqueurs|Fruits & Garnitures|Épicerie|Boulangerie|Consommables|Autres",
       "isFresh": true,
       "linkedDishes": ["plat1", "plat2"],
       "weeklyEstimate": 0
@@ -554,30 +774,56 @@ Retourne UNIQUEMENT un JSON valide (sans markdown) avec ce format EXACT:
   ]
 }
 
-Règles:
-- Liste les ingrédients BRUTS nécessaires pour cuisiner le menu, pas les plats finis.
-- weeklyEstimate = estimation de la quantité nécessaire par semaine basée sur les ventes.
-- isFresh = true si produit périssable (viande, poisson, légumes, laitages, etc.).
-- Concentre-toi sur les ingrédients qui représentent un coût significatif ou un risque de rupture.
-- Maximum 20 ingrédients les plus importants.`;
+METHODE OBLIGATOIRE — procède CATEGORIE PAR CATEGORIE :
+1. Pour chaque catégorie du menu, liste CHAQUE plat
+2. Décompose CHAQUE plat en TOUS ses ingrédients bruts :
+   - Protéines (viandes, poissons, oeufs...)
+   - Féculents (pâtes, riz, pain, pommes de terre...)
+   - Légumes et herbes (salade, tomates, oignon, ail, menthe, basilic...)
+   - Fruits (citron, citron vert, ananas, fruits rouges...)
+   - Produits laitiers (lait, crème, beurre, fromage...)
+   - Alcools (rhum, vodka, gin, tequila, whisky, bière, vin, Prosecco...)
+   - Dilutants (jus d'orange, tonic, soda, ginger beer, eau gazeuse, cola...)
+   - Sirops (sucre, grenadine, menthe, sureau, triple sec, crème de mûre...)
+   - Condiments (sel, poivre, huile d'olive, vinaigre, moutarde, ketchup, mayo...)
+   - Consommables (pailles, serviettes, glaçons, film alimentaire...)
+3. Agrège les quantités unitaires × nombre de plats qui utilisent l'ingrédient
 
-    try {
-      let raw = (await ollamaCloudChat(iaConfig.ollamaApiKey, iaConfig.ollamaLangModel, [
-        { role: "user", content: prompt },
-      ])).trim().replace(/^```json\n?|```$/g, "").replace(/^```\n?|```$/g, "").trim();
+Règles ABSOLUES :
+- Liste TOUS les ingrédients bruts, PAS les plats finis
+- weeklyEstimate = estimation basée sur les ventes réelles (ou estimation si pas de ventes)
+- isFresh = true si périssable (viande, poisson, légumes, laitages, fruits frais)
+- NE PAS LIMITER le nombre d'articles — un restaurant de ${menuItems.length} plats a facilement 50-150 ingrédients
+- ATTENTION aux cocktails/boissons : ne pas oublier dilutants, sirops, garnitures, glaçons
+- Chaque ingrédient doit avoir sa catégorie correcte pour faciliter le regroupement`;
 
-      // Extract JSON object from model output
-      const jsonMatch = raw.match(/\{[\s\S]*\}/);
-      if (jsonMatch) raw = jsonMatch[0];
+      const raw = await ollamaCloudChatStream(
+        iaConfig.ollamaApiKey, iaConfig.ollamaLangModel,
+        [{ role: "user", content: prompt }],
+        (chars) => sendSSE({ type: "chunk", chars }),
+        CHAT_TIMEOUT_MS,
+      );
+
+      sendSSE({ type: "progress", phase: "parsing", message: "Extraction des articles..." });
+
+      let cleaned = raw.trim().replace(/^```json\n?|```$/g, "").replace(/^```\n?|```$/g, "").trim();
+      const jsonMatch = cleaned.match(/\{[\s\S]*\}/);
+      if (jsonMatch) cleaned = jsonMatch[0];
 
       let result: { items: any[] };
-      try { result = JSON.parse(raw); }
-      catch { return reply.code(502).send({ error: "AI_PARSE_ERROR", raw }); }
+      try { result = JSON.parse(cleaned); }
+      catch {
+        sendSSE({ type: "error", message: "L'IA n'a pas retourné un JSON valide. Réessayez." });
+        closeSSE();
+        return;
+      }
 
-      return { items: result.items ?? [], meta: { menuCount: menuItems.length, ordersAnalyzed: recentOrders.length } };
+      sendSSE({ type: "result", items: result.items ?? [], meta: { menuCount: menuItems.length, ordersAnalyzed: recentOrders.length } });
     } catch (err: any) {
       app.log.error(err);
-      return reply.code(502).send({ error: "AI_ERROR", details: err.message });
+      sendSSE({ type: "error", message: err.message || "Erreur serveur IA" });
+    } finally {
+      closeSSE();
     }
   });
 
@@ -849,17 +1095,7 @@ waitMinutes: 0 si pret instantanement (boisson, dessert froid), sinon temps de p
 
 Sois creatif, les descriptions doivent donner envie. Utilise des ingredients de saison.`;
 
-    // Set up SSE response
-    reply.raw.writeHead(200, {
-      "Content-Type": "text/event-stream",
-      "Cache-Control": "no-cache",
-      "Connection": "keep-alive",
-      "X-Accel-Buffering": "no", // disable nginx buffering
-    });
-
-    const sendSSE = (data: Record<string, unknown>) => {
-      reply.raw.write(`data: ${JSON.stringify(data)}\n\n`);
-    };
+    const { send: sendSSE, close: closeSSE } = setupSSE(reply);
 
     try {
       const model = imageMode ? iaConfig.ollamaVisionModel : iaConfig.ollamaLangModel;
@@ -876,7 +1112,11 @@ Sois creatif, les descriptions doivent donner envie. Utilise des ingredients de 
 
       // Use streaming variant to keep connection alive
       const timeoutMs = imageMode ? VISION_TIMEOUT_MS : CHAT_TIMEOUT_MS;
-      const raw = await ollamaCloudChatStream(iaConfig.ollamaApiKey, model, ollamaMessages, reply, timeoutMs);
+      const raw = await ollamaCloudChatStream(
+        iaConfig.ollamaApiKey, model, ollamaMessages,
+        (chars) => sendSSE({ type: "chunk", chars }),
+        timeoutMs,
+      );
 
       sendSSE({ type: "progress", phase: "parsing", message: "Extraction des plats..." });
 
@@ -889,13 +1129,13 @@ Sois creatif, les descriptions doivent donner envie. Utilise des ingredients de 
       try { result = JSON.parse(cleaned); }
       catch {
         sendSSE({ type: "error", message: "L'IA n'a pas retourné un JSON valide. Réessayez." });
-        reply.raw.end();
+        closeSSE();
         return;
       }
 
       if (!Array.isArray(result.items)) {
         sendSSE({ type: "error", message: "Format de réponse IA invalide." });
-        reply.raw.end();
+        closeSSE();
         return;
       }
 
@@ -913,11 +1153,8 @@ Sois creatif, les descriptions doivent donner envie. Utilise des ingredients de 
       app.log.error(err);
       sendSSE({ type: "error", message: err.message || "Erreur serveur IA" });
     } finally {
-      reply.raw.end();
+      closeSSE();
     }
-
-    // Prevent Fastify from trying to send a response (we already wrote to raw)
-    return reply;
   });
 
   // POST /ia/menu-generate/apply — bulk-create items from generated menu
