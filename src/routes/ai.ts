@@ -200,26 +200,37 @@ async function ollamaCloudChatStream(
 
 /**
  * Helper: Set up a raw SSE response on a Fastify reply.
- * Returns a `send` function and a `close` function.
  *
- * Uses Fastify's reply API to set headers (so CORS plugin adds its headers),
- * then switches to reply.raw for streaming the body.
+ * KEY INSIGHT: We must bypass Fastify completely for SSE.
+ * - @fastify/compress buffers the response → SSE never streams
+ * - Fastify's reply.send() conflicts with raw writes
+ * - reply.hijack() tells Fastify to back off entirely
+ * - We write CORS headers manually since Fastify hooks won't run
  */
 function setupSSE(reply: import("fastify").FastifyReply) {
-  // Use Fastify reply to set status + headers — this ensures CORS plugin hooks run
-  reply
-    .status(200)
-    .header("Content-Type", "text/event-stream")
-    .header("Cache-Control", "no-cache")
-    .header("Connection", "keep-alive")
-    .header("X-Accel-Buffering", "no");
+  const origin = reply.request.headers.origin || "*";
 
-  // Flush the headers to the client immediately
-  // reply.raw.flushHeaders() sends the status line + headers without ending the response
-  reply.raw.flushHeaders();
+  // hijack = "Fastify, stop managing this response. I'll handle it."
+  reply.hijack();
+
+  // Write headers directly to Node's http.ServerResponse — bypasses compress
+  reply.raw.writeHead(200, {
+    "Content-Type": "text/event-stream",
+    "Cache-Control": "no-cache, no-transform",  // no-transform prevents proxy compression
+    "Connection": "keep-alive",
+    "X-Accel-Buffering": "no",
+    // CORS — must be manual since Fastify hooks don't run after hijack
+    "Access-Control-Allow-Origin": origin,
+    "Access-Control-Allow-Credentials": "true",
+    "Access-Control-Allow-Headers": "Content-Type, Authorization",
+  });
 
   const send = (data: Record<string, unknown>) => {
-    try { reply.raw.write(`data: ${JSON.stringify(data)}\n\n`); } catch { /* connection closed */ }
+    try {
+      reply.raw.write(`data: ${JSON.stringify(data)}\n\n`);
+    } catch (e) {
+      console.error("[SSE] write error:", (e as Error).message);
+    }
   };
   const close = () => {
     try { reply.raw.end(); } catch { /* already closed */ }
@@ -702,20 +713,24 @@ Regles OBLIGATOIRES:
   app.post("/ia/stock-items/stream", async (req, reply) => {
     // --- Validate BEFORE starting SSE (normal HTTP errors with CORS) ---
     const me = await requirePro(req, reply);
+    app.log.info(`[stock-items/stream] user=${me.userId} restaurant=${me.restaurantId}`);
 
     const restaurant = await prisma.restaurant.findUnique({
       where: { id: me.restaurantId },
       select: { subscription: true, name: true },
     });
     if (!restaurant || restaurant.subscription !== "PRO_IA") {
+      app.log.warn(`[stock-items/stream] subscription=${restaurant?.subscription} — rejected`);
       return reply.code(403).send({ error: "IA_NOT_SUBSCRIBED" });
     }
 
     const iaConfig = await getGlobalIaConfig();
     if (!iaConfig.ollamaApiKey) {
+      app.log.warn(`[stock-items/stream] no API key`);
       return reply.code(503).send({ error: "IA_KEY_MISSING" });
     }
 
+    app.log.info(`[stock-items/stream] starting SSE — model=${iaConfig.ollamaLangModel}`);
     // --- All checks passed, NOW start SSE ---
     const { send: sendSSE, close: closeSSE } = setupSSE(reply);
 
@@ -826,9 +841,10 @@ Règles ABSOLUES :
         return;
       }
 
+      app.log.info(`[stock-items/stream] done — ${result.items?.length ?? 0} items extracted`);
       sendSSE({ type: "result", items: result.items ?? [], meta: { menuCount: menuItems.length, ordersAnalyzed: recentOrders.length } });
     } catch (err: any) {
-      app.log.error(err);
+      app.log.error(`[stock-items/stream] ERROR: ${err.message}`);
       sendSSE({ type: "error", message: err.message || "Erreur serveur IA" });
     } finally {
       closeSSE();
@@ -1104,6 +1120,7 @@ waitMinutes: 0 si pret instantanement (boisson, dessert froid), sinon temps de p
 
 Sois creatif, les descriptions doivent donner envie. Utilise des ingredients de saison.`;
 
+    app.log.info(`[menu-gen/stream] starting SSE — mode=${imageMode ? "photo" : "text"} model=${imageMode ? iaConfig.ollamaVisionModel : iaConfig.ollamaLangModel}`);
     const { send: sendSSE, close: closeSSE } = setupSSE(reply);
 
     try {
@@ -1127,6 +1144,7 @@ Sois creatif, les descriptions doivent donner envie. Utilise des ingredients de 
         timeoutMs,
       );
 
+      app.log.info(`[menu-gen/stream] ollama done — ${raw.length} chars`);
       sendSSE({ type: "progress", phase: "parsing", message: "Extraction des plats..." });
 
       // Clean and parse JSON
@@ -1137,6 +1155,7 @@ Sois creatif, les descriptions doivent donner envie. Utilise des ingredients de 
       let result: { items: any[] };
       try { result = JSON.parse(cleaned); }
       catch {
+        app.log.error(`[menu-gen/stream] JSON parse failed — raw=${cleaned.slice(0, 200)}`);
         sendSSE({ type: "error", message: "L'IA n'a pas retourné un JSON valide. Réessayez." });
         closeSSE();
         return;
@@ -1156,10 +1175,11 @@ Sois creatif, les descriptions doivent donner envie. Utilise des ingredients de 
         : `${body.cuisineType ?? "Menu"} — ${result.items.length} plats`;
       await saveAiHistory(me.restaurantId, "MENU", title, { menu: result, meta });
 
+      app.log.info(`[menu-gen/stream] done — ${result.items.length} items`);
       // Send final result
       sendSSE({ type: "result", menu: result, meta });
     } catch (err: any) {
-      app.log.error(err);
+      app.log.error(`[menu-gen/stream] ERROR: ${err.message}`);
       sendSSE({ type: "error", message: err.message || "Erreur serveur IA" });
     } finally {
       closeSSE();
