@@ -190,50 +190,62 @@ Regimes possibles : Vegetarien, Vegan, Sans gluten, Sans lactose, Halal, Casher.
       }
     }
 
+    // Si aucun article ne suivi en stock → tout est à 0
+    const hasTrackedStock = menuItems.some(m => m.stockEnabled);
+    const stockContext = body.existingStockNotes?.trim()
+      ? body.existingStockNotes.trim()
+      : hasTrackedStock
+        ? menuItems.filter(m => m.stockEnabled).map(m => `- ${m.name}: ${m.stockQty ?? 0} en stock`).join('\n')
+        : 'STOCK VIDE — Le restaurant na declare aucun stock. Considere que tous les ingredients sont a 0. Genere une liste de courses COMPLETE pour la semaine.';
+
     const prompt = `Tu es Nova Stock IA, un expert en gestion de stock pour restaurants. Tu dois etre TRES PRECIS et CONCRET.
+
+REGLE ABSOLUE : si le stock est vide ou non declare, "alreadyHave" = 0 et "toBuy" = "estimatedNeeded" pour CHAQUE ingredient. Tu DOIS generer une shoppingList complete, jamais vide.
 
 Restaurant: ${restaurant.name}
 Periode d'analyse: 14 derniers jours
-Nombre de commandes: ${recentOrders.length}
-${body.budget ? `Budget courses: ${body.budget}EUR maximum` : ''}
+Commandes analysees: ${recentOrders.length}
+${body.budget ? `Budget courses maximum: ${body.budget}EUR` : 'Pas de budget maximum specifie'}
 
-=== MENU ACTUEL (${menuItems.length} plats) ===
-${menuItems.map(m => `- ${m.name} | Prix vente: ${(m.priceCents/100).toFixed(2)}EUR | Stock suivi: ${m.stockEnabled ? `oui (${m.stockQty ?? 0} en stock, seuil alerte: ${m.lowStockThreshold ?? 5})` : 'non gere'} | Dispo: ${m.available ? 'oui' : 'NON'}`).join('\n')}
+=== MENU (${menuItems.length} plats) ===
+${menuItems.map(m => `- ${m.name} | ${(m.priceCents/100).toFixed(2)}EUR | Dispo: ${m.available ? 'oui' : 'non'}`).join('\n')}
 
-=== VENTES 14 DERNIERS JOURS ===
-${Object.entries(salesMap).sort((a,b) => b[1].qty - a[1].qty).map(([,v]) => `- ${v.name}: ${v.qty} vendus (${(v.revenue/100).toFixed(2)}EUR CA)`).join('\n') || 'Aucune vente enregistree'}
+=== VENTES 14 JOURS ===
+${Object.entries(salesMap).sort((a,b) => b[1].qty - a[1].qty).map(([,v]) => `- ${v.name}: ${v.qty} vendus (${(v.revenue/100).toFixed(2)}EUR CA)`).join('\n') || 'Aucune vente enregistree — genere tout de meme une liste de courses basee sur le menu'}
 
-=== STOCK ACTUEL DECLARE PAR LE RESTAURANT ===
-${body.existingStockNotes?.trim() || 'Non renseigne — fais des estimations basees sur les ventes'}
+=== STOCK ACTUEL ===
+${stockContext}
 
-=== PRODUITS FRAIS (dates, peremption) ===
+=== PRODUITS FRAIS ===
 ${body.freshProducts?.trim() || 'Non renseigne'}
 
-=== CONTRAINTES D'ACHAT ===
-${body.purchaseConstraints?.trim() || 'Aucune contrainte specifique'}
+=== CONTRAINTES ===
+${body.purchaseConstraints?.trim() || 'Aucune contrainte'}
 
 Reponds UNIQUEMENT en JSON valide (sans markdown, sans commentaire) avec ce format EXACT:
 {
-  "summary": "Resume situation stock en 2-3 phrases avec chiffres cles",
-  "alerts": [{"item":"nom plat ou ingredient","issue":"description precise du probleme","urgency":"HIGH|MEDIUM|LOW"}],
-  "reorderSuggestions": [{"item":"nom","currentStock":0,"suggestedOrder":0,"reason":"explication courte"}],
+  "summary": "Resume en 2-3 phrases — mentionne si stock vide et liste complete generee",
+  "alerts": [{"item":"nom","issue":"probleme precis","urgency":"HIGH|MEDIUM|LOW"}],
+  "reorderSuggestions": [{"item":"nom","currentStock":0,"suggestedOrder":0,"reason":"courte explication"}],
   "topSellers": [{"item":"nom","qtySold":0,"trend":"UP|STABLE|DOWN"}],
-  "deadStock": [{"item":"nom","qtySold":0,"suggestion":"action concrete a faire"}],
+  "deadStock": [{"item":"nom","qtySold":0,"suggestion":"action concrete"}],
   "forecastNextWeek": [{"item":"nom","estimatedDemand":0}],
   "shoppingList": [{"ingredient":"nom ingredient brut","estimatedNeeded":0,"alreadyHave":0,"toBuy":0,"unit":"kg|L|piece|botte|douzaine","priority":"HIGH|MEDIUM|LOW","estimatedCost":0,"reason":"pour quels plats"}],
-  "promotions": [{"item":"nom plat","reason":"pourquoi promouvoir (stock excessif, peremption proche, ventes faibles)","suggestedDiscount":"ex: -20%","urgency":"HIGH|MEDIUM|LOW","action":"description de la promo a appliquer"}],
-  "freshProductAlerts": [{"product":"nom produit frais","expiresIn":"nombre de jours","qty":"quantite","recommendation":"que faire (cuisiner, promouvoir, jeter)","affectedDishes":["plat1","plat2"]}],
-  "supplierOrderNote": "strategie d'achat et conseil fournisseur en 2-3 phrases",
-  "costSavings": "conseil concret pour reduire le gaspillage et economiser",
+  "promotions": [{"item":"nom plat","reason":"raison","suggestedDiscount":"-20%","urgency":"HIGH|MEDIUM|LOW","action":"description promo"}],
+  "freshProductAlerts": [{"product":"nom","expiresIn":"X jours","qty":"quantite","recommendation":"action","affectedDishes":["plat1"]}],
+  "supplierOrderNote": "strategie achat 2-3 phrases",
+  "costSavings": "conseil anti-gaspillage concret",
   "totalShoppingBudget": 0
 }
 
-Regles importantes:
-- shoppingList: deduis les INGREDIENTS BRUTS (pas les plats finis) necessaires pour la semaine prochaine base sur les ventes. Ex: si 20 entrecotes vendues par semaine → 6kg de boeuf a acheter.
-- promotions: identifie les plats avec stock excessif OU ventes faibles OU produits frais a risque. Propose des remises concretes (-15%, -20%, happy hour, plat du jour).
-- freshProductAlerts: si des produits frais sont declares, calcule les alertes de peremption et recommande comment les ecouler.
-- Si le budget est donne, priorise les achats HIGH en premier et indique si le budget est depassable.
-- totalShoppingBudget: somme estimee des achats de la shoppingList.`;
+Regles OBLIGATOIRES:
+1. shoppingList JAMAIS VIDE : deduis les ingredients bruts de TOUS les plats du menu. Si 0 en stock, toBuy = estimatedNeeded complet pour la semaine.
+   Ex: menu avec entrecote → "Boeuf (entrecotes)": estimatedNeeded=8kg, alreadyHave=0, toBuy=8kg
+   Ex: menu avec saumon → "Saumon frais": estimatedNeeded=4kg, alreadyHave=0, toBuy=4kg
+2. Couvre TOUS les plats du menu, pas seulement les mieux vendus.
+3. estimatedCost = prix d'achat reel estime (pas prix de vente).
+4. totalShoppingBudget = somme de tous les estimatedCost.
+5. Si budget donne et depassable, note-le dans supplierOrderNote.`;
 
     try {
       const raw = (await ollamaCloudChat(iaConfig.ollamaApiKey, iaConfig.ollamaLangModel, [
@@ -244,7 +256,7 @@ Regles importantes:
       try { analysis = JSON.parse(raw); }
       catch { analysis = { summary: raw, alerts: [], reorderSuggestions: [], topSellers: [], deadStock: [], forecastNextWeek: [], shoppingList: [], promotions: [], freshProductAlerts: [], supplierOrderNote: "", costSavings: "", totalShoppingBudget: 0 }; }
 
-      return { analysis, meta: { ordersAnalyzed: recentOrders.length, menuItemsCount: menuItems.length, period: "14d" } };
+      return { analysis, meta: { ordersAnalyzed: recentOrders.length, menuItemsCount: menuItems.length, period: "14d", restaurantName: restaurant.name } };
     } catch (err: any) {
       app.log.error(err);
       return reply.code(502).send({ error: "AI_ERROR", details: err.message });
