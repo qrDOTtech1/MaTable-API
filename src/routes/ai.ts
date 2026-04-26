@@ -1,14 +1,12 @@
 /**
  * AI Routes — /api/pro/ia/*
  *
- * Supports multiple cloud providers:
- *   - OpenAI    : gpt-4o, gpt-4o-mini, gpt-4-turbo, o1-mini
- *   - Anthropic : claude-3-5-sonnet-*, claude-3-haiku-*, claude-3-opus-*
- *   - Google    : gemini-1.5-pro, gemini-1.5-flash, gemini-2.0-flash
- *   - Mistral   : mistral-large-latest, mistral-small-latest, codestral-latest
+ * Uses Ollama Cloud Models exclusively.
+ * Single API key configured globally by admin, used by all PRO_IA restaurants.
  *
- * The provider is auto-detected from the model name prefix.
- * The `ollamaApiKey` field stores the provider's API key.
+ * Ollama Cloud models: gpt-oss:120b-cloud, gpt-4o-cloud, llama3.1:latest-cloud, etc.
+ * API: https://ollama.com/api/chat (OpenAI-compatible format)
+ * Auth: Bearer token via Authorization header
  */
 import { requirePro } from "../auth.js";
 import { prisma } from "../db.js";
@@ -16,141 +14,57 @@ import { getGlobalIaConfig } from "../globalIaConfig.js";
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 
-// ── Provider detection ────────────────────────────────────────────────────────
-type Provider = "openai" | "anthropic" | "google" | "mistral";
-
-function detectProvider(model: string): Provider {
-  if (model.startsWith("gpt-") || model.startsWith("o1") || model.startsWith("o3")) return "openai";
-  if (model.startsWith("claude-")) return "anthropic";
-  if (model.startsWith("gemini-")) return "google";
-  if (model.startsWith("mistral") || model.startsWith("codestral")) return "mistral";
-  return "openai";
-}
-
-// ── Unified chat completion ───────────────────────────────────────────────────
+// ── Ollama Cloud chat completion ──────────────────────────────────────────────
 type Msg = { role: "user" | "assistant" | "system"; content: string | any[] };
 
-async function cloudChat(
-  provider: Provider,
+async function ollamaCloudChat(
   apiKey: string,
   model: string,
   messages: Msg[]
 ): Promise<string> {
-  if (provider === "openai" || provider === "mistral") {
-    const base = provider === "openai"
-      ? "https://api.openai.com/v1"
-      : "https://api.mistral.ai/v1";
-    const res = await fetch(`${base}/chat/completions`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
-      body: JSON.stringify({ model, messages, max_tokens: 1024 }),
-    });
-    if (!res.ok) throw new Error(`${provider} error ${res.status}: ${await res.text()}`);
-    const data = await res.json() as any;
-    return data.choices[0].message.content;
+  const res = await fetch("https://ollama.com/api/chat", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Authorization": `Bearer ${apiKey}`,
+    },
+    body: JSON.stringify({
+      model,
+      messages,
+      max_tokens: 1024,
+    }),
+  });
+
+  if (!res.ok) {
+    const errorText = await res.text();
+    throw new Error(`ollama error ${res.status}: ${errorText}`);
   }
 
-  if (provider === "anthropic") {
-    const system = messages.find(m => m.role === "system")?.content as string | undefined;
-    const filtered = messages.filter(m => m.role !== "system");
-    const res = await fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-api-key": apiKey,
-        "anthropic-version": "2023-06-01",
-      },
-      body: JSON.stringify({
-        model,
-        max_tokens: 1024,
-        ...(system ? { system } : {}),
-        messages: filtered,
-      }),
-    });
-    if (!res.ok) throw new Error(`Anthropic error ${res.status}: ${await res.text()}`);
-    const data = await res.json() as any;
-    return data.content[0].text;
-  }
-
-  if (provider === "google") {
-    const contents = messages
-      .filter(m => m.role !== "system")
-      .map(m => ({
-        role: m.role === "assistant" ? "model" : "user",
-        parts: Array.isArray(m.content)
-          ? m.content
-          : [{ text: m.content as string }],
-      }));
-    const systemInstruction = messages.find(m => m.role === "system")?.content;
-    const res = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          contents,
-          ...(systemInstruction ? { systemInstruction: { parts: [{ text: systemInstruction }] } } : {}),
-          generationConfig: { maxOutputTokens: 1024 },
-        }),
-      }
-    );
-    if (!res.ok) throw new Error(`Google error ${res.status}: ${await res.text()}`);
-    const data = await res.json() as any;
-    return data.candidates[0].content.parts[0].text;
-  }
-
-  throw new Error("Unknown provider");
+  const data = await res.json() as any;
+  return data.choices[0].message.content;
 }
 
-// ── Vision helper — build provider-specific image message ─────────────────────
+// ── Vision helper — build Ollama Cloud vision message ──────────────────────────
 function buildVisionMessages(
-  provider: Provider,
   systemPrompt: string,
   imageBase64: string,
   mimeType: string
 ): Msg[] {
-  if (provider === "openai" || provider === "mistral") {
-    return [
-      { role: "system", content: systemPrompt },
-      {
-        role: "user",
-        content: [
-          { type: "text", text: "Analyse ce plat." },
-          { type: "image_url", image_url: { url: `data:${mimeType};base64,${imageBase64}` } },
-        ],
-      },
-    ];
-  }
-  if (provider === "anthropic") {
-    return [
-      { role: "system", content: systemPrompt },
-      {
-        role: "user",
-        content: [
-          { type: "image", source: { type: "base64", media_type: mimeType, data: imageBase64 } },
-          { type: "text", text: "Analyse ce plat." },
-        ],
-      },
-    ];
-  }
-  if (provider === "google") {
-    return [
-      { role: "system", content: systemPrompt },
-      {
-        role: "user",
-        content: [
-          { inlineData: { mimeType, data: imageBase64 } },
-          { text: "Analyse ce plat." },
-        ] as any,
-      },
-    ];
-  }
-  return [];
+  return [
+    { role: "system", content: systemPrompt },
+    {
+      role: "user",
+      content: [
+        { type: "text", text: "Analyse ce plat." },
+        { type: "image_url", image_url: { url: `data:${mimeType};base64,${imageBase64}` } },
+      ],
+    },
+  ];
 }
 
 export async function aiRoutes(app: FastifyInstance) {
   // ─────────────────────────────────────────────────────────────────────────────
-  // POST /ia/chat  — chatbot / planning / descriptions
+  // POST /ia/chat  — chatbot / planning / descriptions (Ollama Cloud)
   // ─────────────────────────────────────────────────────────────────────────────
   app.post("/ia/chat", async (req, reply) => {
     const me = await requirePro(req, reply);
@@ -165,8 +79,8 @@ export async function aiRoutes(app: FastifyInstance) {
     }
 
     const iaConfig = await getGlobalIaConfig();
-    if (!iaConfig.iaApiKey) {
-      return reply.code(503).send({ error: "IA_KEY_MISSING", message: "Clé API non configurée dans l'admin." });
+    if (!iaConfig.ollamaApiKey) {
+      return reply.code(503).send({ error: "IA_KEY_MISSING", message: "Clé API Ollama Cloud non configurée dans l'admin." });
     }
 
     const { messages } = z.object({
@@ -176,11 +90,10 @@ export async function aiRoutes(app: FastifyInstance) {
       })),
     }).parse(req.body);
 
-    const model = iaConfig.iaLangModel;
-    const provider = detectProvider(model);
+    const model = iaConfig.ollamaLangModel;
 
     try {
-      const text = await cloudChat(provider, iaConfig.iaApiKey, model, messages);
+      const text = await ollamaCloudChat(iaConfig.ollamaApiKey, model, messages);
       return { message: { role: "assistant", content: text } };
     } catch (err: any) {
       app.log.error(err);
@@ -189,7 +102,7 @@ export async function aiRoutes(app: FastifyInstance) {
   });
 
   // ─────────────────────────────────────────────────────────────────────────────
-  // POST /ia/magic-scan  — vision / photo plat → JSON menu
+  // POST /ia/magic-scan  — vision / photo plat → JSON menu (Ollama Cloud)
   // ─────────────────────────────────────────────────────────────────────────────
   app.post("/ia/magic-scan", async (req, reply) => {
     const me = await requirePro(req, reply);
@@ -204,8 +117,8 @@ export async function aiRoutes(app: FastifyInstance) {
     }
 
     const iaConfig = await getGlobalIaConfig();
-    if (!iaConfig.iaApiKey) {
-      return reply.code(503).send({ error: "IA_KEY_MISSING", message: "Clé API non configurée dans l'admin." });
+    if (!iaConfig.ollamaApiKey) {
+      return reply.code(503).send({ error: "IA_KEY_MISSING", message: "Clé API Ollama Cloud non configurée dans l'admin." });
     }
 
     const { imageBase64, mimeType } = z.object({
@@ -213,8 +126,7 @@ export async function aiRoutes(app: FastifyInstance) {
       mimeType: z.string().default("image/jpeg"),
     }).parse(req.body);
 
-    const model = iaConfig.iaVisionModel;
-    const provider = detectProvider(model);
+    const model = iaConfig.ollamaVisionModel;
 
     const systemPrompt = `Tu es un expert culinaire. Analyse cette photo de plat et réponds UNIQUEMENT en JSON valide (sans markdown) avec ce format exact :
 {"suggestedName":"nom du plat","description":"description 3-4 phrases pour menu","suggestedPrice":"18,00€","allergens":["Gluten"],"diets":["Végétarien"],"confidence":85}
@@ -222,8 +134,8 @@ Allergènes possibles : Gluten, Crustacés, Oeufs, Poisson, Arachides, Soja, Lai
 Régimes possibles : Végétarien, Vegan, Sans gluten, Sans lactose, Halal, Casher.`;
 
     try {
-      const messages = buildVisionMessages(provider, systemPrompt, imageBase64, mimeType);
-      const raw = (await cloudChat(provider, iaConfig.iaApiKey, model, messages))
+      const messages = buildVisionMessages(systemPrompt, imageBase64, mimeType);
+      const raw = (await ollamaCloudChat(iaConfig.ollamaApiKey, model, messages))
         .trim().replace(/^```json\n?|```$/g, "");
 
       let result: Record<string, unknown>;
