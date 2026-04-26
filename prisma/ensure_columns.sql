@@ -166,3 +166,15 @@ CREATE INDEX IF NOT EXISTS "SupportTicket_restaurantId_idx" ON "SupportTicket"("
 CREATE INDEX IF NOT EXISTS "SupportTicket_status_idx" ON "SupportTicket"(status);
 
 -- (duplicate GlobalConfig removed — defined above)
+
+-- AiHistory: historique persistant des réponses IA par restaurant
+CREATE TABLE IF NOT EXISTS "AiHistory" (
+  id TEXT NOT NULL,
+  "restaurantId" TEXT NOT NULL,
+  type TEXT NOT NULL,
+  title TEXT NOT NULL,
+  "outputData" JSONB NOT NULL DEFAULT '{}'::jsonb,
+  "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT "AiHistory_pkey" PRIMARY KEY (id)
+);
+CREATE INDEX IF NOT EXISTS "AiHistory_restaurantId_type_idx" ON "AiHistory"("restaurantId", type, "createdAt" DESC);

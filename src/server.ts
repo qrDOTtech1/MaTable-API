@@ -22,6 +22,55 @@ import { cuisinePortalRoutes } from "./routes/cuisinePortal.js";
 import { invoiceRoutes } from "./routes/invoice.js";
 import { socialRoutes } from "./routes/social.js";
 
+/**
+ * Split a SQL file into individual statements.
+ * Handles:
+ *  - Single-line comments (-- ...)
+ *  - DO $$ ... $$ blocks (PL/pgSQL — contain inner semicolons that must NOT split)
+ *  - Standard semicolon-terminated statements
+ */
+function splitSqlStatements(sql: string): string[] {
+  const statements: string[] = [];
+  let current = "";
+  let inDollarQuote = false;
+  let i = 0;
+
+  while (i < sql.length) {
+    // Skip single-line comments (outside dollar-quoted blocks)
+    if (!inDollarQuote && sql[i] === "-" && sql[i + 1] === "-") {
+      while (i < sql.length && sql[i] !== "\n") i++;
+      continue;
+    }
+
+    // Toggle dollar-quoting on $$
+    if (sql[i] === "$" && sql[i + 1] === "$") {
+      inDollarQuote = !inDollarQuote;
+      current += "$$";
+      i += 2;
+      continue;
+    }
+
+    // Statement terminator — only outside dollar-quoted blocks
+    if (sql[i] === ";" && !inDollarQuote) {
+      const stmt = current.trim();
+      if (stmt) statements.push(stmt + ";");
+      current = "";
+      i++;
+      continue;
+    }
+
+    current += sql[i];
+    i++;
+  }
+
+  // Catch any trailing statement without a final semicolon
+  const tail = current.trim();
+  if (tail) statements.push(tail);
+
+  // Filter out blank or comment-only entries
+  return statements.filter((s) => s.replace(/--[^\n]*/g, "").trim().length > 0);
+}
+
 // Execute ensure_columns.sql at startup to create/update tables
 async function initDb() {
   try {
@@ -29,11 +78,25 @@ async function initDb() {
     const __dirname = join(__filename, "..");
     const sqlPath = join(__dirname, "..", "prisma", "ensure_columns.sql");
     const sql = readFileSync(sqlPath, "utf-8");
-    await prisma.$executeRawUnsafe(sql);
-    console.log("✓ Database schema initialized (ensure_columns.sql executed)");
+
+    // Prisma $executeRawUnsafe cannot run multiple statements in one call
+    // (PostgreSQL rejects multi-command prepared statements → error 42601).
+    // Split the file and execute each statement individually.
+    const statements = splitSqlStatements(sql);
+    let ok = 0;
+    for (const stmt of statements) {
+      try {
+        await prisma.$executeRawUnsafe(stmt);
+        ok++;
+      } catch (stmtErr: any) {
+        // Log but keep going — most failures are benign (column/table already exists)
+        console.warn(`⚠️  SQL stmt skipped: ${stmtErr.message?.split("\n")[0]}`);
+      }
+    }
+    console.log(`✓ Database schema initialized (${ok}/${statements.length} statements)`);
   } catch (err) {
     console.error("⚠️  Failed to initialize database schema:", err);
-    // Non-blocking: continue even if this fails (table might already exist)
+    // Non-blocking: continue even if this fails
   }
 }
 

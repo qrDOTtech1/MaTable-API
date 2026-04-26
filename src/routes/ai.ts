@@ -16,51 +16,102 @@ import { prisma } from "../db.js";
 import { getGlobalIaConfig } from "../globalIaConfig.js";
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
+import { randomUUID } from "crypto";
 
 // ── Ollama Cloud chat completion ──────────────────────────────────────────────
 type OllamaMsg = { role: "user" | "assistant" | "system"; content: string; images?: string[] };
 
 // Vision requests can take up to 3 minutes on large images
-const CHAT_TIMEOUT_MS  = 90_000;   // 90s for text
-const VISION_TIMEOUT_MS = 180_000; // 3min for vision
+const CHAT_TIMEOUT_MS   = 90_000;   // 90s for text
+const VISION_TIMEOUT_MS = 180_000;  // 3min for vision
+const MAX_RETRIES       = 3;        // retry 429 up to 3 times
 
 async function ollamaCloudChat(
   apiKey: string,
   model: string,
   messages: OllamaMsg[],
-  timeoutMs = CHAT_TIMEOUT_MS
+  timeoutMs = CHAT_TIMEOUT_MS,
 ): Promise<string> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  let lastErr: Error | null = null;
 
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    // Exponential backoff: 2s → 4s → 8s before retries
+    if (attempt > 0) {
+      const delay = Math.min(2000 * 2 ** (attempt - 1), 10_000);
+      await new Promise((r) => setTimeout(r, delay));
+    }
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+    try {
+      const res = await fetch("https://ollama.com/api/chat", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${apiKey}`,
+        },
+        body: JSON.stringify({ model, messages, stream: false }),
+        signal: controller.signal,
+      });
+
+      // 429 = too many concurrent requests → wait and retry
+      if (res.status === 429) {
+        const body = await res.text();
+        lastErr = new Error(`ollama error 429: ${body}`);
+        continue;
+      }
+
+      if (!res.ok) {
+        const errorText = await res.text();
+        throw new Error(`ollama error ${res.status}: ${errorText}`);
+      }
+
+      const data = await res.json() as any;
+      return (data.message?.content ?? "") as string;
+
+    } catch (err: any) {
+      if (err.name === "AbortError") {
+        throw new Error(`ollama timeout after ${timeoutMs / 1000}s — image may be too large or server busy`);
+      }
+      // Surface 429 errors for retry
+      if (err.message?.includes("429")) {
+        lastErr = err;
+        continue;
+      }
+      throw err;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  throw lastErr ?? new Error("ollama: max retries exceeded (429 persists)");
+}
+
+// ── History helper ────────────────────────────────────────────────────────────
+async function saveAiHistory(
+  restaurantId: string,
+  type: string,
+  title: string,
+  outputData: unknown,
+): Promise<void> {
   try {
-    const res = await fetch("https://ollama.com/api/chat", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${apiKey}`,
-      },
-      body: JSON.stringify({ model, messages, stream: false }),
-      signal: controller.signal,
-    });
-
-    if (!res.ok) {
-      const errorText = await res.text();
-      throw new Error(`ollama error ${res.status}: ${errorText}`);
-    }
-
-    const data = await res.json() as any;
-    return (data.message?.content ?? "") as string;
-  } catch (err: any) {
-    if (err.name === "AbortError") {
-      throw new Error(`ollama timeout after ${timeoutMs / 1000}s — image may be too large or server busy`);
-    }
-    throw err;
-  } finally {
-    clearTimeout(timer);
+    const id = randomUUID();
+    await prisma.$executeRawUnsafe(
+      `INSERT INTO "AiHistory" (id, "restaurantId", type, title, "outputData", "createdAt")
+       VALUES ($1, $2, $3, $4, $5::jsonb, NOW())`,
+      id,
+      restaurantId,
+      type,
+      title,
+      JSON.stringify(outputData),
+    );
+  } catch {
+    // Non-blocking — history errors must never break the main response
   }
 }
 
+// ── Routes ────────────────────────────────────────────────────────────────────
 export async function aiRoutes(app: FastifyInstance) {
   // Timeout global pour toutes les routes IA (vision = jusqu'à 3min)
   app.addHook("onRequest", async (req) => {
@@ -107,7 +158,6 @@ export async function aiRoutes(app: FastifyInstance) {
 
   // ─────────────────────────────────────────────────────────────────────────────
   // POST /ia/magic-scan  — vision / photo plat → JSON menu
-  // Ollama native: images are passed as base64 strings in `images` array
   // ─────────────────────────────────────────────────────────────────────────────
   app.post("/ia/magic-scan", async (req, reply) => {
     const me = await requirePro(req, reply);
@@ -128,7 +178,7 @@ export async function aiRoutes(app: FastifyInstance) {
 
     const { imageBase64 } = z.object({
       imageBase64: z.string(),
-      mimeType: z.string().default("image/jpeg"), // kept for compat but unused by Ollama
+      mimeType: z.string().default("image/jpeg"),
     }).parse(req.body);
 
     const model = iaConfig.ollamaVisionModel;
@@ -138,11 +188,9 @@ export async function aiRoutes(app: FastifyInstance) {
 Allergenes possibles : Gluten, Crustaces, Oeufs, Poisson, Arachides, Soja, Lait, Fruits a coque, Celeri, Moutarde, Sesame, Sulfites, Lupin, Mollusques.
 Regimes possibles : Vegetarien, Vegan, Sans gluten, Sans lactose, Halal, Casher.`;
 
-    // Strip data URI prefix if present (e.g. "data:image/jpeg;base64,...")
     const cleanB64 = imageBase64.replace(/^data:[^;]+;base64,/, "");
 
     try {
-      // Ollama native vision format: images array on the user message
       const messages: OllamaMsg[] = [
         { role: "system", content: systemPrompt },
         { role: "user", content: "Analyse ce plat.", images: [cleanB64] },
@@ -163,7 +211,6 @@ Regimes possibles : Vegetarien, Vegan, Sans gluten, Sans lactose, Halal, Casher.
 
   // ─────────────────────────────────────────────────────────────────────────────
   // POST /ia/stock-analysis — Nova Stock IA
-  // Analyses order history + current stock → recommendations
   // ─────────────────────────────────────────────────────────────────────────────
   app.post("/ia/stock-analysis", async (req, reply) => {
     const me = await requirePro(req, reply);
@@ -184,11 +231,10 @@ Regimes possibles : Vegetarien, Vegan, Sans gluten, Sans lactose, Halal, Casher.
     const body = z.object({
       existingStockNotes: z.string().max(4000).optional(),
       purchaseConstraints: z.string().max(1500).optional(),
-      freshProducts: z.string().max(2000).optional(), // produits frais avec dates d'expiration
-      budget: z.number().optional(), // budget maximum pour les courses
+      freshProducts: z.string().max(2000).optional(),
+      budget: z.number().optional(),
     }).parse(req.body ?? {});
 
-    // Gather data: menu items with stock + recent orders (last 14 days)
     const menuItems = await prisma.menuItem.findMany({
       where: { restaurantId: me.restaurantId },
       select: { id: true, name: true, priceCents: true, category: true, stockEnabled: true, stockQty: true, lowStockThreshold: true, available: true },
@@ -202,7 +248,6 @@ Regimes possibles : Vegetarien, Vegan, Sans gluten, Sans lactose, Halal, Casher.
       take: 500,
     });
 
-    // Build sales summary per item
     const salesMap: Record<string, { qty: number; revenue: number; name: string }> = {};
     for (const order of recentOrders) {
       const items = order.items as any[];
@@ -215,7 +260,6 @@ Regimes possibles : Vegetarien, Vegan, Sans gluten, Sans lactose, Halal, Casher.
       }
     }
 
-    // Si aucun article ne suivi en stock → tout est à 0
     const hasTrackedStock = menuItems.some(m => m.stockEnabled);
     const stockContext = body.existingStockNotes?.trim()
       ? body.existingStockNotes.trim()
@@ -281,7 +325,15 @@ Regles OBLIGATOIRES:
       try { analysis = JSON.parse(raw); }
       catch { analysis = { summary: raw, alerts: [], reorderSuggestions: [], topSellers: [], deadStock: [], forecastNextWeek: [], shoppingList: [], promotions: [], freshProductAlerts: [], supplierOrderNote: "", costSavings: "", totalShoppingBudget: 0 }; }
 
-      return { analysis, meta: { ordersAnalyzed: recentOrders.length, menuItemsCount: menuItems.length, period: "14d", restaurantName: restaurant.name } };
+      const meta = { ordersAnalyzed: recentOrders.length, menuItemsCount: menuItems.length, period: "14d", restaurantName: restaurant.name };
+
+      // Auto-save to history
+      const shopCount = (analysis.shoppingList as any[])?.length ?? 0;
+      const budget = (analysis.totalShoppingBudget as number) ?? 0;
+      const title = `Stock ${new Date().toLocaleDateString("fr-FR", { day: "numeric", month: "short" })} — ${shopCount} articles · ~${budget.toFixed(0)}€`;
+      await saveAiHistory(me.restaurantId, "STOCK", title, { analysis, meta });
+
+      return { analysis, meta };
     } catch (err: any) {
       app.log.error(err);
       return reply.code(502).send({ error: "AI_ERROR", details: err.message });
@@ -290,8 +342,6 @@ Regles OBLIGATOIRES:
 
   // ─────────────────────────────────────────────────────────────────────────────
   // POST /ia/stock-items — Étape 1 du wizard stock
-  // L'IA analyse le menu + ventes et retourne la liste des articles
-  // qu'elle veut suivre, avec l'unité et la quantité suggérée à commander
   // ─────────────────────────────────────────────────────────────────────────────
   app.post("/ia/stock-items", async (req, reply) => {
     const me = await requirePro(req, reply);
@@ -309,7 +359,6 @@ Regles OBLIGATOIRES:
       return reply.code(503).send({ error: "IA_KEY_MISSING" });
     }
 
-    // Récupère le menu et les ventes 14 jours
     const menuItems = await prisma.menuItem.findMany({
       where: { restaurantId: me.restaurantId },
       select: { name: true, priceCents: true, category: true, available: true },
@@ -381,7 +430,6 @@ Règles:
 
   // ─────────────────────────────────────────────────────────────────────────────
   // POST /ia/menu-generate — Nova Menu IA
-  // Generates a full menu from a description or photo
   // ─────────────────────────────────────────────────────────────────────────────
   app.post("/ia/menu-generate", async (req, reply) => {
     const me = await requirePro(req, reply);
@@ -405,7 +453,7 @@ Règles:
       itemCount: z.number().int().min(3).max(50).default(12),
       categories: z.array(z.string()).optional(),
       style: z.string().max(500).optional(),
-      imageBase64: z.string().optional(), // optional photo of existing menu/carte
+      imageBase64: z.string().optional(),
     }).parse(req.body);
 
     if (!body.imageBase64 && !body.cuisineType?.trim()) {
@@ -514,7 +562,15 @@ Sois creatif, les descriptions doivent donner envie. Utilise des ingredients de 
         return reply.code(502).send({ error: "AI_PARSE_ERROR", raw });
       }
 
-      return { menu: result, meta: { model, mode: imageMode ? "photo-import" : "generate" } };
+      const meta = { model, mode: imageMode ? "photo-import" : "generate", cuisineType: body.cuisineType };
+
+      // Auto-save to history
+      const title = imageMode
+        ? `Import photo — ${result.items.length} plats`
+        : `${body.cuisineType ?? "Menu"} — ${result.items.length} plats`;
+      await saveAiHistory(me.restaurantId, "MENU", title, { menu: result, meta });
+
+      return { menu: result, meta };
     } catch (err: any) {
       app.log.error(err);
       return reply.code(502).send({ error: "AI_ERROR", details: err.message });
@@ -555,5 +611,75 @@ Sois creatif, les descriptions doivent donner envie. Utilise des ingredients de 
     }
 
     return { ok: true, count: created.length, items: created };
+  });
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // GET  /ia/history?type=STOCK|MENU|CHAT|PLANNING  — list IA history
+  // POST /ia/history                                 — save from frontend (chat/planning)
+  // DELETE /ia/history/:id                           — delete one entry
+  // ─────────────────────────────────────────────────────────────────────────────
+  app.get("/ia/history", async (req, reply) => {
+    const me = await requirePro(req, reply);
+    const { type } = (req.query as any) ?? {};
+
+    let rows: any[];
+    if (type) {
+      rows = await prisma.$queryRawUnsafe<any[]>(
+        `SELECT id, type, title, "outputData", "createdAt"
+         FROM "AiHistory"
+         WHERE "restaurantId" = $1 AND type = $2
+         ORDER BY "createdAt" DESC
+         LIMIT 30`,
+        me.restaurantId,
+        type,
+      );
+    } else {
+      rows = await prisma.$queryRawUnsafe<any[]>(
+        `SELECT id, type, title, "outputData", "createdAt"
+         FROM "AiHistory"
+         WHERE "restaurantId" = $1
+         ORDER BY "createdAt" DESC
+         LIMIT 60`,
+        me.restaurantId,
+      );
+    }
+
+    return { history: rows };
+  });
+
+  app.post("/ia/history", async (req, reply) => {
+    const me = await requirePro(req, reply);
+
+    const { type, title, outputData } = z.object({
+      type: z.enum(["CHAT", "PLANNING", "STOCK", "MENU"]),
+      title: z.string().max(200),
+      outputData: z.any(),
+    }).parse(req.body);
+
+    const id = randomUUID();
+    await prisma.$executeRawUnsafe(
+      `INSERT INTO "AiHistory" (id, "restaurantId", type, title, "outputData", "createdAt")
+       VALUES ($1, $2, $3, $4, $5::jsonb, NOW())`,
+      id,
+      me.restaurantId,
+      type,
+      title,
+      JSON.stringify(outputData),
+    );
+
+    return { ok: true, id };
+  });
+
+  app.delete("/ia/history/:id", async (req, reply) => {
+    const me = await requirePro(req, reply);
+    const { id } = req.params as { id: string };
+
+    await prisma.$executeRawUnsafe(
+      `DELETE FROM "AiHistory" WHERE id = $1 AND "restaurantId" = $2`,
+      id,
+      me.restaurantId,
+    );
+
+    return { ok: true };
   });
 }
