@@ -277,6 +277,17 @@ Analyse ce plat.`;
         ? menuItems.filter(m => m.stockEnabled).map(m => `- ${m.name}: ${m.stockQty ?? 0} en stock`).join('\n')
         : 'STOCK VIDE — Le restaurant na declare aucun stock. Considere que tous les ingredients sont a 0. Genere une liste de courses COMPLETE pour la semaine.';
 
+    // Group menu items by category for category-by-category analysis
+    const catMap: Record<string, typeof menuItems> = {};
+    for (const m of menuItems) {
+      const cat = m.category || "Autres";
+      (catMap[cat] ||= []).push(m);
+    }
+    const categoryBreakdown = Object.entries(catMap).map(([cat, items]) =>
+      `--- ${cat.toUpperCase()} (${items.length} plats) ---\n` +
+      items.map(m => `  - ${m.name} | ${(m.priceCents / 100).toFixed(2)}EUR | ${m.available ? "dispo" : "indispo"}`).join("\n")
+    ).join("\n\n");
+
     const prompt = `Tu es Nova Stock IA, un expert en gestion de stock pour restaurants. Tu dois etre TRES PRECIS et CONCRET.
 
 REGLE ABSOLUE : si le stock est vide ou non declare, "alreadyHave" = 0 et "toBuy" = "estimatedNeeded" pour CHAQUE ingredient. Tu DOIS generer une shoppingList complete, jamais vide.
@@ -286,11 +297,11 @@ Periode d'analyse: 14 derniers jours
 Commandes analysees: ${recentOrders.length}
 ${body.budget ? `Budget courses maximum: ${body.budget}EUR` : 'Pas de budget maximum specifie'}
 
-=== MENU (${menuItems.length} plats) ===
-${menuItems.map(m => `- ${m.name} | ${(m.priceCents/100).toFixed(2)}EUR | Dispo: ${m.available ? 'oui' : 'non'}`).join('\n')}
+=== MENU PAR CATEGORIE (${menuItems.length} plats, ${Object.keys(catMap).length} categories) ===
+${categoryBreakdown}
 
 === VENTES 14 JOURS ===
-${Object.entries(salesMap).sort((a,b) => b[1].qty - a[1].qty).map(([,v]) => `- ${v.name}: ${v.qty} vendus (${(v.revenue/100).toFixed(2)}EUR CA)`).join('\n') || 'Aucune vente enregistree — genere tout de meme une liste de courses basee sur le menu'}
+${Object.entries(salesMap).sort((a, b) => b[1].qty - a[1].qty).map(([, v]) => `- ${v.name}: ${v.qty} vendus (${(v.revenue / 100).toFixed(2)}EUR CA)`).join('\n') || 'Aucune vente enregistree — genere tout de meme une liste de courses basee sur le menu'}
 
 === STOCK ACTUEL ===
 ${stockContext}
@@ -301,7 +312,27 @@ ${body.freshProducts?.trim() || 'Non renseigne'}
 === CONTRAINTES ===
 ${body.purchaseConstraints?.trim() || 'Aucune contrainte'}
 
-Reponds UNIQUEMENT en JSON valide (sans markdown, sans commentaire) avec ce format EXACT:
+METHODE D'ANALYSE OBLIGATOIRE :
+Procede CATEGORIE PAR CATEGORIE. Pour chaque categorie du menu :
+1. Liste CHAQUE plat de la categorie
+2. Decompose CHAQUE plat en TOUS ses ingredients bruts :
+   - Ingredients principaux (viande, poisson, pates, riz...)
+   - Bases et alcools (rhum, vodka, gin, tequila, whisky...)
+   - Dilutants et mixers (jus d'orange, tonic, soda, ginger beer, eau gazeuse, cola...)
+   - Sirops et sucres (sirop de sucre, sirop de grenadine, sirop de menthe, triple sec, creme de mure...)
+   - Fruits et garnitures (citron, citron vert, menthe fraiche, ananas, cerise, olives...)
+   - Produits laitiers (lait, creme, beurre, fromage, coco...)
+   - Condiments et sauces (sel, poivre, huile, vinaigre, moutarde, ketchup...)
+   - Consommables (pailles, serviettes, glacons...)
+3. Agrege les quantites : un ingredient utilise dans 5 cocktails = 5x la quantite unitaire
+
+ATTENTION SPECIFIQUE aux categories Cocktails / Boissons :
+- NE PAS oublier les DILUTANTS (jus, tonic, cola, ginger beer, eau gazeuse, Prosecco)
+- NE PAS oublier les SIROPS (grenadine, sucre, menthe, sureau, peche)
+- NE PAS oublier les GARNITURES (menthe fraiche, citron, citron vert, ananas, cerise)
+- NE PAS oublier les PUREES (passion, cerise, peche)
+
+Reponds UNIQUEMENT en JSON valide (sans markdown, sans commentaire, sans backticks) avec ce format EXACT:
 {
   "summary": "Resume en 2-3 phrases — mentionne si stock vide et liste complete generee",
   "alerts": [{"item":"nom","issue":"probleme precis","urgency":"HIGH|MEDIUM|LOW"}],
@@ -309,7 +340,7 @@ Reponds UNIQUEMENT en JSON valide (sans markdown, sans commentaire) avec ce form
   "topSellers": [{"item":"nom","qtySold":0,"trend":"UP|STABLE|DOWN"}],
   "deadStock": [{"item":"nom","qtySold":0,"suggestion":"action concrete"}],
   "forecastNextWeek": [{"item":"nom","estimatedDemand":0}],
-  "shoppingList": [{"ingredient":"nom ingredient brut","estimatedNeeded":0,"alreadyHave":0,"toBuy":0,"unit":"kg|L|piece|botte|douzaine","priority":"HIGH|MEDIUM|LOW","estimatedCost":0,"reason":"pour quels plats"}],
+  "shoppingList": [{"ingredient":"nom ingredient brut","category":"categorie ingredient (Alcools, Dilutants & Mixers, Sirops & Liqueurs, Fruits & Garnitures, Viandes, Poissons, Legumes, Epicerie, Produits laitiers, Consommables)","estimatedNeeded":0,"alreadyHave":0,"toBuy":0,"unit":"kg|L|piece|botte|douzaine|bouteille|cl","priority":"HIGH|MEDIUM|LOW","estimatedCost":0,"reason":"pour quels plats"}],
   "promotions": [{"item":"nom plat","reason":"raison","suggestedDiscount":"-20%","urgency":"HIGH|MEDIUM|LOW","action":"description promo"}],
   "freshProductAlerts": [{"product":"nom","expiresIn":"X jours","qty":"quantite","recommendation":"action","affectedDishes":["plat1"]}],
   "supplierOrderNote": "strategie achat 2-3 phrases",
@@ -318,13 +349,12 @@ Reponds UNIQUEMENT en JSON valide (sans markdown, sans commentaire) avec ce form
 }
 
 Regles OBLIGATOIRES:
-1. shoppingList JAMAIS VIDE : deduis les ingredients bruts de TOUS les plats du menu. Si 0 en stock, toBuy = estimatedNeeded complet pour la semaine.
-   Ex: menu avec entrecote → "Boeuf (entrecotes)": estimatedNeeded=8kg, alreadyHave=0, toBuy=8kg
-   Ex: menu avec saumon → "Saumon frais": estimatedNeeded=4kg, alreadyHave=0, toBuy=4kg
-2. Couvre TOUS les plats du menu, pas seulement les mieux vendus.
-3. estimatedCost = prix d'achat reel estime (pas prix de vente).
-4. totalShoppingBudget = somme de tous les estimatedCost.
-5. Si budget donne et depassable, note-le dans supplierOrderNote.`;
+1. shoppingList JAMAIS VIDE : deduis les ingredients bruts de TOUS les plats de TOUTES les categories. Si 0 en stock, toBuy = estimatedNeeded complet pour la semaine.
+2. MINIMUM 30 ingredients dans la shoppingList pour un menu de plus de 15 plats.
+3. Chaque ingredient a un champ "category" pour le regrouper (Alcools, Dilutants & Mixers, Sirops & Liqueurs, Fruits & Garnitures, Viandes, etc.)
+4. estimatedCost = prix d'achat reel estime (pas prix de vente).
+5. totalShoppingBudget = somme de tous les estimatedCost.
+6. Si budget donne et depassable, note-le dans supplierOrderNote.`;
 
     try {
       let raw = (await ollamaCloudChat(iaConfig.ollamaApiKey, iaConfig.ollamaLangModel, [
@@ -850,6 +880,61 @@ Règles:
     );
 
     return { ok: true, id };
+  });
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // POST /ia/offers/deploy — deploy an offer proposed by Nova Finance
+  // GET  /ia/offers        — list active offers
+  // DELETE /ia/offers/:id  — remove an active offer
+  // ─────────────────────────────────────────────────────────────────────────────
+  app.post("/ia/offers/deploy", async (req, reply) => {
+    const me = await requirePro(req, reply);
+
+    const body = z.object({
+      dish: z.string(),
+      type: z.string(),
+      description: z.string(),
+      discountPercent: z.number(),
+      rationale: z.string().optional(),
+      endsAt: z.string().optional(), // ISO date string, default 7 days from now
+    }).parse(req.body);
+
+    const id = randomUUID();
+    const endsAt = body.endsAt ? new Date(body.endsAt) : new Date(Date.now() + 7 * 86400_000);
+
+    await prisma.$executeRawUnsafe(
+      `INSERT INTO "ActiveOffer" (id, "restaurantId", dish, type, description, "discountPercent", rationale, "endsAt", "createdAt")
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())`,
+      id, me.restaurantId, body.dish, body.type, body.description, body.discountPercent, body.rationale ?? "", endsAt,
+    );
+
+    return { ok: true, id, endsAt };
+  });
+
+  app.get("/ia/offers", async (req, reply) => {
+    const me = await requirePro(req, reply);
+
+    const rows = await prisma.$queryRawUnsafe<any[]>(
+      `SELECT id, dish, type, description, "discountPercent", rationale, "endsAt", "createdAt"
+       FROM "ActiveOffer"
+       WHERE "restaurantId" = $1 AND "endsAt" > NOW()
+       ORDER BY "createdAt" DESC`,
+      me.restaurantId,
+    );
+
+    return { offers: rows };
+  });
+
+  app.delete("/ia/offers/:id", async (req, reply) => {
+    const me = await requirePro(req, reply);
+    const { id } = req.params as { id: string };
+
+    await prisma.$executeRawUnsafe(
+      `DELETE FROM "ActiveOffer" WHERE id = $1 AND "restaurantId" = $2`,
+      id, me.restaurantId,
+    );
+
+    return { ok: true };
   });
 
   app.delete("/ia/history/:id", async (req, reply) => {

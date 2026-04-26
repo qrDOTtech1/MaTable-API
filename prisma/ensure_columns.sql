@@ -186,3 +186,18 @@ CREATE TABLE IF NOT EXISTS "AiHistory" (
   CONSTRAINT "AiHistory_pkey" PRIMARY KEY (id)
 );
 CREATE INDEX IF NOT EXISTS "AiHistory_restaurantId_type_idx" ON "AiHistory"("restaurantId", type, "createdAt" DESC);
+
+-- ActiveOffer: offres déployées depuis Nova Finance IA
+CREATE TABLE IF NOT EXISTS "ActiveOffer" (
+  id TEXT NOT NULL,
+  "restaurantId" TEXT NOT NULL,
+  dish TEXT NOT NULL,
+  type TEXT NOT NULL DEFAULT 'PROMO',
+  description TEXT NOT NULL,
+  "discountPercent" INTEGER NOT NULL DEFAULT 0,
+  rationale TEXT,
+  "endsAt" TIMESTAMP(3) NOT NULL,
+  "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT "ActiveOffer_pkey" PRIMARY KEY (id)
+);
+CREATE INDEX IF NOT EXISTS "ActiveOffer_restaurantId_idx" ON "ActiveOffer"("restaurantId", "endsAt");
