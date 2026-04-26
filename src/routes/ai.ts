@@ -88,6 +88,111 @@ async function ollamaCloudChat(
   throw lastErr ?? new Error("ollama: max retries exceeded (429 persists)");
 }
 
+/**
+ * Streaming variant — sends SSE events to the client while Ollama generates.
+ * Keeps the HTTP connection alive so we never hit browser/proxy timeouts.
+ *
+ * Events:
+ *   data: {"type":"chunk","content":"partial text"}
+ *   data: {"type":"done","content":"full text"}
+ *   data: {"type":"error","message":"..."}
+ */
+async function ollamaCloudChatStream(
+  apiKey: string,
+  model: string,
+  messages: OllamaMsg[],
+  reply: import("fastify").FastifyReply,
+  timeoutMs = CHAT_TIMEOUT_MS,
+): Promise<string> {
+  let lastErr: Error | null = null;
+
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    if (attempt > 0) {
+      const delay = Math.min(2000 * 2 ** (attempt - 1), 10_000);
+      await new Promise((r) => setTimeout(r, delay));
+    }
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+    try {
+      const res = await fetch("https://ollama.com/api/chat", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${apiKey}`,
+        },
+        body: JSON.stringify({ model, messages, stream: true }),
+        signal: controller.signal,
+      });
+
+      if (res.status === 429) {
+        const body = await res.text();
+        lastErr = new Error(`ollama error 429: ${body}`);
+        continue;
+      }
+
+      if (!res.ok) {
+        const errorText = await res.text();
+        throw new Error(`ollama error ${res.status}: ${errorText}`);
+      }
+
+      // Read the NDJSON stream from Ollama
+      const reader = res.body?.getReader();
+      if (!reader) throw new Error("No response body stream");
+
+      const decoder = new TextDecoder();
+      let fullContent = "";
+      let chunkCount = 0;
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        const text = decoder.decode(value, { stream: true });
+        // Ollama streams NDJSON — one JSON object per line
+        const lines = text.split("\n").filter(l => l.trim());
+
+        for (const line of lines) {
+          try {
+            const obj = JSON.parse(line);
+            const chunk = obj.message?.content ?? "";
+            if (chunk) {
+              fullContent += chunk;
+              chunkCount++;
+              // Send progress to client every 5 chunks to avoid flooding
+              if (chunkCount % 5 === 0) {
+                reply.raw.write(`data: ${JSON.stringify({ type: "chunk", chars: fullContent.length })}\n\n`);
+              }
+            }
+            // If Ollama signals done
+            if (obj.done === true) break;
+          } catch {
+            // Partial JSON line — skip
+          }
+        }
+      }
+
+      clearTimeout(timer);
+      return fullContent;
+
+    } catch (err: any) {
+      if (err.name === "AbortError") {
+        throw new Error(`ollama timeout after ${timeoutMs / 1000}s — image may be too large or server busy`);
+      }
+      if (err.message?.includes("429")) {
+        lastErr = err;
+        continue;
+      }
+      throw err;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  throw lastErr ?? new Error("ollama: max retries exceeded (429 persists)");
+}
+
 // ── History helper ────────────────────────────────────────────────────────────
 async function saveAiHistory(
   restaurantId: string,
@@ -627,6 +732,192 @@ Sois creatif, les descriptions doivent donner envie. Utilise des ingredients de 
       app.log.error(err);
       return reply.code(502).send({ error: "AI_ERROR", details: err.message });
     }
+  });
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // POST /ia/menu-generate/stream — SSE streaming variant (no timeout risk)
+  // Sends Server-Sent Events while Ollama generates, keeping HTTP alive.
+  // Events: {"type":"progress","phase":"...","chars":N}
+  //         {"type":"result","menu":{items:[...]},"meta":{...}}
+  //         {"type":"error","message":"..."}
+  // ─────────────────────────────────────────────────────────────────────────────
+  app.post("/ia/menu-generate/stream", async (req, reply) => {
+    const me = await requirePro(req, reply);
+
+    const restaurant = await prisma.restaurant.findUnique({
+      where: { id: me.restaurantId },
+      select: { subscription: true, name: true },
+    });
+    if (!restaurant || restaurant.subscription !== "PRO_IA") {
+      return reply.code(403).send({ error: "IA_NOT_SUBSCRIBED" });
+    }
+
+    const iaConfig = await getGlobalIaConfig();
+    if (!iaConfig.ollamaApiKey) {
+      return reply.code(503).send({ error: "IA_KEY_MISSING" });
+    }
+
+    const body = z.object({
+      cuisineType: z.string().max(200).optional(),
+      priceRange: z.enum(["budget", "mid", "premium", "gastronomique"]).default("mid"),
+      itemCount: z.number().int().min(3).max(50).default(12),
+      categories: z.array(z.string()).optional(),
+      style: z.string().max(500).optional(),
+      imageBase64: z.string().optional(),
+    }).parse(req.body);
+
+    if (!body.imageBase64 && !body.cuisineType?.trim()) {
+      return reply.code(400).send({ error: "CUISINE_OR_IMAGE_REQUIRED" });
+    }
+
+    const catHint = body.categories?.length
+      ? `Categories souhaitees: ${body.categories.join(", ")}`
+      : "Choisis les categories appropriees (Entrees, Plats, Desserts, Boissons, etc.)";
+
+    const priceGuide: Record<string, string> = {
+      budget: "5-12EUR par plat",
+      mid: "12-22EUR par plat",
+      premium: "22-45EUR par plat",
+      gastronomique: "35-80EUR par plat",
+    };
+
+    const imageMode = !!body.imageBase64;
+
+    const prompt = imageMode
+      ? `Tu es Nova Menu IA, un expert en menus de restaurants.
+
+Restaurant: ${restaurant.name}
+${body.cuisineType ? `Cuisine: ${body.cuisineType}` : ""}
+Gamme de prix: ${priceGuide[body.priceRange]}
+${body.style ? `Style/notes: ${body.style}` : ""}
+
+J'ai pris en photo mon menu actuel (carte, ardoise, ou document).
+Analyse cette image et EXTRAIT TOUS les plats visibles. Pour chaque plat:
+- Lis le nom exact du plat sur la photo
+- Lis le prix s'il est visible, sinon estime un prix coherent pour la gamme ${priceGuide[body.priceRange]}
+- Ecris une description vendeuse de 2-3 phrases
+- Attribue la bonne categorie (Entrees, Plats, Desserts, Boissons, etc.)
+- Identifie les allergenes probables
+- Estime un temps de preparation realiste
+
+REPONDS UNIQUEMENT en JSON valide (sans markdown):
+{
+  "items": [
+    {
+      "name": "Nom du plat",
+      "description": "Description vendeuse 2-3 phrases",
+      "priceCents": 1800,
+      "category": "Entrees",
+      "allergens": ["GLUTEN"],
+      "diets": [],
+      "waitMinutes": 15
+    }
+  ]
+}
+
+Allergenes possibles: GLUTEN, CRUSTACEANS, EGGS, FISH, PEANUTS, SOYBEANS, MILK, NUTS, CELERY, MUSTARD, SESAME, SULPHITES, LUPIN, MOLLUSCS
+Regimes possibles: VEGETARIAN, VEGAN, GLUTEN_FREE, LACTOSE_FREE, HALAL, KOSHER, SPICY
+waitMinutes: 0 si pret instantanement (boisson, dessert froid), sinon temps de preparation realiste.
+Extrais un maximum de plats de l'image. Sois precis sur les noms et prix visibles.`
+      : `Tu es Nova Menu IA, un chef cuisinier expert et designer de menus pour restaurants.
+
+Restaurant: ${restaurant.name}
+Cuisine: ${body.cuisineType}
+Gamme de prix: ${priceGuide[body.priceRange]}
+Nombre de plats: ${body.itemCount}
+${catHint}
+${body.style ? `Style/notes: ${body.style}` : ""}
+
+Genere un menu complet et REPONDS UNIQUEMENT en JSON valide (sans markdown):
+{
+  "items": [
+    {
+      "name": "Nom du plat",
+      "description": "Description vendeuse 2-3 phrases",
+      "priceCents": 1800,
+      "category": "Entrees",
+      "allergens": ["GLUTEN"],
+      "diets": [],
+      "waitMinutes": 15
+    }
+  ]
+}
+
+Allergenes possibles: GLUTEN, CRUSTACEANS, EGGS, FISH, PEANUTS, SOYBEANS, MILK, NUTS, CELERY, MUSTARD, SESAME, SULPHITES, LUPIN, MOLLUSCS
+Regimes possibles: VEGETARIAN, VEGAN, GLUTEN_FREE, LACTOSE_FREE, HALAL, KOSHER, SPICY
+waitMinutes: 0 si pret instantanement (boisson, dessert froid), sinon temps de preparation realiste.
+
+Sois creatif, les descriptions doivent donner envie. Utilise des ingredients de saison.`;
+
+    // Set up SSE response
+    reply.raw.writeHead(200, {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache",
+      "Connection": "keep-alive",
+      "X-Accel-Buffering": "no", // disable nginx buffering
+    });
+
+    const sendSSE = (data: Record<string, unknown>) => {
+      reply.raw.write(`data: ${JSON.stringify(data)}\n\n`);
+    };
+
+    try {
+      const model = imageMode ? iaConfig.ollamaVisionModel : iaConfig.ollamaLangModel;
+      const ollamaMessages: OllamaMsg[] = [];
+
+      if (imageMode) {
+        const cleanB64 = body.imageBase64!.replace(/^data:[^;]+;base64,/, "");
+        ollamaMessages.push({ role: "user", content: prompt, images: [cleanB64] });
+      } else {
+        ollamaMessages.push({ role: "user", content: prompt });
+      }
+
+      sendSSE({ type: "progress", phase: "sending", message: "Envoi au serveur IA..." });
+
+      // Use streaming variant to keep connection alive
+      const timeoutMs = imageMode ? VISION_TIMEOUT_MS : CHAT_TIMEOUT_MS;
+      const raw = await ollamaCloudChatStream(iaConfig.ollamaApiKey, model, ollamaMessages, reply, timeoutMs);
+
+      sendSSE({ type: "progress", phase: "parsing", message: "Extraction des plats..." });
+
+      // Clean and parse JSON
+      let cleaned = raw.trim().replace(/^```json\n?|```$/g, "").replace(/^```\n?|```$/g, "").trim();
+      const jsonMatch = cleaned.match(/\{[\s\S]*\}/);
+      if (jsonMatch) cleaned = jsonMatch[0];
+
+      let result: { items: any[] };
+      try { result = JSON.parse(cleaned); }
+      catch {
+        sendSSE({ type: "error", message: "L'IA n'a pas retourné un JSON valide. Réessayez." });
+        reply.raw.end();
+        return;
+      }
+
+      if (!Array.isArray(result.items)) {
+        sendSSE({ type: "error", message: "Format de réponse IA invalide." });
+        reply.raw.end();
+        return;
+      }
+
+      const meta = { model, mode: imageMode ? "photo-import" : "generate", cuisineType: body.cuisineType };
+
+      // Auto-save to history
+      const title = imageMode
+        ? `Import photo — ${result.items.length} plats`
+        : `${body.cuisineType ?? "Menu"} — ${result.items.length} plats`;
+      await saveAiHistory(me.restaurantId, "MENU", title, { menu: result, meta });
+
+      // Send final result
+      sendSSE({ type: "result", menu: result, meta });
+    } catch (err: any) {
+      app.log.error(err);
+      sendSSE({ type: "error", message: err.message || "Erreur serveur IA" });
+    } finally {
+      reply.raw.end();
+    }
+
+    // Prevent Fastify from trying to send a response (we already wrote to raw)
+    return reply;
   });
 
   // POST /ia/menu-generate/apply — bulk-create items from generated menu
