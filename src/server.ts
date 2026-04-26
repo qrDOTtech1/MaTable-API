@@ -104,6 +104,8 @@ async function build() {
   const app = Fastify({
     // Reuse X-Request-Id from client if present, else generate UUID
     genReqId: (req) => (req.headers["x-request-id"] as string) || randomUUID(),
+    // Increase body limit for vision routes (base64 images up to ~2MB)
+    bodyLimit: 10 * 1024 * 1024, // 10 MB
     logger: {
       transport: env.NODE_ENV === "development" ? { target: "pino-pretty" } : undefined,
       // In production, pino emits structured JSON — each log line includes reqId automatically

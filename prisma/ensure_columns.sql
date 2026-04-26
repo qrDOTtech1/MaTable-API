@@ -167,6 +167,13 @@ CREATE INDEX IF NOT EXISTS "SupportTicket_status_idx" ON "SupportTicket"(status)
 
 -- (duplicate GlobalConfig removed — defined above)
 
+-- SocialProfile: ensure name column exists (required by Prisma but may be missing on existing rows)
+ALTER TABLE "SocialProfile" ADD COLUMN IF NOT EXISTS "name" TEXT NOT NULL DEFAULT 'Anonyme';
+
+-- TableSession: link to social profile
+ALTER TABLE "TableSession" ADD COLUMN IF NOT EXISTS "socialProfileId" TEXT;
+CREATE INDEX IF NOT EXISTS "TableSession_socialProfileId_idx" ON "TableSession"("socialProfileId");
+
 -- AiHistory: historique persistant des réponses IA par restaurant
 CREATE TABLE IF NOT EXISTS "AiHistory" (
   id TEXT NOT NULL,

@@ -21,9 +21,9 @@ import { randomUUID } from "crypto";
 // ── Ollama Cloud chat completion ──────────────────────────────────────────────
 type OllamaMsg = { role: "user" | "assistant" | "system"; content: string; images?: string[] };
 
-// Vision requests can take up to 3 minutes on large images
-const CHAT_TIMEOUT_MS   = 90_000;   // 90s for text
-const VISION_TIMEOUT_MS = 180_000;  // 3min for vision
+// Timeouts — vision can be slow on complex images
+const CHAT_TIMEOUT_MS   = 120_000;  // 2min for text
+const VISION_TIMEOUT_MS = 240_000;  // 4min for vision
 const MAX_RETRIES       = 3;        // retry 429 up to 3 times
 
 async function ollamaCloudChat(
@@ -114,9 +114,11 @@ async function saveAiHistory(
 // ── Routes ────────────────────────────────────────────────────────────────────
 export async function aiRoutes(app: FastifyInstance) {
   // Timeout global pour toutes les routes IA (vision = jusqu'à 3min)
-  app.addHook("onRequest", async (req) => {
+  // Also set Fastify reply timeout so the response isn't killed early
+  app.addHook("onRequest", async (req, reply) => {
     if (req.url?.includes("/ia/")) {
-      (req.socket as any).setTimeout?.(210_000); // 3min30
+      (req.socket as any).setTimeout?.(300_000); // 5min socket
+      reply.raw.setTimeout?.(300_000);            // 5min HTTP response
     }
   });
 
