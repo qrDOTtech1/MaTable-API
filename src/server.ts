@@ -6,6 +6,9 @@ import multipart from "@fastify/multipart";
 import rateLimit from "@fastify/rate-limit";
 import compress from "@fastify/compress";
 import { randomUUID } from "crypto";
+import { readFileSync } from "fs";
+import { join } from "path";
+import { fileURLToPath } from "url";
 import { env } from "./env.js";
 import { prisma } from "./db.js";
 import { initRealtime } from "./realtime.js";
@@ -18,6 +21,21 @@ import { caissePortalRoutes } from "./routes/caissePortal.js";
 import { cuisinePortalRoutes } from "./routes/cuisinePortal.js";
 import { invoiceRoutes } from "./routes/invoice.js";
 import { socialRoutes } from "./routes/social.js";
+
+// Execute ensure_columns.sql at startup to create/update tables
+async function initDb() {
+  try {
+    const __filename = fileURLToPath(import.meta.url);
+    const __dirname = join(__filename, "..");
+    const sqlPath = join(__dirname, "..", "prisma", "ensure_columns.sql");
+    const sql = readFileSync(sqlPath, "utf-8");
+    await prisma.$executeRawUnsafe(sql);
+    console.log("✓ Database schema initialized (ensure_columns.sql executed)");
+  } catch (err) {
+    console.error("⚠️  Failed to initialize database schema:", err);
+    // Non-blocking: continue even if this fails (table might already exist)
+  }
+}
 
 async function build() {
   const app = Fastify({
@@ -88,6 +106,7 @@ async function build() {
 
 build()
   .then(async (app) => {
+    await initDb();
     initRealtime(app);
     await app.listen({ port: env.PORT, host: "0.0.0.0" });
     app.log.info(`API ready on :${env.PORT}`);
