@@ -113,8 +113,11 @@ async function build() {
   });
 
   // Propagate correlation ID back to the caller
+  // IMPORTANT: Skip hijacked replies (SSE streams) — headers were already written manually
   app.addHook("onSend", async (req, reply) => {
-    reply.header("X-Request-Id", req.id);
+    if (!(reply as any).hijacked) {
+      reply.header("X-Request-Id", req.id);
+    }
   });
 
   app.addContentTypeParser(
