@@ -22,7 +22,7 @@ export async function getGlobalIaConfig(): Promise<GlobalIaConfig> {
     FROM "GlobalConfig" WHERE id = 'global' LIMIT 1
   `;
   if (rows.length === 0) {
-    return { ollamaApiKey: null, ollamaLangModel: "gpt-oss:120b-cloud", ollamaVisionModel: "gpt-4o-cloud" };
+    return { ollamaApiKey: null, ollamaLangModel: "gpt-oss:120b", ollamaVisionModel: "qwen3-vl:235b" };
   }
   return rows[0];
 }
@@ -49,7 +49,7 @@ export async function callCloudAI(
     body: JSON.stringify({
       model: ollamaLangModel,
       messages: [{ role: "user", content: prompt }],
-      max_tokens: maxTokens,
+      stream: false,
     }),
   });
 
@@ -59,5 +59,6 @@ export async function callCloudAI(
   }
 
   const data = await res.json() as any;
-  return data.choices[0].message.content as string;
+  // Ollama API returns { message: { content: "..." } }
+  return (data.message?.content ?? data.choices?.[0]?.message?.content ?? "") as string;
 }

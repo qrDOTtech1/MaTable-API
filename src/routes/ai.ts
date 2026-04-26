@@ -4,8 +4,8 @@
  * Uses Ollama Cloud Models exclusively.
  * Single API key configured globally by admin, used by all PRO_IA restaurants.
  *
- * Ollama Cloud models: gpt-oss:120b-cloud, gpt-4o-cloud, llama3.1:latest-cloud, etc.
- * API: https://ollama.com/api/chat (OpenAI-compatible format)
+ * Ollama Cloud models: gpt-oss:120b, deepseek-v4-flash, qwen3-vl:235b, etc.
+ * API: https://ollama.com/api/chat
  * Auth: Bearer token via Authorization header
  */
 import { requirePro } from "../auth.js";
@@ -31,7 +31,7 @@ async function ollamaCloudChat(
     body: JSON.stringify({
       model,
       messages,
-      max_tokens: 1024,
+      stream: false,
     }),
   });
 
@@ -41,7 +41,8 @@ async function ollamaCloudChat(
   }
 
   const data = await res.json() as any;
-  return data.choices[0].message.content;
+  // Ollama API returns { message: { content: "..." } }
+  return (data.message?.content ?? data.choices?.[0]?.message?.content ?? "") as string;
 }
 
 // ── Vision helper — build Ollama Cloud vision message ──────────────────────────

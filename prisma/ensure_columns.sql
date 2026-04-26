@@ -21,8 +21,8 @@ ALTER TABLE "Restaurant" ADD COLUMN IF NOT EXISTS "reservationSlotMinutes" INTEG
 ALTER TABLE "Restaurant" ADD COLUMN IF NOT EXISTS "reservationPolicy" TEXT;
 ALTER TABLE "Restaurant" ADD COLUMN IF NOT EXISTS subscription TEXT NOT NULL DEFAULT 'STARTER';
 ALTER TABLE "Restaurant" ADD COLUMN IF NOT EXISTS "ollamaApiKey" TEXT;
-ALTER TABLE "Restaurant" ADD COLUMN IF NOT EXISTS "ollamaLangModel" TEXT DEFAULT 'gpt-4o-mini';
-ALTER TABLE "Restaurant" ADD COLUMN IF NOT EXISTS "ollamaVisionModel" TEXT DEFAULT 'gpt-4o';
+ALTER TABLE "Restaurant" ADD COLUMN IF NOT EXISTS "ollamaLangModel" TEXT DEFAULT 'gpt-oss:120b';
+ALTER TABLE "Restaurant" ADD COLUMN IF NOT EXISTS "ollamaVisionModel" TEXT DEFAULT 'qwen3-vl:235b';
 ALTER TABLE "Restaurant" ADD COLUMN IF NOT EXISTS "subscriptionStartedAt" TIMESTAMP(3);
 ALTER TABLE "Restaurant" ADD COLUMN IF NOT EXISTS "subscriptionExpiresAt" TIMESTAMP(3);
 ALTER TABLE "Restaurant" ADD COLUMN IF NOT EXISTS slug TEXT;
@@ -102,15 +102,15 @@ CREATE INDEX IF NOT EXISTS "Photo_menuItemId_idx" ON "Photo"("menuItemId");
 CREATE TABLE IF NOT EXISTS "GlobalConfig" (
   id TEXT NOT NULL DEFAULT 'global',
   "ollamaApiKey" TEXT,
-  "ollamaLangModel" TEXT NOT NULL DEFAULT 'gpt-oss:120b-cloud',
-  "ollamaVisionModel" TEXT NOT NULL DEFAULT 'gpt-4o-cloud',
+  "ollamaLangModel" TEXT NOT NULL DEFAULT 'gpt-oss:120b',
+  "ollamaVisionModel" TEXT NOT NULL DEFAULT 'qwen3-vl:235b',
   "updatedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
   CONSTRAINT "GlobalConfig_pkey" PRIMARY KEY (id)
 );
 
 -- Ensure exactly one global config row exists
 INSERT INTO "GlobalConfig" (id, "ollamaApiKey", "ollamaLangModel", "ollamaVisionModel", "updatedAt")
-VALUES ('global', NULL, 'gpt-oss:120b-cloud', 'gpt-4o-cloud', NOW())
+VALUES ('global', NULL, 'gpt-oss:120b', 'qwen3-vl:235b', NOW())
 ON CONFLICT (id) DO NOTHING;
 
 -- Prospect table (CRM de prospection)
@@ -148,14 +148,4 @@ DO $$ BEGIN
   END IF;
 END $$;
 
--- Global platform config (single row, id = 'global')
-CREATE TABLE IF NOT EXISTS "GlobalConfig" (
-  id TEXT NOT NULL DEFAULT 'global',
-  "iaApiKey" TEXT,
-  "iaLangModel" TEXT NOT NULL DEFAULT 'gpt-4o-mini',
-  "iaVisionModel" TEXT NOT NULL DEFAULT 'gpt-4o',
-  "updatedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  CONSTRAINT "GlobalConfig_pkey" PRIMARY KEY (id)
-);
--- Ensure the single row always exists
-INSERT INTO "GlobalConfig" (id) VALUES ('global') ON CONFLICT DO NOTHING;
+-- (duplicate GlobalConfig removed — defined above)
