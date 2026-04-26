@@ -156,6 +156,13 @@ Regimes possibles : Vegetarien, Vegan, Sans gluten, Sans lactose, Halal, Casher.
       return reply.code(503).send({ error: "IA_KEY_MISSING" });
     }
 
+    const body = z.object({
+      existingStockNotes: z.string().max(4000).optional(),
+      purchaseConstraints: z.string().max(1500).optional(),
+      freshProducts: z.string().max(2000).optional(), // produits frais avec dates d'expiration
+      budget: z.number().optional(), // budget maximum pour les courses
+    }).parse(req.body ?? {});
+
     // Gather data: menu items with stock + recent orders (last 14 days)
     const menuItems = await prisma.menuItem.findMany({
       where: { restaurantId: me.restaurantId },
@@ -183,28 +190,50 @@ Regimes possibles : Vegetarien, Vegan, Sans gluten, Sans lactose, Halal, Casher.
       }
     }
 
-    const prompt = `Tu es Nova Stock IA, un expert en gestion de stock pour restaurants.
+    const prompt = `Tu es Nova Stock IA, un expert en gestion de stock pour restaurants. Tu dois etre TRES PRECIS et CONCRET.
 
 Restaurant: ${restaurant.name}
-Periode: 14 derniers jours
+Periode d'analyse: 14 derniers jours
 Nombre de commandes: ${recentOrders.length}
+${body.budget ? `Budget courses: ${body.budget}EUR maximum` : ''}
 
-=== MENU (stock actuel) ===
-${menuItems.map(m => `- ${m.name} | Prix: ${(m.priceCents/100).toFixed(2)}EUR | Stock: ${m.stockEnabled ? (m.stockQty ?? '?') : 'non gere'} | Seuil alerte: ${m.lowStockThreshold ?? '-'} | Dispo: ${m.available ? 'oui' : 'non'}`).join('\n')}
+=== MENU ACTUEL (${menuItems.length} plats) ===
+${menuItems.map(m => `- ${m.name} | Prix vente: ${(m.priceCents/100).toFixed(2)}EUR | Stock suivi: ${m.stockEnabled ? `oui (${m.stockQty ?? 0} en stock, seuil alerte: ${m.lowStockThreshold ?? 5})` : 'non gere'} | Dispo: ${m.available ? 'oui' : 'NON'}`).join('\n')}
 
-=== VENTES 14 JOURS ===
-${Object.entries(salesMap).sort((a,b) => b[1].qty - a[1].qty).map(([,v]) => `- ${v.name}: ${v.qty} vendus (${(v.revenue/100).toFixed(2)}EUR CA)`).join('\n') || 'Aucune vente'}
+=== VENTES 14 DERNIERS JOURS ===
+${Object.entries(salesMap).sort((a,b) => b[1].qty - a[1].qty).map(([,v]) => `- ${v.name}: ${v.qty} vendus (${(v.revenue/100).toFixed(2)}EUR CA)`).join('\n') || 'Aucune vente enregistree'}
 
-Reponds UNIQUEMENT en JSON valide (sans markdown) avec ce format:
+=== STOCK ACTUEL DECLARE PAR LE RESTAURANT ===
+${body.existingStockNotes?.trim() || 'Non renseigne — fais des estimations basees sur les ventes'}
+
+=== PRODUITS FRAIS (dates, peremption) ===
+${body.freshProducts?.trim() || 'Non renseigne'}
+
+=== CONTRAINTES D'ACHAT ===
+${body.purchaseConstraints?.trim() || 'Aucune contrainte specifique'}
+
+Reponds UNIQUEMENT en JSON valide (sans markdown, sans commentaire) avec ce format EXACT:
 {
-  "summary": "Resume en 2-3 phrases de la situation stock",
-  "alerts": [{"item":"nom","issue":"probleme","urgency":"HIGH|MEDIUM|LOW"}],
+  "summary": "Resume situation stock en 2-3 phrases avec chiffres cles",
+  "alerts": [{"item":"nom plat ou ingredient","issue":"description precise du probleme","urgency":"HIGH|MEDIUM|LOW"}],
   "reorderSuggestions": [{"item":"nom","currentStock":0,"suggestedOrder":0,"reason":"explication courte"}],
   "topSellers": [{"item":"nom","qtySold":0,"trend":"UP|STABLE|DOWN"}],
-  "deadStock": [{"item":"nom","qtySold":0,"suggestion":"retirer ou promouvoir"}],
+  "deadStock": [{"item":"nom","qtySold":0,"suggestion":"action concrete a faire"}],
   "forecastNextWeek": [{"item":"nom","estimatedDemand":0}],
-  "costSavings": "suggestion pour reduire le gaspillage"
-}`;
+  "shoppingList": [{"ingredient":"nom ingredient brut","estimatedNeeded":0,"alreadyHave":0,"toBuy":0,"unit":"kg|L|piece|botte|douzaine","priority":"HIGH|MEDIUM|LOW","estimatedCost":0,"reason":"pour quels plats"}],
+  "promotions": [{"item":"nom plat","reason":"pourquoi promouvoir (stock excessif, peremption proche, ventes faibles)","suggestedDiscount":"ex: -20%","urgency":"HIGH|MEDIUM|LOW","action":"description de la promo a appliquer"}],
+  "freshProductAlerts": [{"product":"nom produit frais","expiresIn":"nombre de jours","qty":"quantite","recommendation":"que faire (cuisiner, promouvoir, jeter)","affectedDishes":["plat1","plat2"]}],
+  "supplierOrderNote": "strategie d'achat et conseil fournisseur en 2-3 phrases",
+  "costSavings": "conseil concret pour reduire le gaspillage et economiser",
+  "totalShoppingBudget": 0
+}
+
+Regles importantes:
+- shoppingList: deduis les INGREDIENTS BRUTS (pas les plats finis) necessaires pour la semaine prochaine base sur les ventes. Ex: si 20 entrecotes vendues par semaine → 6kg de boeuf a acheter.
+- promotions: identifie les plats avec stock excessif OU ventes faibles OU produits frais a risque. Propose des remises concretes (-15%, -20%, happy hour, plat du jour).
+- freshProductAlerts: si des produits frais sont declares, calcule les alertes de peremption et recommande comment les ecouler.
+- Si le budget est donne, priorise les achats HIGH en premier et indique si le budget est depassable.
+- totalShoppingBudget: somme estimee des achats de la shoppingList.`;
 
     try {
       const raw = (await ollamaCloudChat(iaConfig.ollamaApiKey, iaConfig.ollamaLangModel, [
@@ -213,9 +242,100 @@ Reponds UNIQUEMENT en JSON valide (sans markdown) avec ce format:
 
       let analysis: Record<string, unknown>;
       try { analysis = JSON.parse(raw); }
-      catch { analysis = { summary: raw, alerts: [], reorderSuggestions: [], topSellers: [], deadStock: [], forecastNextWeek: [], costSavings: "" }; }
+      catch { analysis = { summary: raw, alerts: [], reorderSuggestions: [], topSellers: [], deadStock: [], forecastNextWeek: [], shoppingList: [], promotions: [], freshProductAlerts: [], supplierOrderNote: "", costSavings: "", totalShoppingBudget: 0 }; }
 
       return { analysis, meta: { ordersAnalyzed: recentOrders.length, menuItemsCount: menuItems.length, period: "14d" } };
+    } catch (err: any) {
+      app.log.error(err);
+      return reply.code(502).send({ error: "AI_ERROR", details: err.message });
+    }
+  });
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // POST /ia/stock-items — Étape 1 du wizard stock
+  // L'IA analyse le menu + ventes et retourne la liste des articles
+  // qu'elle veut suivre, avec l'unité et la quantité suggérée à commander
+  // ─────────────────────────────────────────────────────────────────────────────
+  app.post("/ia/stock-items", async (req, reply) => {
+    const me = await requirePro(req, reply);
+
+    const restaurant = await prisma.restaurant.findUnique({
+      where: { id: me.restaurantId },
+      select: { subscription: true, name: true },
+    });
+    if (!restaurant || restaurant.subscription !== "PRO_IA") {
+      return reply.code(403).send({ error: "IA_NOT_SUBSCRIBED" });
+    }
+
+    const iaConfig = await getGlobalIaConfig();
+    if (!iaConfig.ollamaApiKey) {
+      return reply.code(503).send({ error: "IA_KEY_MISSING" });
+    }
+
+    // Récupère le menu et les ventes 14 jours
+    const menuItems = await prisma.menuItem.findMany({
+      where: { restaurantId: me.restaurantId },
+      select: { name: true, priceCents: true, category: true, available: true },
+    });
+
+    const twoWeeksAgo = new Date(Date.now() - 14 * 86400_000);
+    const recentOrders = await prisma.order.findMany({
+      where: { table: { restaurantId: me.restaurantId }, createdAt: { gte: twoWeeksAgo }, status: { not: "CANCELLED" } },
+      select: { items: true },
+      take: 300,
+    });
+
+    const salesMap: Record<string, { qty: number; name: string }> = {};
+    for (const order of recentOrders) {
+      const items = order.items as any[];
+      if (!Array.isArray(items)) continue;
+      for (const item of items) {
+        const key = item.menuItemId || item.name;
+        if (!salesMap[key]) salesMap[key] = { qty: 0, name: item.name };
+        salesMap[key].qty += item.quantity || 1;
+      }
+    }
+
+    const prompt = `Tu es Nova Stock IA. Analyse ce menu et ces ventes pour identifier les INGREDIENTS BRUTS que ce restaurant doit gérer en stock.
+
+Restaurant: ${restaurant.name}
+Menu (${menuItems.length} plats):
+${menuItems.map(m => `- ${m.name} (${m.category ?? "autre"})`).join("\n")}
+
+Ventes 14 jours:
+${Object.values(salesMap).sort((a,b) => b.qty - a.qty).map(v => `- ${v.name}: ${v.qty} vendus`).join("\n") || "Aucune vente"}
+
+Retourne UNIQUEMENT un JSON valide (sans markdown) avec ce format EXACT:
+{
+  "items": [
+    {
+      "name": "Nom ingrédient ou article",
+      "unit": "kg|L|piece|botte|douzaine|sachet",
+      "category": "Viandes|Poissons|Légumes|Fruits|Produits laitiers|Boissons|Épicerie|Boulangerie|Autres",
+      "isFresh": true,
+      "linkedDishes": ["plat1", "plat2"],
+      "weeklyEstimate": 0
+    }
+  ]
+}
+
+Règles:
+- Liste les ingrédients BRUTS nécessaires pour cuisiner le menu, pas les plats finis.
+- weeklyEstimate = estimation de la quantité nécessaire par semaine basée sur les ventes.
+- isFresh = true si produit périssable (viande, poisson, légumes, laitages, etc.).
+- Concentre-toi sur les ingrédients qui représentent un coût significatif ou un risque de rupture.
+- Maximum 20 ingrédients les plus importants.`;
+
+    try {
+      const raw = (await ollamaCloudChat(iaConfig.ollamaApiKey, iaConfig.ollamaLangModel, [
+        { role: "user", content: prompt },
+      ])).trim().replace(/^```json\n?|```$/g, "").replace(/^```\n?|```$/g, "");
+
+      let result: { items: any[] };
+      try { result = JSON.parse(raw); }
+      catch { return reply.code(502).send({ error: "AI_PARSE_ERROR", raw }); }
+
+      return { items: result.items ?? [], meta: { menuCount: menuItems.length, ordersAnalyzed: recentOrders.length } };
     } catch (err: any) {
       app.log.error(err);
       return reply.code(502).send({ error: "AI_ERROR", details: err.message });
@@ -243,13 +363,17 @@ Reponds UNIQUEMENT en JSON valide (sans markdown) avec ce format:
     }
 
     const body = z.object({
-      cuisineType: z.string().min(1).max(200),
+      cuisineType: z.string().max(200).optional(),
       priceRange: z.enum(["budget", "mid", "premium", "gastronomique"]).default("mid"),
       itemCount: z.number().int().min(3).max(50).default(12),
       categories: z.array(z.string()).optional(),
       style: z.string().max(500).optional(),
       imageBase64: z.string().optional(), // optional photo of existing menu/carte
     }).parse(req.body);
+
+    if (!body.imageBase64 && !body.cuisineType?.trim()) {
+      return reply.code(400).send({ error: "CUISINE_OR_IMAGE_REQUIRED" });
+    }
 
     const catHint = body.categories?.length
       ? `Categories souhaitees: ${body.categories.join(", ")}`
@@ -262,7 +386,45 @@ Reponds UNIQUEMENT en JSON valide (sans markdown) avec ce format:
       gastronomique: "35-80EUR par plat",
     };
 
-    const prompt = `Tu es Nova Menu IA, un chef cuisinier expert et designer de menus pour restaurants.
+    const imageMode = !!body.imageBase64;
+
+    const prompt = imageMode
+      ? `Tu es Nova Menu IA, un expert en menus de restaurants.
+
+Restaurant: ${restaurant.name}
+${body.cuisineType ? `Cuisine: ${body.cuisineType}` : ""}
+Gamme de prix: ${priceGuide[body.priceRange]}
+${body.style ? `Style/notes: ${body.style}` : ""}
+
+J'ai pris en photo mon menu actuel (carte, ardoise, ou document).
+Analyse cette image et EXTRAIT TOUS les plats visibles. Pour chaque plat:
+- Lis le nom exact du plat sur la photo
+- Lis le prix s'il est visible, sinon estime un prix coherent pour la gamme ${priceGuide[body.priceRange]}
+- Ecris une description vendeuse de 2-3 phrases
+- Attribue la bonne categorie (Entrees, Plats, Desserts, Boissons, etc.)
+- Identifie les allergenes probables
+- Estime un temps de preparation realiste
+
+REPONDS UNIQUEMENT en JSON valide (sans markdown):
+{
+  "items": [
+    {
+      "name": "Nom du plat",
+      "description": "Description vendeuse 2-3 phrases",
+      "priceCents": 1800,
+      "category": "Entrees",
+      "allergens": ["GLUTEN"],
+      "diets": [],
+      "waitMinutes": 15
+    }
+  ]
+}
+
+Allergenes possibles: GLUTEN, CRUSTACEANS, EGGS, FISH, PEANUTS, SOYBEANS, MILK, NUTS, CELERY, MUSTARD, SESAME, SULPHITES, LUPIN, MOLLUSCS
+Regimes possibles: VEGETARIAN, VEGAN, GLUTEN_FREE, LACTOSE_FREE, HALAL, KOSHER, SPICY
+waitMinutes: 0 si pret instantanement (boisson, dessert froid), sinon temps de preparation realiste.
+Extrais un maximum de plats de l'image. Sois precis sur les noms et prix visibles.`
+      : `Tu es Nova Menu IA, un chef cuisinier expert et designer de menus pour restaurants.
 
 Restaurant: ${restaurant.name}
 Cuisine: ${body.cuisineType}
@@ -294,15 +456,16 @@ Sois creatif, les descriptions doivent donner envie. Utilise des ingredients de 
 
     try {
       const messages: OllamaMsg[] = [];
+      const model = imageMode ? iaConfig.ollamaVisionModel : iaConfig.ollamaLangModel;
 
-      if (body.imageBase64) {
-        const cleanB64 = body.imageBase64.replace(/^data:[^;]+;base64,/, "");
+      if (imageMode) {
+        const cleanB64 = body.imageBase64!.replace(/^data:[^;]+;base64,/, "");
         messages.push({ role: "user", content: prompt, images: [cleanB64] });
       } else {
         messages.push({ role: "user", content: prompt });
       }
 
-      const raw = (await ollamaCloudChat(iaConfig.ollamaApiKey, body.imageBase64 ? iaConfig.ollamaVisionModel : iaConfig.ollamaLangModel, messages))
+      const raw = (await ollamaCloudChat(iaConfig.ollamaApiKey, model, messages))
         .trim().replace(/^```json\n?|```$/g, "").replace(/^```\n?|```$/g, "");
 
       let result: { items: any[] };
@@ -313,7 +476,7 @@ Sois creatif, les descriptions doivent donner envie. Utilise des ingredients de 
         return reply.code(502).send({ error: "AI_PARSE_ERROR", raw });
       }
 
-      return { menu: result, meta: { model: body.imageBase64 ? iaConfig.ollamaVisionModel : iaConfig.ollamaLangModel } };
+      return { menu: result, meta: { model, mode: imageMode ? "photo-import" : "generate" } };
     } catch (err: any) {
       app.log.error(err);
       return reply.code(502).send({ error: "AI_ERROR", details: err.message });
