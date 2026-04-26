@@ -132,3 +132,15 @@ DO $$ BEGIN
       FOREIGN KEY ("assignedServerId") REFERENCES "Server"(id) ON DELETE SET NULL ON UPDATE CASCADE;
   END IF;
 END $$;
+
+-- Global platform config (single row, id = 'global')
+CREATE TABLE IF NOT EXISTS "GlobalConfig" (
+  id TEXT NOT NULL DEFAULT 'global',
+  "iaApiKey" TEXT,
+  "iaLangModel" TEXT NOT NULL DEFAULT 'gpt-4o-mini',
+  "iaVisionModel" TEXT NOT NULL DEFAULT 'gpt-4o',
+  "updatedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT "GlobalConfig_pkey" PRIMARY KEY (id)
+);
+-- Ensure the single row always exists
+INSERT INTO "GlobalConfig" (id) VALUES ('global') ON CONFLICT DO NOTHING;

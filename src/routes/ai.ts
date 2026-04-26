@@ -12,6 +12,7 @@
  */
 import { requirePro } from "../auth.js";
 import { prisma } from "../db.js";
+import { getGlobalIaConfig } from "../globalIaConfig.js";
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 
@@ -156,14 +157,16 @@ export async function aiRoutes(app: FastifyInstance) {
 
     const restaurant = await prisma.restaurant.findUnique({
       where: { id: me.restaurantId },
-      select: { subscription: true, ollamaApiKey: true, ollamaLangModel: true },
+      select: { subscription: true },
     });
 
     if (!restaurant || restaurant.subscription !== "PRO_IA") {
       return reply.code(403).send({ error: "IA_NOT_SUBSCRIBED", message: "Abonnement PRO_IA requis." });
     }
-    if (!restaurant.ollamaApiKey) {
-      return reply.code(503).send({ error: "IA_KEY_MISSING", message: "Clé API non configurée. Ajoutez-la dans l'admin." });
+
+    const iaConfig = await getGlobalIaConfig();
+    if (!iaConfig.iaApiKey) {
+      return reply.code(503).send({ error: "IA_KEY_MISSING", message: "Clé API non configurée dans l'admin." });
     }
 
     const { messages } = z.object({
@@ -173,11 +176,11 @@ export async function aiRoutes(app: FastifyInstance) {
       })),
     }).parse(req.body);
 
-    const model = restaurant.ollamaLangModel ?? "gpt-4o-mini";
+    const model = iaConfig.iaLangModel;
     const provider = detectProvider(model);
 
     try {
-      const text = await cloudChat(provider, restaurant.ollamaApiKey, model, messages);
+      const text = await cloudChat(provider, iaConfig.iaApiKey, model, messages);
       return { message: { role: "assistant", content: text } };
     } catch (err: any) {
       app.log.error(err);
@@ -193,14 +196,16 @@ export async function aiRoutes(app: FastifyInstance) {
 
     const restaurant = await prisma.restaurant.findUnique({
       where: { id: me.restaurantId },
-      select: { subscription: true, ollamaApiKey: true, ollamaVisionModel: true, ollamaLangModel: true },
+      select: { subscription: true },
     });
 
     if (!restaurant || restaurant.subscription !== "PRO_IA") {
       return reply.code(403).send({ error: "IA_NOT_SUBSCRIBED", message: "Abonnement PRO_IA requis." });
     }
-    if (!restaurant.ollamaApiKey) {
-      return reply.code(503).send({ error: "IA_KEY_MISSING", message: "Clé API non configurée." });
+
+    const iaConfig = await getGlobalIaConfig();
+    if (!iaConfig.iaApiKey) {
+      return reply.code(503).send({ error: "IA_KEY_MISSING", message: "Clé API non configurée dans l'admin." });
     }
 
     const { imageBase64, mimeType } = z.object({
@@ -208,8 +213,7 @@ export async function aiRoutes(app: FastifyInstance) {
       mimeType: z.string().default("image/jpeg"),
     }).parse(req.body);
 
-    // Vision model (fallback to lang model if same provider supports vision)
-    const model = restaurant.ollamaVisionModel ?? restaurant.ollamaLangModel ?? "gpt-4o";
+    const model = iaConfig.iaVisionModel;
     const provider = detectProvider(model);
 
     const systemPrompt = `Tu es un expert culinaire. Analyse cette photo de plat et réponds UNIQUEMENT en JSON valide (sans markdown) avec ce format exact :
@@ -219,7 +223,7 @@ Régimes possibles : Végétarien, Vegan, Sans gluten, Sans lactose, Halal, Cash
 
     try {
       const messages = buildVisionMessages(provider, systemPrompt, imageBase64, mimeType);
-      const raw = (await cloudChat(provider, restaurant.ollamaApiKey, model, messages))
+      const raw = (await cloudChat(provider, iaConfig.iaApiKey, model, messages))
         .trim().replace(/^```json\n?|```$/g, "");
 
       let result: Record<string, unknown>;
