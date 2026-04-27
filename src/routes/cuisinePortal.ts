@@ -148,6 +148,37 @@ export async function cuisinePortalRoutes(app: FastifyInstance) {
     return { ok: true };
   });
 
+  // ── GET /api/cuisine/menu — liste des plats pour le panel rupture ────────
+  app.get("/menu", async (req, reply) => {
+    const me = await requireCuisine(req, reply);
+    const items = await prisma.menuItem.findMany({
+      where: { restaurantId: me.restaurantId },
+      select: { id: true, name: true, available: true, category: true },
+      orderBy: [{ category: "asc" }, { name: "asc" }],
+    });
+    return { menu: items };
+  });
+
+  // ── PATCH /api/cuisine/menu/:id/toggle-available — toggle rupture rapide ──
+  app.patch("/menu/:id/toggle-available", async (req, reply) => {
+    const me = await requireCuisine(req, reply);
+    const { id } = req.params as { id: string };
+    const item = await prisma.menuItem.findFirst({
+      where: { id, restaurantId: me.restaurantId },
+      select: { id: true, available: true, name: true },
+    });
+    if (!item) return reply.code(404).send({ error: "not_found" });
+    const updated = await prisma.menuItem.update({
+      where: { id },
+      data: { available: !item.available },
+      select: { id: true, available: true, name: true },
+    });
+    emitToRestaurant(me.restaurantId, "menu:availability_changed", {
+      itemId: id, name: updated.name, available: updated.available,
+    });
+    return { ok: true, available: updated.available };
+  });
+
   // ── POST /api/cuisine/orders/:id/overdue — client signals timer expired ────
   app.post("/orders/:id/overdue", async (req, reply) => {
     const { id } = req.params as { id: string };

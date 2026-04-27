@@ -453,6 +453,109 @@ export async function proRoutes(app: FastifyInstance) {
     return { order: updated };
   });
 
+  // PATCH /orders/:id/items — ajoute des articles à une commande existante (PENDING ou COOKING)
+  app.patch("/orders/:id/items", async (req, reply) => {
+    const me = await requirePro(req, reply);
+    const { id } = req.params as { id: string };
+    const body = z.object({
+      add: z.array(z.object({
+        menuItemId: z.string(),
+        quantity:   z.number().int().min(1).max(50),
+      })).min(1).max(50),
+    }).parse(req.body);
+
+    const order = await prisma.order.findFirst({
+      where: { id, table: { restaurantId: me.restaurantId }, status: { in: ["PENDING", "COOKING"] } },
+    });
+    if (!order) return reply.code(404).send({ error: "not_found_or_not_editable" });
+
+    // Resolve menu items
+    const menuItemIds = body.add.map((i) => i.menuItemId);
+    const menuItems = await prisma.menuItem.findMany({
+      where: { id: { in: menuItemIds }, restaurantId: me.restaurantId, available: true },
+      select: { id: true, name: true, priceCents: true },
+    });
+    const menuMap = new Map(menuItems.map((m) => [m.id, m]));
+
+    // Merge into existing items array
+    const existing: Array<{ menuItemId?: string; name: string; quantity: number; priceCents: number }> =
+      Array.isArray(order.items) ? (order.items as any[]) : [];
+
+    for (const incoming of body.add) {
+      const meta = menuMap.get(incoming.menuItemId);
+      if (!meta) continue;
+      const idx = existing.findIndex((e) => e.menuItemId === incoming.menuItemId);
+      if (idx >= 0) {
+        existing[idx] = { ...existing[idx], quantity: existing[idx].quantity + incoming.quantity };
+      } else {
+        existing.push({ menuItemId: meta.id, name: meta.name, quantity: incoming.quantity, priceCents: meta.priceCents });
+      }
+    }
+
+    const newTotal = existing.reduce((s, i) => s + i.priceCents * i.quantity, 0);
+    const updated = await prisma.order.update({
+      where: { id },
+      data: { items: existing as any, totalCents: newTotal },
+      include: { table: true },
+    });
+
+    emitToRestaurant(me.restaurantId, "order:updated", { id: updated.id, status: updated.status });
+    emitToSession(updated.sessionId, "order:updated", { id: updated.id, status: updated.status });
+    return { order: updated };
+  });
+
+  // PATCH /orders/:id/modify — modifier quantites ou supprimer des articles (PENDING ou COOKING uniquement)
+  app.patch("/orders/:id/modify", async (req, reply) => {
+    const me = await requirePro(req, reply);
+    const { id } = req.params as { id: string };
+    const body = z.object({
+      items: z.array(z.object({
+        menuItemId: z.string(),
+        quantity:   z.number().int().min(0).max(99), // 0 = supprimer l'article
+      })).min(1).max(100),
+    }).parse(req.body);
+
+    const order = await prisma.order.findFirst({
+      where: { id, table: { restaurantId: me.restaurantId }, status: { in: ["PENDING", "COOKING"] } },
+    });
+    if (!order) return reply.code(404).send({ error: "not_found_or_not_editable" });
+
+    const existing: Array<{ menuItemId?: string; name: string; quantity: number; priceCents: number }> =
+      Array.isArray(order.items) ? (order.items as any[]) : [];
+
+    for (const mod of body.items) {
+      const idx = existing.findIndex((e) => e.menuItemId === mod.menuItemId);
+      if (idx < 0) continue; // article absent = ignorer
+      if (mod.quantity === 0) {
+        existing.splice(idx, 1); // supprimer l'article
+      } else {
+        existing[idx] = { ...existing[idx], quantity: mod.quantity };
+      }
+    }
+
+    // Si la commande est vide apres modifs, annuler automatiquement
+    if (existing.length === 0) {
+      const updated = await prisma.order.update({
+        where: { id },
+        data: { status: "CANCELLED", items: [] as any, totalCents: 0 },
+      });
+      emitToRestaurant(me.restaurantId, "order:updated", { id: updated.id, status: "CANCELLED" });
+      emitToSession(updated.sessionId, "order:updated", { id: updated.id, status: "CANCELLED" });
+      return { order: updated, cancelled: true };
+    }
+
+    const newTotal = existing.reduce((s, i) => s + i.priceCents * i.quantity, 0);
+    const updated = await prisma.order.update({
+      where: { id },
+      data: { items: existing as any, totalCents: newTotal },
+      include: { table: true },
+    });
+
+    emitToRestaurant(me.restaurantId, "order:updated", { id: updated.id, status: updated.status });
+    emitToSession(updated.sessionId, "order:updated", { id: updated.id, status: updated.status });
+    return { order: updated };
+  });
+
   // ---------------------------------------------------------------------------
   // Menu
   // ---------------------------------------------------------------------------
@@ -524,6 +627,27 @@ export async function proRoutes(app: FastifyInstance) {
     const { id } = req.params as { id: string };
     await prisma.menuItem.deleteMany({ where: { id, restaurantId: me.restaurantId } });
     return { ok: true };
+  });
+
+  // PATCH /menu/:id/toggle-available — toggle rapide disponible/rupture pendant le service
+  app.patch("/menu/:id/toggle-available", async (req, reply) => {
+    const me = await requirePro(req, reply);
+    const { id } = req.params as { id: string };
+    const item = await prisma.menuItem.findFirst({
+      where: { id, restaurantId: me.restaurantId },
+      select: { id: true, available: true, name: true },
+    });
+    if (!item) return reply.code(404).send({ error: "not_found" });
+    const updated = await prisma.menuItem.update({
+      where: { id },
+      data: { available: !item.available },
+      select: { id: true, available: true, name: true },
+    });
+    // Emit so all connected dashboards see the change instantly
+    emitToRestaurant(me.restaurantId, "menu:availability_changed", {
+      itemId: id, name: updated.name, available: updated.available,
+    });
+    return { ok: true, available: updated.available };
   });
 
   app.post("/menu/:id/restock", async (req, reply) => {
@@ -916,5 +1040,235 @@ export async function proRoutes(app: FastifyInstance) {
       LIMIT 50
     `;
     return { tickets };
+  });
+
+  // ---------------------------------------------------------------------------
+  // Stock — gestion des matières premières / ingrédients bruts
+  // ---------------------------------------------------------------------------
+  const stockProductSchema = z.object({
+    name: z.string().min(1).max(200),
+    unit: z.string().min(1).max(30).default("kg"),
+    category: z.string().min(1).max(100).default("Autre"),
+    isFresh: z.boolean().default(false),
+    currentQty: z.number().min(0).default(0),
+    lowThreshold: z.number().min(0).default(0),
+    weeklyEstimate: z.number().min(0).default(0),
+    notes: z.string().max(1000).optional().nullable(),
+    linkedDishes: z.array(z.string()).default([]),
+  });
+
+  type StockProductRow = {
+    id: string;
+    restaurantId: string;
+    name: string;
+    unit: string;
+    category: string;
+    isFresh: boolean;
+    currentQty: number;
+    lowThreshold: number;
+    weeklyEstimate: number;
+    notes: string | null;
+    linkedDishes: string[];
+    updatedAt: Date;
+    createdAt: Date;
+  };
+
+  // GET /api/pro/stock
+  app.get("/stock", async (req, reply) => {
+    const me = await requirePro(req, reply);
+    const products = await prisma.$queryRaw<StockProductRow[]>`
+      SELECT id, "restaurantId", name, unit, category, "isFresh",
+             "currentQty", "lowThreshold", "weeklyEstimate",
+             notes, "linkedDishes", "updatedAt", "createdAt"
+      FROM "StockProduct"
+      WHERE "restaurantId" = ${me.restaurantId}
+      ORDER BY category ASC, name ASC
+    `;
+    return { products };
+  });
+
+  // POST /api/pro/stock
+  app.post("/stock", async (req, reply) => {
+    const me = await requirePro(req, reply);
+    const body = stockProductSchema.parse(req.body);
+    const id = crypto.randomUUID();
+    await prisma.$executeRawUnsafe(
+      `INSERT INTO "StockProduct" (id, "restaurantId", name, unit, category, "isFresh",
+         "currentQty", "lowThreshold", "weeklyEstimate", notes, "linkedDishes", "updatedAt", "createdAt")
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, NOW(), NOW())`,
+      id, me.restaurantId, body.name, body.unit, body.category, body.isFresh,
+      body.currentQty, body.lowThreshold, body.weeklyEstimate,
+      body.notes ?? null, JSON.stringify(body.linkedDishes)
+    );
+    const rows = await prisma.$queryRaw<StockProductRow[]>`
+      SELECT * FROM "StockProduct" WHERE id = ${id}
+    `;
+    return { product: rows[0] };
+  });
+
+  // PUT /api/pro/stock/:id
+  app.put("/stock/:id", async (req, reply) => {
+    const me = await requirePro(req, reply);
+    const { id } = req.params as { id: string };
+    const body = stockProductSchema.parse(req.body);
+
+    const existing = await prisma.$queryRaw<{ id: string }[]>`
+      SELECT id FROM "StockProduct" WHERE id = ${id} AND "restaurantId" = ${me.restaurantId}
+    `;
+    if (existing.length === 0) return reply.code(404).send({ error: "not_found" });
+
+    await prisma.$executeRawUnsafe(
+      `UPDATE "StockProduct"
+       SET name = $1, unit = $2, category = $3, "isFresh" = $4,
+           "currentQty" = $5, "lowThreshold" = $6, "weeklyEstimate" = $7,
+           notes = $8, "linkedDishes" = $9::jsonb, "updatedAt" = NOW()
+       WHERE id = $10 AND "restaurantId" = $11`,
+      body.name, body.unit, body.category, body.isFresh,
+      body.currentQty, body.lowThreshold, body.weeklyEstimate,
+      body.notes ?? null, JSON.stringify(body.linkedDishes),
+      id, me.restaurantId
+    );
+    const rows = await prisma.$queryRaw<StockProductRow[]>`
+      SELECT * FROM "StockProduct" WHERE id = ${id}
+    `;
+    return { product: rows[0] };
+  });
+
+  // PATCH /api/pro/stock/:id/qty — mise à jour rapide de la quantité seule
+  app.patch("/stock/:id/qty", async (req, reply) => {
+    const me = await requirePro(req, reply);
+    const { id } = req.params as { id: string };
+    const { qty } = z.object({ qty: z.number().min(0) }).parse(req.body);
+
+    const existing = await prisma.$queryRaw<{ id: string }[]>`
+      SELECT id FROM "StockProduct" WHERE id = ${id} AND "restaurantId" = ${me.restaurantId}
+    `;
+    if (existing.length === 0) return reply.code(404).send({ error: "not_found" });
+
+    await prisma.$executeRaw`
+      UPDATE "StockProduct" SET "currentQty" = ${qty}, "updatedAt" = NOW()
+      WHERE id = ${id} AND "restaurantId" = ${me.restaurantId}
+    `;
+    return { ok: true };
+  });
+
+  // DELETE /api/pro/stock/:id
+  app.delete("/stock/:id", async (req, reply) => {
+    const me = await requirePro(req, reply);
+    const { id } = req.params as { id: string };
+    await prisma.$executeRaw`
+      DELETE FROM "StockProduct"
+      WHERE id = ${id} AND "restaurantId" = ${me.restaurantId}
+    `;
+    return { ok: true };
+  });
+
+  // GET /api/pro/stock/daily-report — estimation de consommation du jour
+  app.get("/stock/daily-report", async (req, reply) => {
+    const me = await requirePro(req, reply);
+
+    // Orders from today
+    const today = new Date(); today.setHours(0, 0, 0, 0);
+    const orders = await prisma.order.findMany({
+      where: {
+        table: { restaurantId: me.restaurantId },
+        status: { in: ["PENDING", "COOKING", "SERVED", "PAID"] },
+        createdAt: { gte: today },
+      },
+      select: { items: true, totalCents: true, status: true },
+    });
+
+    // Aggregate dish quantities sold today
+    const dishMap: Record<string, number> = {};
+    let totalRevenueCents = 0;
+    let totalOrders = 0;
+    for (const o of orders) {
+      totalOrders++;
+      totalRevenueCents += o.totalCents;
+      for (const item of (o.items as any[]) ?? []) {
+        const name: string = item.name ?? "";
+        dishMap[name] = (dishMap[name] ?? 0) + (item.quantity ?? 1);
+      }
+    }
+
+    // Load all stock products and estimate consumption via linkedDishes
+    type StockRow = { id: string; name: string; unit: string; category: string; currentQty: number; lowThreshold: number; weeklyEstimate: number; linkedDishes: string[] };
+    const products = await prisma.$queryRaw<StockRow[]>`
+      SELECT id, name, unit, category, "currentQty", "lowThreshold", "weeklyEstimate",
+             COALESCE("linkedDishes", '[]'::jsonb) AS "linkedDishes"
+      FROM "StockProduct"
+      WHERE "restaurantId" = ${me.restaurantId}
+    `;
+
+    // Per product: estimated consumption = sum(qty_sold_for_linked_dish * weeklyEstimate/7)
+    const consumptionReport = products.map((p) => {
+      const linkedDishes: string[] = Array.isArray(p.linkedDishes) ? p.linkedDishes : [];
+      let estimatedUsed = 0;
+      const breakdown: Array<{ dish: string; sold: number; estimated: number }> = [];
+      for (const dish of linkedDishes) {
+        const sold = dishMap[dish] ?? 0;
+        if (sold > 0) {
+          // Estimate: if weekly = 7 portions/week → 1/day per dish sold
+          const perDish = p.weeklyEstimate > 0 ? p.weeklyEstimate / 7 : 0;
+          const used = Math.round((perDish * sold) * 100) / 100;
+          estimatedUsed += used;
+          breakdown.push({ dish, sold, estimated: used });
+        }
+      }
+      const remainingEst = Math.max(0, p.currentQty - estimatedUsed);
+      return {
+        id: p.id, name: p.name, unit: p.unit, category: p.category,
+        currentQty: p.currentQty, lowThreshold: p.lowThreshold,
+        estimatedUsed: Math.round(estimatedUsed * 100) / 100,
+        remainingEst: Math.round(remainingEst * 100) / 100,
+        breakdown,
+        isLow: p.lowThreshold > 0 && remainingEst <= p.lowThreshold,
+        hasActivity: estimatedUsed > 0,
+      };
+    }).sort((a, b) => {
+      if (a.isLow !== b.isLow) return a.isLow ? -1 : 1;
+      if (a.hasActivity !== b.hasActivity) return a.hasActivity ? -1 : 1;
+      return a.name.localeCompare(b.name);
+    });
+
+    const topDishes = Object.entries(dishMap)
+      .sort(([, a], [, b]) => b - a)
+      .slice(0, 20)
+      .map(([name, qty]) => ({ name, qty }));
+
+    return { totalOrders, totalRevenueCents, topDishes, consumptionReport };
+  });
+
+  // POST /api/pro/stock/import-ia — importe les produits suggérés par Nova Stock IA
+  app.post("/stock/import-ia", async (req, reply) => {
+    const me = await requirePro(req, reply);
+    const body = z.object({
+      products: z.array(z.object({
+        name: z.string().min(1).max(200),
+        unit: z.string().min(1).max(30).default("kg"),
+        category: z.string().min(1).max(100).default("Autre"),
+        isFresh: z.boolean().default(false),
+        currentQty: z.number().min(0).default(0),
+        lowThreshold: z.number().min(0).default(0),
+        weeklyEstimate: z.number().min(0).default(0),
+        notes: z.string().max(500).optional().nullable(),
+        linkedDishes: z.array(z.string()).default([]),
+      })).min(1).max(100),
+    }).parse(req.body);
+
+    const created: StockProductRow[] = [];
+    for (const p of body.products) {
+      const id = crypto.randomUUID();
+      await prisma.$executeRawUnsafe(
+        `INSERT INTO "StockProduct" (id, "restaurantId", name, unit, category, "isFresh",
+           "currentQty", "lowThreshold", "weeklyEstimate", notes, "linkedDishes", "updatedAt", "createdAt")
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, NOW(), NOW())`,
+        id, me.restaurantId, p.name, p.unit, p.category, p.isFresh,
+        p.currentQty, p.lowThreshold, p.weeklyEstimate,
+        p.notes ?? null, JSON.stringify(p.linkedDishes)
+      );
+      created.push({ id, restaurantId: me.restaurantId, ...p, notes: p.notes ?? null, updatedAt: new Date(), createdAt: new Date() });
+    }
+    return { created: created.length };
   });
 }

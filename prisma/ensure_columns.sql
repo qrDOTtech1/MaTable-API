@@ -187,6 +187,26 @@ CREATE TABLE IF NOT EXISTS "AiHistory" (
 );
 CREATE INDEX IF NOT EXISTS "AiHistory_restaurantId_type_idx" ON "AiHistory"("restaurantId", type, "createdAt" DESC);
 
+-- StockProduct: matières premières et ingrédients bruts (séparé de MenuItem)
+CREATE TABLE IF NOT EXISTS "StockProduct" (
+  id TEXT NOT NULL,
+  "restaurantId" TEXT NOT NULL,
+  name TEXT NOT NULL,
+  unit TEXT NOT NULL DEFAULT 'kg',
+  category TEXT NOT NULL DEFAULT 'Autre',
+  "isFresh" BOOLEAN NOT NULL DEFAULT false,
+  "currentQty" DOUBLE PRECISION NOT NULL DEFAULT 0,
+  "lowThreshold" DOUBLE PRECISION NOT NULL DEFAULT 0,
+  "weeklyEstimate" DOUBLE PRECISION NOT NULL DEFAULT 0,
+  notes TEXT,
+  "linkedDishes" JSONB NOT NULL DEFAULT '[]'::jsonb,
+  "updatedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT "StockProduct_pkey" PRIMARY KEY (id)
+);
+CREATE INDEX IF NOT EXISTS "StockProduct_restaurantId_idx" ON "StockProduct"("restaurantId", "updatedAt" DESC);
+CREATE INDEX IF NOT EXISTS "StockProduct_restaurantId_category_idx" ON "StockProduct"("restaurantId", category);
+
 -- ActiveOffer: offres déployées depuis Nova Finance IA
 CREATE TABLE IF NOT EXISTS "ActiveOffer" (
   id TEXT NOT NULL,

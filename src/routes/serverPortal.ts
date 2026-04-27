@@ -624,6 +624,121 @@ Format: retourne UNIQUEMENT 3 lignes, une par défi, sans numérotation, sans ex
     return { challenges: myChallenges, alreadyGenerated: false };
   });
 
+  // ── GET /api/server/menu ──────────────────────────────────────────────────
+  // Returns all available menu items for the restaurant (for server ordering on behalf)
+  app.get("/menu", async (req, reply) => {
+    const me = await requireServer(req, reply);
+    // Fetch via raw to include waitMinutes (added via ensure_columns.sql, not in Prisma schema)
+    type MenuItemRow = { id: string; name: string; description: string | null; priceCents: number; category: string | null; waitMinutes: number };
+    const items = await prisma.$queryRaw<MenuItemRow[]>`
+      SELECT id, name, description, "priceCents", category, COALESCE("waitMinutes", 0) AS "waitMinutes"
+      FROM "MenuItem"
+      WHERE "restaurantId" = ${me.restaurantId} AND available = true
+      ORDER BY category ASC, name ASC
+    `;
+    return { items };
+  });
+
+  // ── POST /api/server/tables/:tableId/place-order ───────────────────────────
+  // Server places an order on behalf of a customer who didn't use the QR code.
+  // Creates a session automatically if no active one exists for that table.
+  app.post("/tables/:tableId/place-order", async (req, reply) => {
+    const me = await requireServer(req, reply);
+    const { tableId } = req.params as { tableId: string };
+
+    const body = z.object({
+      items: z.array(z.object({
+        menuItemId: z.string(),
+        quantity: z.number().int().min(1).max(50),
+      })).min(1).max(50),
+      notes: z.string().max(500).optional(),
+    }).parse(req.body);
+
+    // Verify table belongs to restaurant
+    const table = await prisma.table.findFirst({
+      where: { id: tableId, restaurantId: me.restaurantId },
+      select: { id: true, number: true },
+    });
+    if (!table) return reply.code(404).send({ error: "TABLE_NOT_FOUND" });
+
+    // Fetch menu items to validate + compute total
+    // Use raw query to include waitMinutes (not in Prisma schema)
+    const menuItemIds = body.items.map((i) => i.menuItemId);
+    type ValidatedItem = { id: string; name: string; priceCents: number; waitMinutes: number };
+    const menuItems = await prisma.$queryRaw<ValidatedItem[]>`
+      SELECT id, name, "priceCents", COALESCE("waitMinutes", 0) AS "waitMinutes"
+      FROM "MenuItem"
+      WHERE id = ANY(${menuItemIds}::text[])
+        AND "restaurantId" = ${me.restaurantId}
+        AND available = true
+    `;
+    if (menuItems.length !== menuItemIds.length) {
+      return reply.code(400).send({ error: "SOME_ITEMS_UNAVAILABLE" });
+    }
+
+    const menuMap = new Map(menuItems.map((m) => [m.id, m]));
+
+    // Build order items
+    const orderItems = body.items.map((i) => {
+      const m = menuMap.get(i.menuItemId)!;
+      return { menuItemId: m.id, name: m.name, quantity: i.quantity, priceCents: m.priceCents };
+    });
+    const totalCents = orderItems.reduce((s, i) => s + i.priceCents * i.quantity, 0);
+    const maxWait = Math.max(...menuItems.map((m) => m.waitMinutes ?? 0));
+
+    const { randomUUID } = await import("crypto");
+
+    // Find or create active session for this table
+    let session = await prisma.tableSession.findFirst({
+      where: { tableId, active: true },
+    });
+    if (!session) {
+      // Create a server-initiated session (no QR token needed)
+      session = await prisma.tableSession.create({
+        data: {
+          tableId,
+          active: true,
+          serverId: me.serverId,
+        },
+      });
+    }
+
+    // Create the order
+    const orderId = randomUUID();
+    const expectedReadyAt = maxWait > 0 ? new Date(Date.now() + maxWait * 60_000) : null;
+    await prisma.order.create({
+      data: {
+        id: orderId,
+        tableId,
+        sessionId: session.id,
+        serverId: me.serverId,
+        status: "PENDING",
+        items: orderItems as any,
+        totalCents,
+        notes: body.notes ?? null,
+      },
+    });
+    // Update expectedReadyAt via raw SQL (column added via ensure_columns.sql, not in Prisma schema)
+    if (expectedReadyAt) {
+      await prisma.$executeRaw`
+        UPDATE "Order" SET "expectedReadyAt" = ${expectedReadyAt} WHERE id = ${orderId}
+      `;
+    }
+
+    // Emit socket event
+    emitToRestaurant(me.restaurantId, "order:new", {
+      orderId,
+      tableId,
+      tableNumber: table.number,
+      sessionId: session.id,
+      items: orderItems,
+      totalCents,
+      source: "server",
+    });
+
+    return { ok: true, orderId, sessionId: session.id, totalCents };
+  });
+
   // ── IA Planning Suggestion (PRO_IA only) ──────────────────────────────────
   app.post("/ia/planning-suggest", async (req, reply) => {
     const me = await requireServer(req, reply);
