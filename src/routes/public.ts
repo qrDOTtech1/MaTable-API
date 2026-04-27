@@ -6,6 +6,23 @@ import { emitToRestaurant } from "../realtime.js";
 import { sendEmail, reservationConfirmationHtml, canSendEmail } from "../email.js";
 
 export async function publicRoutes(app: FastifyInstance) {
+  /* ── List all restaurants (for sitemap, public discovery) ── */
+  app.get("/restaurants", async (req) => {
+    const restaurants = await prisma.restaurant.findMany({
+      where: { slug: { not: null } },
+      select: {
+        id: true,
+        slug: true,
+        name: true,
+        city: true,
+        acceptReservations: true,
+        updatedAt: true,
+      },
+      orderBy: { name: "asc" },
+    });
+    return restaurants;
+  });
+
   app.get("/testimonials", async (req) => {
     const { limit } = z
       .object({ limit: z.coerce.number().int().min(1).max(12).optional() })
