@@ -1325,6 +1325,7 @@ export async function proRoutes(app: FastifyInstance) {
   });
 
   // PATCH /api/pro/shopping-history/:id/complete — marquer "courses faites" avec le prix reel
+  // Met aussi à jour currentQty de chaque StockProduct correspondant (+toBuy acheté)
   app.patch("/shopping-history/:id/complete", async (req, reply) => {
     const me = await requirePro(req, reply);
     const { id } = req.params as { id: string };
@@ -1333,12 +1334,39 @@ export async function proRoutes(app: FastifyInstance) {
       notes: z.string().max(500).optional(),
     }).parse(req.body);
 
-    const result = await prisma.$executeRawUnsafe(
+    // Récupérer la liste pour mettre à jour le stock
+    type ShRow = { id: string; shoppingList: any; completedAt: Date | null };
+    const rows = await prisma.$queryRaw<ShRow[]>`
+      SELECT id, "shoppingList", "completedAt"
+      FROM "ShoppingHistory"
+      WHERE id = ${id} AND "restaurantId" = ${me.restaurantId}
+      LIMIT 1
+    `;
+    if (!rows.length) return reply.code(404).send({ error: "not_found" });
+    if (rows[0].completedAt) return reply.code(404).send({ error: "not_found_or_already_completed" });
+
+    // Marquer comme complété
+    await prisma.$executeRawUnsafe(
       `UPDATE "ShoppingHistory" SET "realCost" = $1, "completedAt" = NOW(), notes = $2
-       WHERE id = $3 AND "restaurantId" = $4 AND "completedAt" IS NULL`,
+       WHERE id = $3 AND "restaurantId" = $4`,
       body.realCost, body.notes ?? null, id, me.restaurantId,
     );
-    if (result === 0) return reply.code(404).send({ error: "not_found_or_already_completed" });
-    return { ok: true };
+
+    // Mettre à jour currentQty dans StockProduct pour chaque article acheté
+    const shoppingList: Array<{ ingredient: string; toBuy: number; unit: string }> = rows[0].shoppingList ?? [];
+    let stockUpdated = 0;
+    for (const item of shoppingList) {
+      if (!item.ingredient || !item.toBuy || item.toBuy <= 0) continue;
+      // Chercher par nom (case-insensitive)
+      const updated = await prisma.$executeRawUnsafe(
+        `UPDATE "StockProduct"
+         SET "currentQty" = "currentQty" + $1, "updatedAt" = NOW()
+         WHERE "restaurantId" = $2 AND LOWER(name) = LOWER($3)`,
+        item.toBuy, me.restaurantId, item.ingredient,
+      );
+      if (Number(updated) > 0) stockUpdated++;
+    }
+
+    return { ok: true, stockUpdated };
   });
 }
