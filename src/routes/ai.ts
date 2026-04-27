@@ -718,12 +718,18 @@ Regles OBLIGATOIRES:
 6. totalShoppingBudget = somme de tous les estimatedCost.
 7. Si budget donne et depassable, note-le dans supplierOrderNote.`;
 
+    // Utilise SSE avec keepalive pour éviter que Railway coupe la connexion
+    const { send: sendSSEAnalysis, close: closeSSEAnalysis } = setupSSE(reply);
     try {
-      let raw = (await ollamaCloudChat(iaConfig.ollamaApiKey, iaConfig.ollamaLangModel, [
-        { role: "user", content: prompt },
-      ])).trim().replace(/^```json\n?|```$/g, "").replace(/^```\n?|```$/g, "").trim();
+      sendSSEAnalysis({ type: "progress", phase: "analyzing", message: "Analyse en cours..." });
 
-      // Extract JSON object from model output
+      let raw = (await ollamaCloudChatStream(
+        iaConfig.ollamaApiKey, iaConfig.ollamaLangModel,
+        [{ role: "user", content: prompt }],
+        () => sendSSEAnalysis({ type: "chunk" }),
+        STOCK_TIMEOUT_MS,
+      )).trim().replace(/^```json\n?|```$/g, "").replace(/^```\n?|```$/g, "").trim();
+
       const jsonMatch = raw.match(/\{[\s\S]*\}/);
       if (jsonMatch) raw = jsonMatch[0];
 
@@ -733,21 +739,22 @@ Regles OBLIGATOIRES:
 
       const meta = { ordersAnalyzed: recentOrders.length, menuItemsCount: menuItems.length, period: "14d", restaurantName: restaurant.name };
 
-      // Auto-save to history
       const shopCount = (analysis.shoppingList as any[])?.length ?? 0;
-      const budget = (analysis.totalShoppingBudget as number) ?? 0;
-      const title = `Stock ${new Date().toLocaleDateString("fr-FR", { day: "numeric", month: "short" })} — ${shopCount} articles · ~${budget.toFixed(0)}€`;
+      const budgetEst = (analysis.totalShoppingBudget as number) ?? 0;
+      const title = `Stock ${new Date().toLocaleDateString("fr-FR", { day: "numeric", month: "short" })} — ${shopCount} articles · ~${budgetEst.toFixed(0)}€`;
       await saveAiHistory(me.restaurantId, "STOCK", title, { analysis, meta });
 
-      return { analysis, meta };
+      sendSSEAnalysis({ type: "result", analysis, meta });
     } catch (err: any) {
       app.log.error(err);
-      return reply.code(502).send({ error: "AI_ERROR", details: err.message });
+      sendSSEAnalysis({ type: "error", message: err.message || "Erreur serveur IA" });
+    } finally {
+      closeSSEAnalysis();
     }
   });
 
   // ─────────────────────────────────────────────────────────────────────────────
-  // POST /ia/stock-items — non-streaming fallback for stock-items detection
+  // POST /ia/stock-items — SSE avec keepalive (évite Railway de couper la connexion)
   // ─────────────────────────────────────────────────────────────────────────────
   app.post("/ia/stock-items", async (req, reply) => {
     const me = await requirePro(req, reply);
@@ -765,64 +772,46 @@ Regles OBLIGATOIRES:
       return reply.code(503).send({ error: "IA_KEY_MISSING" });
     }
 
-    const menuItems = await prisma.menuItem.findMany({
-      where: { restaurantId: me.restaurantId },
-      select: { name: true, priceCents: true, category: true, available: true },
-    });
-
-    const twoWeeksAgo = new Date(Date.now() - 14 * 86400_000);
-    const recentOrders = await prisma.order.findMany({
-      where: { table: { restaurantId: me.restaurantId }, createdAt: { gte: twoWeeksAgo }, status: { not: "CANCELLED" } },
-      select: { items: true },
-      take: 300,
-    });
-
-    const salesMap: Record<string, { qty: number; name: string }> = {};
-    for (const order of recentOrders) {
-      const items = order.items as any[];
-      if (!Array.isArray(items)) continue;
-      for (const item of items) {
-        const key = item.menuItemId || item.name;
-        if (!salesMap[key]) salesMap[key] = { qty: 0, name: item.name };
-        salesMap[key].qty += item.quantity || 1;
-      }
-    }
-
-    const catMap: Record<string, typeof menuItems> = {};
-    for (const m of menuItems) {
-      const cat = m.category || "Autres";
-      (catMap[cat] ||= []).push(m);
-    }
+    app.log.info(`[stock-items] starting SSE — model=${iaConfig.ollamaLangModel}`);
+    const { send: sendSSE, close: closeSSE } = setupSSE(reply);
 
     try {
-      // Create a function to process a single category
-      const processCategory = async (categoryName: string, items: typeof menuItems) => {
-        const catPrompt = `Tu es Nova Stock IA. Analyse cette catégorie de menu pour identifier TOUS les INGREDIENTS BRUTS que ce restaurant doit gérer en stock.
+      const menuItems = await prisma.menuItem.findMany({
+        where: { restaurantId: me.restaurantId },
+        select: { name: true, priceCents: true, category: true, available: true },
+      });
 
-LANGUE OBLIGATOIRE : Tu DOIS répondre INTÉGRALEMENT EN FRANÇAIS.
-- Tous les noms d'ingrédients DOIVENT être en français (ex: "Crème fraîche", "Oeufs", "Beurre", "Sel", "Huile d'olive", "Farine")
-- Toutes les catégories DOIVENT être en français
-- JAMAIS de noms en anglais
+      const twoWeeksAgo = new Date(Date.now() - 14 * 86400_000);
+      const recentOrders = await prisma.order.findMany({
+        where: { table: { restaurantId: me.restaurantId }, createdAt: { gte: twoWeeksAgo }, status: { not: "CANCELLED" } },
+        select: { items: true },
+        take: 300,
+      });
 
-Catégorie analysée: ${categoryName} (${items.length} plats)
+      const catMap: Record<string, typeof menuItems> = {};
+      for (const m of menuItems) {
+        const cat = m.category || "Autres";
+        (catMap[cat] ||= []).push(m);
+      }
+
+      const catEntries = Object.entries(catMap);
+      const allItems: any[] = [];
+      let i = 1;
+
+      for (const [catName, items] of catEntries) {
+        app.log.info(`[stock-items] Processing category ${i}/${catEntries.length}: ${catName} (${items.length} items)`);
+        sendSSE({ type: "progress", phase: "analyzing", message: `Catégorie ${i}/${catEntries.length} : ${catName}...` });
+
+        const catPrompt = `Tu es Nova Stock IA. Analyse cette catégorie de menu pour identifier TOUS les INGREDIENTS BRUTS.
+
+LANGUE OBLIGATOIRE : TOUT EN FRANÇAIS. Jamais de noms en anglais.
+
+Catégorie: ${catName} (${items.length} plats)
 Plats:
 ${items.map(m => `- ${m.name}`).join("\n")}
 
-Retourne UNIQUEMENT un JSON valide (sans markdown) avec ce format EXACT:
-{
-  "items": [
-    {
-      "name": "Nom ingrédient EN FRANÇAIS",
-      "unit": "kg|L|pièce|botte|douzaine|sachet|bouteille|cl",
-      "category": "Viandes|Poissons|Légumes|Fruits|Produits laitiers|Alcools|Dilutants & Mixers|Sirops & Liqueurs|Fruits & Garnitures|Épicerie|Boulangerie|Consommables|Autres",
-      "isFresh": true,
-      "linkedDishes": ["plat1", "plat2"],
-      "weeklyEstimate": 0
-    }
-  ]
-}
-
-Décompose CHAQUE plat en TOUS ses ingrédients bruts. TOUT EN FRANÇAIS.`;
+Retourne UNIQUEMENT un JSON valide (sans markdown):
+{"items":[{"name":"...","unit":"kg|L|pièce|botte|bouteille|cl","category":"Viandes|Poissons|Légumes|Fruits|Produits laitiers|Alcools|Dilutants & Mixers|Sirops & Liqueurs|Épicerie|Boulangerie|Consommables|Autres","isFresh":true,"linkedDishes":["plat"],"weeklyEstimate":0}]}`;
 
         let raw = (await ollamaCloudChat(iaConfig.ollamaApiKey!, iaConfig.ollamaLangModel!, [
           { role: "user", content: catPrompt },
@@ -830,23 +819,11 @@ Décompose CHAQUE plat en TOUS ses ingrédients bruts. TOUT EN FRANÇAIS.`;
 
         const jsonMatch = raw.match(/\{[\s\S]*\}/);
         if (jsonMatch) raw = jsonMatch[0];
-
-        try {
-          return JSON.parse(raw).items || [];
-        } catch {
-          return [];
-        }
-      };
-
-      // Process categories sequentially to avoid rate limits (429)
-      const allItems: any[] = [];
-      for (const [catName, items] of Object.entries(catMap)) {
-        app.log.info(`[stock-items] Processing category: ${catName} (${items.length} items)`);
-        const catItems = await processCategory(catName, items);
-        allItems.push(...catItems);
+        try { allItems.push(...(JSON.parse(raw).items || [])); } catch { /* skip */ }
+        i++;
       }
 
-      // Merge and deduplicate items
+      // Merge and deduplicate
       const mergedMap: Record<string, any> = {};
       for (const item of allItems) {
         const key = item.name.toLowerCase();
@@ -858,10 +835,13 @@ Décompose CHAQUE plat en TOUS ses ingrédients bruts. TOUT EN FRANÇAIS.`;
         }
       }
 
-      return { items: Object.values(mergedMap), meta: { menuCount: menuItems.length, ordersAnalyzed: recentOrders.length } };
+      app.log.info(`[stock-items] done — ${Object.keys(mergedMap).length} unique items`);
+      sendSSE({ type: "result", items: Object.values(mergedMap), meta: { menuCount: menuItems.length, ordersAnalyzed: recentOrders.length } });
     } catch (err: any) {
-      app.log.error(err);
-      return reply.code(502).send({ error: "AI_ERROR", details: err.message });
+      app.log.error(`[stock-items] ERROR: ${err.message}`);
+      sendSSE({ type: "error", message: err.message || "Erreur serveur IA" });
+    } finally {
+      closeSSE();
     }
   });
 
