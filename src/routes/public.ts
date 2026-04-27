@@ -170,7 +170,7 @@ export async function publicRoutes(app: FastifyInstance) {
         address: restaurant.address,
         city: restaurant.city,
         phone: restaurant.phone,
-        email: restaurant.email,
+        email: (restaurant as any).contactEmail || restaurant.email,
         website: restaurant.website,
         coverImageUrl: restaurant.coverImageId ? `/api/media/${restaurant.coverImageId}` : null,
         logoUrl: restaurant.logoId ? `/api/media/${restaurant.logoId}` : null,
