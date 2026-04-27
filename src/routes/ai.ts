@@ -235,7 +235,14 @@ function setupSSE(reply: import("fastify").FastifyReply) {
       console.error("[SSE] write error:", (e as Error).message);
     }
   };
+
+  // Keepalive toutes les 15s — empêche Railway/proxies de couper la connexion inactive
+  const keepaliveTimer = setInterval(() => {
+    try { reply.raw.write(": keepalive\n\n"); } catch { /* closed */ }
+  }, 15_000);
+
   const close = () => {
+    clearInterval(keepaliveTimer);
     try { reply.raw.end(); } catch { /* already closed */ }
   };
 
