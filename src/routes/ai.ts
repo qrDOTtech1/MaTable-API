@@ -523,7 +523,7 @@ Regles OBLIGATOIRES:
         iaConfig.ollamaApiKey, iaConfig.ollamaLangModel,
         [{ role: "user", content: prompt }],
         (chars) => sendSSE({ type: "chunk", chars }),
-        CHAT_TIMEOUT_MS,
+        STOCK_TIMEOUT_MS,
       );
 
       sendSSE({ type: "progress", phase: "parsing", message: "Extraction des résultats..." });
