@@ -6,15 +6,60 @@ import { requireSessionToken } from "../auth.js";
 import { env } from "../env.js";
 import { emitToRestaurant } from "../realtime.js";
 
-export async function stripeRoutes(app: FastifyInstance) {
-  const stripe = env.STRIPE_SECRET ? new Stripe(env.STRIPE_SECRET) : null;
+// Cache Stripe instances per restaurant (key = secretKey)
+const stripeCache = new Map<string, Stripe>();
 
+function getStripeInstance(secretKey: string): Stripe {
+  let instance = stripeCache.get(secretKey);
+  if (!instance) {
+    instance = new Stripe(secretKey);
+    stripeCache.set(secretKey, instance);
+  }
+  return instance;
+}
+
+// Get Stripe keys for a restaurant (per-restaurant first, then global fallback)
+async function getStripeForRestaurant(restaurantId: string): Promise<{
+  stripe: Stripe | null;
+  webhookSecret: string | null;
+}> {
+  // Try per-restaurant keys
+  type Row = { stripeSecretKey: string | null; stripeWebhookSecret: string | null };
+  const rows = await prisma.$queryRaw<Row[]>`
+    SELECT "stripeSecretKey", "stripeWebhookSecret"
+    FROM "Restaurant"
+    WHERE id = ${restaurantId}
+    LIMIT 1
+  `;
+  const row = rows[0];
+
+  if (row?.stripeSecretKey) {
+    return {
+      stripe: getStripeInstance(row.stripeSecretKey),
+      webhookSecret: row.stripeWebhookSecret ?? env.STRIPE_WEBHOOK_SECRET ?? null,
+    };
+  }
+
+  // Fallback to global env
+  if (env.STRIPE_SECRET) {
+    return {
+      stripe: getStripeInstance(env.STRIPE_SECRET),
+      webhookSecret: env.STRIPE_WEBHOOK_SECRET ?? null,
+    };
+  }
+
+  return { stripe: null, webhookSecret: null };
+}
+
+export async function stripeRoutes(app: FastifyInstance) {
+
+  // ── POST /checkout — Google Pay + Apple Pay enabled ─────────────────────────
   app.post("/checkout", async (req, reply) => {
-    if (!stripe) return reply.code(503).send({ error: "stripe_not_configured" });
     const decoded = await requireSessionToken(req, reply);
 
-    // Session-level "addition": pay everything not yet paid for the table session.
-    // We keep backward compatibility with an optional orderId.
+    const { stripe } = await getStripeForRestaurant(decoded.restaurantId);
+    if (!stripe) return reply.code(503).send({ error: "stripe_not_configured" });
+
     const { orderId } = z
       .object({ orderId: z.string().optional() })
       .default({})
@@ -53,9 +98,12 @@ export async function stripeRoutes(app: FastifyInstance) {
     const mergedItems = Array.from(itemsByKey.values()).filter((i) => i.quantity > 0);
     if (!mergedItems.length) return reply.code(400).send({ error: "nothing_to_pay" });
 
+    // payment_method_types not set = Stripe auto-enables card, Google Pay, Apple Pay, Link
+    // based on what's activated in the Stripe Dashboard for this account
     const session = await stripe.checkout.sessions.create({
       mode: "payment",
-      payment_method_types: ["card"],
+      // Let Stripe auto-detect best payment methods (card + wallets)
+      // This auto-enables Google Pay, Apple Pay, Link when available
       line_items: mergedItems.map((i) => ({
         quantity: i.quantity,
         price_data: {
@@ -64,10 +112,15 @@ export async function stripeRoutes(app: FastifyInstance) {
           unit_amount: i.priceCents,
         },
       })),
+      payment_method_options: {
+        card: {
+          // Request Google Pay / Apple Pay wallets on card
+          setup_future_usage: undefined,
+        },
+      },
       success_url: `${env.PUBLIC_WEB_URL}/order/${decoded.tableId}?paid=1`,
       cancel_url: `${env.PUBLIC_WEB_URL}/order/${decoded.tableId}`,
       metadata: {
-        // If orderId is present we still use session-level settlement, but keep it for debug.
         orderId: orderId ?? "",
         sessionId: decoded.sessionId,
         tableId: decoded.tableId,
@@ -77,23 +130,50 @@ export async function stripeRoutes(app: FastifyInstance) {
     return { url: session.url };
   });
 
+  // ── POST /webhook — handles events from any restaurant's Stripe account ─────
   app.post(
     "/webhook",
     { config: { rawBody: true } },
     async (req, reply) => {
-      if (!stripe || !env.STRIPE_WEBHOOK_SECRET) {
-        return reply.code(503).send({ error: "stripe_not_configured" });
-      }
       const sig = req.headers["stripe-signature"] as string;
-      let event: Stripe.Event;
-      try {
-        event = stripe.webhooks.constructEvent(
-          (req as any).rawBody,
-          sig,
-          env.STRIPE_WEBHOOK_SECRET
-        );
-      } catch (e: any) {
-        return reply.code(400).send(`bad signature: ${e.message}`);
+      if (!sig) return reply.code(400).send({ error: "missing_signature" });
+
+      // We need to verify the webhook. Try global secret first, then per-restaurant.
+      // For webhooks, the restaurantId is in the metadata AFTER verification, so we need
+      // at least one valid webhook secret to verify.
+      // Strategy: try global webhook secret, if that fails try all unique restaurant secrets.
+      let event: Stripe.Event | null = null;
+
+      // Try global env webhook secret first
+      if (env.STRIPE_SECRET && env.STRIPE_WEBHOOK_SECRET) {
+        try {
+          const globalStripe = getStripeInstance(env.STRIPE_SECRET);
+          event = globalStripe.webhooks.constructEvent(
+            (req as any).rawBody, sig, env.STRIPE_WEBHOOK_SECRET,
+          );
+        } catch {}
+      }
+
+      // If global didn't work, try per-restaurant webhook secrets
+      if (!event) {
+        type WRow = { id: string; stripeSecretKey: string; stripeWebhookSecret: string };
+        const restaurants = await prisma.$queryRaw<WRow[]>`
+          SELECT id, "stripeSecretKey", "stripeWebhookSecret"
+          FROM "Restaurant"
+          WHERE "stripeSecretKey" IS NOT NULL AND "stripeWebhookSecret" IS NOT NULL
+        `;
+
+        for (const r of restaurants) {
+          try {
+            const s = getStripeInstance(r.stripeSecretKey);
+            event = s.webhooks.constructEvent((req as any).rawBody, sig, r.stripeWebhookSecret);
+            break; // Found the right one
+          } catch {}
+        }
+      }
+
+      if (!event) {
+        return reply.code(400).send({ error: "bad_signature" });
       }
 
       if (event.type === "checkout.session.completed") {
@@ -112,7 +192,6 @@ export async function stripeRoutes(app: FastifyInstance) {
             data: { active: false, closedAt: new Date() },
           });
 
-          // Payload isn't used by the web currently; keep an event to refresh the dashboard.
           if (restaurantId) {
             emitToRestaurant(restaurantId, "order:paid", { tableId });
           }
@@ -121,4 +200,21 @@ export async function stripeRoutes(app: FastifyInstance) {
       return { received: true };
     }
   );
+
+  // ── GET /stripe-config — return publishable key for frontend ────────────────
+  app.get("/stripe-config/:restaurantId", async (req, reply) => {
+    const { restaurantId } = req.params as { restaurantId: string };
+
+    type Row = { stripePublicKey: string | null };
+    const rows = await prisma.$queryRaw<Row[]>`
+      SELECT "stripePublicKey"
+      FROM "Restaurant"
+      WHERE id = ${restaurantId}
+      LIMIT 1
+    `;
+
+    const pk = rows[0]?.stripePublicKey ?? env.STRIPE_PUBLIC_KEY ?? null;
+    if (!pk) return reply.code(503).send({ error: "stripe_not_configured" });
+    return { publishableKey: pk };
+  });
 }

@@ -20,6 +20,9 @@ ALTER TABLE "Restaurant" ADD COLUMN IF NOT EXISTS "reservationLeadMinutes" INTEG
 ALTER TABLE "Restaurant" ADD COLUMN IF NOT EXISTS "reservationSlotMinutes" INTEGER NOT NULL DEFAULT 30;
 ALTER TABLE "Restaurant" ADD COLUMN IF NOT EXISTS "reservationPolicy" TEXT;
 ALTER TABLE "Restaurant" ADD COLUMN IF NOT EXISTS subscription TEXT NOT NULL DEFAULT 'STARTER';
+ALTER TABLE "Restaurant" ADD COLUMN IF NOT EXISTS "stripeSecretKey" TEXT;
+ALTER TABLE "Restaurant" ADD COLUMN IF NOT EXISTS "stripeWebhookSecret" TEXT;
+ALTER TABLE "Restaurant" ADD COLUMN IF NOT EXISTS "stripePublicKey" TEXT;
 ALTER TABLE "Restaurant" ADD COLUMN IF NOT EXISTS "ollamaApiKey" TEXT;
 ALTER TABLE "Restaurant" ADD COLUMN IF NOT EXISTS "ollamaLangModel" TEXT DEFAULT 'gpt-oss:120b';
 ALTER TABLE "Restaurant" ADD COLUMN IF NOT EXISTS "ollamaVisionModel" TEXT DEFAULT 'qwen3-vl:235b';

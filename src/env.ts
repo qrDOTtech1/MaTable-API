@@ -5,6 +5,7 @@ const schema = z.object({
   JWT_SECRET: z.string().min(16),
   STRIPE_SECRET: z.string().optional(),
   STRIPE_WEBHOOK_SECRET: z.string().optional(),
+  STRIPE_PUBLIC_KEY: z.string().optional(),
   PUBLIC_WEB_URL: z.string().default("http://localhost:3000"),
   // Comma-separated list of additional allowed origins (e.g. Railway preview URLs)
   EXTRA_ALLOWED_ORIGINS: z.string().optional(),
