@@ -23,7 +23,7 @@ type OllamaMsg = { role: "user" | "assistant" | "system"; content: string; image
 
 // Timeouts
 const CHAT_TIMEOUT_MS   = 120_000;  // 2min for simple chat
-const STOCK_TIMEOUT_MS  = 300_000;  // 5min for stock analysis (large menus = lots of ingredients)
+const STOCK_TIMEOUT_MS  = 600_000;  // 10min for stock analysis (very large menus per category)
 const VISION_TIMEOUT_MS = 240_000;  // 4min for vision
 const MAX_RETRIES       = 3;        // retry 429 up to 3 times
 
