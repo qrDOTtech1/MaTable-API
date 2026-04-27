@@ -1394,6 +1394,20 @@ Sois creatif, les descriptions doivent donner envie. Utilise des ingredients de 
     const periodDays = body.period === "90d" ? 90 : body.period === "7d" ? 7 : 30;
     const since = new Date(Date.now() - periodDays * 86400_000);
 
+    // Fetch real purchase costs from ShoppingHistory
+    type ShRow = { realCost: number | null; estimatedBudget: number; completedAt: Date | null; title: string };
+    const shoppingRows = await prisma.$queryRaw<ShRow[]>`
+      SELECT "realCost", "estimatedBudget", "completedAt", title
+      FROM "ShoppingHistory"
+      WHERE "restaurantId" = ${me.restaurantId}
+        AND "completedAt" IS NOT NULL
+        AND "completedAt" >= ${since}
+      ORDER BY "completedAt" DESC
+      LIMIT 20
+    `;
+    const totalRealPurchaseCost = shoppingRows.reduce((s, r) => s + (r.realCost ?? 0), 0);
+    const totalEstimatedPurchase = shoppingRows.reduce((s, r) => s + r.estimatedBudget, 0);
+
     const menuItems = await prisma.menuItem.findMany({
       where: { restaurantId: me.restaurantId },
       select: { name: true, priceCents: true, category: true, available: true },
@@ -1438,6 +1452,14 @@ Sois creatif, les descriptions doivent donner envie. Utilise des ingredients de 
       .map(([d, c]) => `${d}: ${(c / 100).toFixed(2)}€`)
       .join("\n");
 
+    // Build shopping cost context
+    const shoppingCostLines = shoppingRows.length > 0
+      ? shoppingRows.map(r => `- ${r.completedAt?.toISOString().slice(0, 10)} | "${r.title}" | estimé ${r.estimatedBudget.toFixed(2)}€ | réel ${r.realCost?.toFixed(2) ?? "?"}€`).join("\n")
+      : "Aucun achat confirmé sur la période";
+    const realFoodCostPct = totalRevenue > 0 && totalRealPurchaseCost > 0
+      ? ((totalRealPurchaseCost / (totalRevenue / 100)) * 100).toFixed(1)
+      : null;
+
     const prompt = `Tu es Nova Finance IA, conseiller financier expert pour restaurants. Tu analyses les données réelles du restaurant et fournis des recommandations concrètes et actionnables.
 
 Restaurant: ${restaurant.name}
@@ -1449,6 +1471,9 @@ CA moyen / commande: ${orders.length > 0 ? ((totalRevenue / 100) / orders.length
 ${body.fixedCosts ? `Charges fixes déclarées: ${body.fixedCosts}€/mois` : "Charges fixes: non renseignées"}
 ${body.foodCostTarget ? `Objectif food cost: ${body.foodCostTarget}%` : ""}
 ${body.notes ? `Notes: ${body.notes}` : ""}
+${shoppingRows.length > 0 ? `\nCoût achats réels confirmés sur la période: ${totalRealPurchaseCost.toFixed(2)}€ (budget estimé: ${totalEstimatedPurchase.toFixed(2)}€)` : ""}
+${realFoodCostPct ? `Food cost réel calculé (achats/CA): ${realFoodCostPct}%` : ""}
+${shoppingRows.length > 0 ? `\n=== HISTORIQUE DES ACHATS CONFIRMÉS ===\n${shoppingCostLines}` : ""}
 
 === CHIFFRE D'AFFAIRES (14 derniers jours) ===
 ${dailySummary || "Aucune donnée"}
@@ -1493,7 +1518,7 @@ Réponds UNIQUEMENT en JSON valide (sans markdown) avec ce format EXACT:
 Règles:
 - Sois précis avec les chiffres réels fournis.
 - projectedMonthly = extrapolation sur 30j basée sur le CA/jour réel.
-- estimatedFoodCost = estimation % basée sur les prix de vente (hypothèse 28-35% pour un restaurant français standard).
+- estimatedFoodCost = utilise le food cost réel calculé si fourni (achats/CA), sinon hypothèse 28-35% pour un restaurant français standard.
 - offersProposed = 2-4 offres concrètes basées sur les données réelles (plats sous-performants, heures creuses, etc.)
 - weeklyTrend = agrège les données en semaines.`;
 
