@@ -21,8 +21,9 @@ import { randomUUID } from "crypto";
 // ── Ollama Cloud chat completion ──────────────────────────────────────────────
 type OllamaMsg = { role: "user" | "assistant" | "system"; content: string; images?: string[] };
 
-// Timeouts — vision can be slow on complex images
-const CHAT_TIMEOUT_MS   = 120_000;  // 2min for text
+// Timeouts
+const CHAT_TIMEOUT_MS   = 120_000;  // 2min for simple chat
+const STOCK_TIMEOUT_MS  = 300_000;  // 5min for stock analysis (large menus = lots of ingredients)
 const VISION_TIMEOUT_MS = 240_000;  // 4min for vision
 const MAX_RETRIES       = 3;        // retry 429 up to 3 times
 
@@ -72,7 +73,8 @@ async function ollamaCloudChat(
 
     } catch (err: any) {
       if (err.name === "AbortError") {
-        throw new Error(`ollama timeout after ${timeoutMs / 1000}s — image may be too large or server busy`);
+        const hasImages = messages.some(m => m.images?.length);
+        throw new Error(`ollama timeout after ${timeoutMs / 1000}s — ${hasImages ? "image may be too large or " : ""}server busy`);
       }
       // Surface 429 errors for retry
       if (err.message?.includes("429")) {
@@ -183,7 +185,8 @@ async function ollamaCloudChatStream(
 
     } catch (err: any) {
       if (err.name === "AbortError") {
-        throw new Error(`ollama timeout after ${timeoutMs / 1000}s — image may be too large or server busy`);
+        const hasImages = messages.some(m => m.images?.length);
+        throw new Error(`ollama timeout after ${timeoutMs / 1000}s — ${hasImages ? "image may be too large or " : ""}server busy`);
       }
       if (err.message?.includes("429")) {
         lastErr = err;
@@ -783,25 +786,20 @@ Regles OBLIGATOIRES:
       const cat = m.category || "Autres";
       (catMap[cat] ||= []).push(m);
     }
-    const categoryBreakdown = Object.entries(catMap).map(([cat, items]) =>
-      `--- ${cat.toUpperCase()} (${items.length} plats) ---\n` +
-      items.map(m => `  - ${m.name}`).join("\n")
-    ).join("\n\n");
 
-    const prompt = `Tu es Nova Stock IA. Analyse ce menu et ces ventes pour identifier TOUS les INGREDIENTS BRUTS que ce restaurant doit gérer en stock.
+    try {
+      // Create a function to process a single category
+      const processCategory = async (categoryName: string, items: typeof menuItems) => {
+        const catPrompt = `Tu es Nova Stock IA. Analyse cette catégorie de menu pour identifier TOUS les INGREDIENTS BRUTS que ce restaurant doit gérer en stock.
 
 LANGUE OBLIGATOIRE : Tu DOIS répondre INTÉGRALEMENT EN FRANÇAIS.
-- Tous les noms d'ingrédients DOIVENT être en français
+- Tous les noms d'ingrédients DOIVENT être en français (ex: "Crème fraîche", "Oeufs", "Beurre", "Sel", "Huile d'olive", "Farine")
 - Toutes les catégories DOIVENT être en français
 - JAMAIS de noms en anglais
 
-Restaurant: ${restaurant.name}
-
-=== MENU PAR CATEGORIE (${menuItems.length} plats) ===
-${categoryBreakdown}
-
-=== VENTES 14 JOURS ===
-${Object.values(salesMap).sort((a,b) => b.qty - a.qty).map(v => `- ${v.name}: ${v.qty} vendus`).join("\n") || "Aucune vente"}
+Catégorie analysée: ${categoryName} (${items.length} plats)
+Plats:
+${items.map(m => `- ${m.name}`).join("\n")}
 
 Retourne UNIQUEMENT un JSON valide (sans markdown) avec ce format EXACT:
 {
@@ -817,23 +815,43 @@ Retourne UNIQUEMENT un JSON valide (sans markdown) avec ce format EXACT:
   ]
 }
 
-METHODE OBLIGATOIRE — procède CATEGORIE PAR CATEGORIE.
-NE PAS LIMITER le nombre d'articles — un restaurant de ${menuItems.length} plats a facilement 50-150 ingrédients.
-TOUT EN FRANÇAIS.`;
+Décompose CHAQUE plat en TOUS ses ingrédients bruts. TOUT EN FRANÇAIS.`;
 
-    try {
-      let raw = (await ollamaCloudChat(iaConfig.ollamaApiKey, iaConfig.ollamaLangModel, [
-        { role: "user", content: prompt },
-      ])).trim().replace(/^```json\n?|```$/g, "").replace(/^```\n?|```$/g, "").trim();
+        let raw = (await ollamaCloudChat(iaConfig.ollamaApiKey!, iaConfig.ollamaLangModel!, [
+          { role: "user", content: catPrompt },
+        ], STOCK_TIMEOUT_MS)).trim().replace(/^```json\n?|```$/g, "").replace(/^```\n?|```$/g, "").trim();
 
-      const jsonMatch = raw.match(/\{[\s\S]*\}/);
-      if (jsonMatch) raw = jsonMatch[0];
+        const jsonMatch = raw.match(/\{[\s\S]*\}/);
+        if (jsonMatch) raw = jsonMatch[0];
 
-      let result: { items: any[] };
-      try { result = JSON.parse(raw); }
-      catch { return reply.code(502).send({ error: "AI_PARSE_ERROR", message: "L'IA n'a pas retourné un JSON valide." }); }
+        try {
+          return JSON.parse(raw).items || [];
+        } catch {
+          return [];
+        }
+      };
 
-      return { items: result.items ?? [], meta: { menuCount: menuItems.length, ordersAnalyzed: recentOrders.length } };
+      // Process categories sequentially to avoid rate limits (429)
+      const allItems: any[] = [];
+      for (const [catName, items] of Object.entries(catMap)) {
+        app.log.info(`[stock-items] Processing category: ${catName} (${items.length} items)`);
+        const catItems = await processCategory(catName, items);
+        allItems.push(...catItems);
+      }
+
+      // Merge and deduplicate items
+      const mergedMap: Record<string, any> = {};
+      for (const item of allItems) {
+        const key = item.name.toLowerCase();
+        if (!mergedMap[key]) {
+          mergedMap[key] = item;
+        } else {
+          mergedMap[key].linkedDishes = [...new Set([...mergedMap[key].linkedDishes, ...(item.linkedDishes || [])])];
+          mergedMap[key].weeklyEstimate += (item.weeklyEstimate || 0);
+        }
+      }
+
+      return { items: Object.values(mergedMap), meta: { menuCount: menuItems.length, ordersAnalyzed: recentOrders.length } };
     } catch (err: any) {
       app.log.error(err);
       return reply.code(502).send({ error: "AI_ERROR", details: err.message });
@@ -904,22 +922,19 @@ TOUT EN FRANÇAIS.`;
         items.map(m => `  - ${m.name}`).join("\n")
       ).join("\n\n");
 
-      sendSSE({ type: "progress", phase: "analyzing", message: `Analyse de ${menuItems.length} plats en ${Object.keys(catMap).length} catégories...` });
+      const processStreamCategory = async (categoryName: string, items: typeof menuItems) => {
+        sendSSE({ type: "progress", phase: "analyzing", message: `Analyse de la catégorie "${categoryName}" (${items.length} plats)...` });
 
-      const prompt = `Tu es Nova Stock IA. Analyse ce menu et ces ventes pour identifier TOUS les INGREDIENTS BRUTS que ce restaurant doit gérer en stock.
+        const prompt = `Tu es Nova Stock IA. Analyse cette catégorie de menu pour identifier TOUS les INGREDIENTS BRUTS que ce restaurant doit gérer en stock.
 
 LANGUE OBLIGATOIRE : Tu DOIS répondre INTÉGRALEMENT EN FRANÇAIS.
-- Tous les noms d'ingrédients DOIVENT être en français (ex: "Crème fraîche", "Oeufs", "Beurre", "Sel", "Huile d'olive", "Farine", "Lait", "Poivre", "Vinaigre", "Moutarde", "Oignon", "Ail")
-- Toutes les catégories DOIVENT être en français (ex: "Produits laitiers", "Condiments", "Viandes", "Légumes", "Épicerie")
-- JAMAIS de noms en anglais (pas "Cream" mais "Crème", pas "Egg" mais "Oeuf", pas "Butter" mais "Beurre", pas "Salt" mais "Sel", pas "Milk" mais "Lait")
+- Tous les noms d'ingrédients DOIVENT être en français (ex: "Crème fraîche", "Oeufs", "Beurre", "Sel", "Huile d'olive", "Farine")
+- Toutes les catégories DOIVENT être en français
+- JAMAIS de noms en anglais
 
-Restaurant: ${restaurant.name}
-
-=== MENU PAR CATEGORIE (${menuItems.length} plats) ===
-${categoryBreakdown}
-
-=== VENTES 14 JOURS ===
-${Object.values(salesMap).sort((a,b) => b.qty - a.qty).map(v => `- ${v.name}: ${v.qty} vendus`).join("\n") || "Aucune vente"}
+Catégorie analysée: ${categoryName} (${items.length} plats)
+Plats:
+${items.map(m => `- ${m.name}`).join("\n")}
 
 Retourne UNIQUEMENT un JSON valide (sans markdown) avec ce format EXACT:
 {
@@ -935,53 +950,55 @@ Retourne UNIQUEMENT un JSON valide (sans markdown) avec ce format EXACT:
   ]
 }
 
-METHODE OBLIGATOIRE — procède CATEGORIE PAR CATEGORIE :
-1. Pour chaque catégorie du menu, liste CHAQUE plat
-2. Décompose CHAQUE plat en TOUS ses ingrédients bruts :
-   - Protéines (viandes, poissons, oeufs...)
-   - Féculents (pâtes, riz, pain, pommes de terre...)
-   - Légumes et herbes (salade, tomates, oignon, ail, menthe, basilic...)
-   - Fruits (citron, citron vert, ananas, fruits rouges...)
-   - Produits laitiers (lait, crème, beurre, fromage...)
-   - Alcools (rhum, vodka, gin, tequila, whisky, bière, vin, Prosecco...)
-   - Dilutants (jus d'orange, tonic, soda, ginger beer, eau gazeuse, cola...)
-   - Sirops (sucre, grenadine, menthe, sureau, triple sec, crème de mûre...)
-   - Condiments (sel, poivre, huile d'olive, vinaigre, moutarde, ketchup, mayo...)
-   - Consommables (pailles, serviettes, glaçons, film alimentaire...)
-3. Agrège les quantités unitaires × nombre de plats qui utilisent l'ingrédient
+Décompose CHAQUE plat en TOUS ses ingrédients bruts :
+- Protéines, Féculents, Légumes et herbes, Fruits, Produits laitiers
+- Alcools, Dilutants, Sirops, Condiments, Consommables
+TOUT EN FRANÇAIS.`;
 
-Règles ABSOLUES :
-- TOUT EN FRANÇAIS — noms, catégories, raisons, unités
-- Liste TOUS les ingrédients bruts, PAS les plats finis
-- weeklyEstimate = estimation basée sur les ventes réelles (ou estimation si pas de ventes)
-- isFresh = true si périssable (viande, poisson, légumes, laitages, fruits frais)
-- NE PAS LIMITER le nombre d'articles — un restaurant de ${menuItems.length} plats a facilement 50-150 ingrédients
-- ATTENTION aux cocktails/boissons : ne pas oublier dilutants, sirops, garnitures, glaçons
-- Chaque ingrédient doit avoir sa catégorie correcte pour faciliter le regroupement`;
+        const raw = await ollamaCloudChatStream(
+          iaConfig.ollamaApiKey!, iaConfig.ollamaLangModel!,
+          [{ role: "user", content: prompt }],
+          (chars) => sendSSE({ type: "chunk", chars }),
+          STOCK_TIMEOUT_MS,
+        );
 
-      const raw = await ollamaCloudChatStream(
-        iaConfig.ollamaApiKey, iaConfig.ollamaLangModel,
-        [{ role: "user", content: prompt }],
-        (chars) => sendSSE({ type: "chunk", chars }),
-        CHAT_TIMEOUT_MS,
-      );
+        let cleaned = raw.trim().replace(/^```json\n?|```$/g, "").replace(/^```\n?|```$/g, "").trim();
+        const jsonMatch = cleaned.match(/\{[\s\S]*\}/);
+        if (jsonMatch) cleaned = jsonMatch[0];
 
-      sendSSE({ type: "progress", phase: "parsing", message: "Extraction des articles..." });
+        try {
+          return JSON.parse(cleaned).items || [];
+        } catch {
+          return [];
+        }
+      };
 
-      let cleaned = raw.trim().replace(/^```json\n?|```$/g, "").replace(/^```\n?|```$/g, "").trim();
-      const jsonMatch = cleaned.match(/\{[\s\S]*\}/);
-      if (jsonMatch) cleaned = jsonMatch[0];
-
-      let result: { items: any[] };
-      try { result = JSON.parse(cleaned); }
-      catch {
-        sendSSE({ type: "error", message: "L'IA n'a pas retourné un JSON valide. Réessayez." });
-        closeSSE();
-        return;
+      const allItems: any[] = [];
+      const catEntries = Object.entries(catMap);
+      let i = 1;
+      for (const [catName, items] of catEntries) {
+        app.log.info(`[stock-items/stream] Processing category ${i}/${catEntries.length}: ${catName}`);
+        const catItems = await processStreamCategory(catName, items);
+        allItems.push(...catItems);
+        i++;
       }
 
-      app.log.info(`[stock-items/stream] done — ${result.items?.length ?? 0} items extracted`);
-      sendSSE({ type: "result", items: result.items ?? [], meta: { menuCount: menuItems.length, ordersAnalyzed: recentOrders.length } });
+      sendSSE({ type: "progress", phase: "parsing", message: "Fusion et nettoyage des ingrédients extraits..." });
+
+      // Merge and deduplicate items across categories
+      const mergedMap: Record<string, any> = {};
+      for (const item of allItems) {
+        const key = item.name.toLowerCase();
+        if (!mergedMap[key]) {
+          mergedMap[key] = item;
+        } else {
+          mergedMap[key].linkedDishes = [...new Set([...mergedMap[key].linkedDishes, ...(item.linkedDishes || [])])];
+          mergedMap[key].weeklyEstimate += (item.weeklyEstimate || 0);
+        }
+      }
+
+      app.log.info(`[stock-items/stream] done — ${Object.keys(mergedMap).length} unique items extracted`);
+      sendSSE({ type: "result", items: Object.values(mergedMap), meta: { menuCount: menuItems.length, ordersAnalyzed: recentOrders.length } });
     } catch (err: any) {
       app.log.error(`[stock-items/stream] ERROR: ${err.message}`);
       sendSSE({ type: "error", message: err.message || "Erreur serveur IA" });
