@@ -221,3 +221,19 @@ CREATE TABLE IF NOT EXISTS "ActiveOffer" (
   CONSTRAINT "ActiveOffer_pkey" PRIMARY KEY (id)
 );
 CREATE INDEX IF NOT EXISTS "ActiveOffer_restaurantId_idx" ON "ActiveOffer"("restaurantId", "endsAt");
+
+-- ShoppingHistory: historique des listes de courses generees par Nova Stock IA
+CREATE TABLE IF NOT EXISTS "ShoppingHistory" (
+  id TEXT NOT NULL,
+  "restaurantId" TEXT NOT NULL,
+  title TEXT NOT NULL,
+  "itemCount" INTEGER NOT NULL DEFAULT 0,
+  "estimatedBudget" DOUBLE PRECISION NOT NULL DEFAULT 0,
+  "realCost" DOUBLE PRECISION,
+  "shoppingList" JSONB NOT NULL DEFAULT '[]'::jsonb,
+  "completedAt" TIMESTAMP(3),
+  notes TEXT,
+  "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT "ShoppingHistory_pkey" PRIMARY KEY (id)
+);
+CREATE INDEX IF NOT EXISTS "ShoppingHistory_restaurantId_idx" ON "ShoppingHistory"("restaurantId", "createdAt" DESC);

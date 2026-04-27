@@ -1271,4 +1271,74 @@ export async function proRoutes(app: FastifyInstance) {
     }
     return { created: created.length };
   });
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // Shopping History — historique des listes de courses
+  // ─────────────────────────────────────────────────────────────────────────────
+
+  // POST /api/pro/shopping-history — sauvegarder une liste de courses generee
+  app.post("/shopping-history", async (req, reply) => {
+    const me = await requirePro(req, reply);
+    const body = z.object({
+      title: z.string().min(1).max(300),
+      itemCount: z.number().int().min(0),
+      estimatedBudget: z.number().min(0),
+      shoppingList: z.array(z.any()).min(1),
+    }).parse(req.body);
+
+    const id = crypto.randomUUID();
+    await prisma.$executeRawUnsafe(
+      `INSERT INTO "ShoppingHistory" (id, "restaurantId", title, "itemCount", "estimatedBudget", "shoppingList", "createdAt")
+       VALUES ($1, $2, $3, $4, $5, $6::jsonb, NOW())`,
+      id, me.restaurantId, body.title, body.itemCount, body.estimatedBudget, JSON.stringify(body.shoppingList),
+    );
+    return { id };
+  });
+
+  // GET /api/pro/shopping-history — liste des courses passees
+  app.get("/shopping-history", async (req, reply) => {
+    const me = await requirePro(req, reply);
+    type Row = { id: string; title: string; itemCount: number; estimatedBudget: number; realCost: number | null; completedAt: Date | null; notes: string | null; createdAt: Date };
+    const rows = await prisma.$queryRaw<Row[]>`
+      SELECT id, title, "itemCount", "estimatedBudget", "realCost", "completedAt", notes, "createdAt"
+      FROM "ShoppingHistory"
+      WHERE "restaurantId" = ${me.restaurantId}
+      ORDER BY "createdAt" DESC
+      LIMIT 50
+    `;
+    return { history: rows };
+  });
+
+  // GET /api/pro/shopping-history/:id — detail d'une liste de courses
+  app.get("/shopping-history/:id", async (req, reply) => {
+    const me = await requirePro(req, reply);
+    const { id } = req.params as { id: string };
+    type Row = { id: string; title: string; itemCount: number; estimatedBudget: number; realCost: number | null; shoppingList: any; completedAt: Date | null; notes: string | null; createdAt: Date };
+    const rows = await prisma.$queryRaw<Row[]>`
+      SELECT id, title, "itemCount", "estimatedBudget", "realCost", "shoppingList", "completedAt", notes, "createdAt"
+      FROM "ShoppingHistory"
+      WHERE id = ${id} AND "restaurantId" = ${me.restaurantId}
+      LIMIT 1
+    `;
+    if (!rows.length) return reply.code(404).send({ error: "not_found" });
+    return rows[0];
+  });
+
+  // PATCH /api/pro/shopping-history/:id/complete — marquer "courses faites" avec le prix reel
+  app.patch("/shopping-history/:id/complete", async (req, reply) => {
+    const me = await requirePro(req, reply);
+    const { id } = req.params as { id: string };
+    const body = z.object({
+      realCost: z.number().min(0),
+      notes: z.string().max(500).optional(),
+    }).parse(req.body);
+
+    const result = await prisma.$executeRawUnsafe(
+      `UPDATE "ShoppingHistory" SET "realCost" = $1, "completedAt" = NOW(), notes = $2
+       WHERE id = $3 AND "restaurantId" = $4 AND "completedAt" IS NULL`,
+      body.realCost, body.notes ?? null, id, me.restaurantId,
+    );
+    if (result === 0) return reply.code(404).send({ error: "not_found_or_already_completed" });
+    return { ok: true };
+  });
 }
