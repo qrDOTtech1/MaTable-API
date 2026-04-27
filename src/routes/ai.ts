@@ -737,6 +737,110 @@ Regles OBLIGATOIRES:
   });
 
   // ─────────────────────────────────────────────────────────────────────────────
+  // POST /ia/stock-items — non-streaming fallback for stock-items detection
+  // ─────────────────────────────────────────────────────────────────────────────
+  app.post("/ia/stock-items", async (req, reply) => {
+    const me = await requirePro(req, reply);
+
+    const restaurant = await prisma.restaurant.findUnique({
+      where: { id: me.restaurantId },
+      select: { subscription: true, name: true },
+    });
+    if (!restaurant || restaurant.subscription !== "PRO_IA") {
+      return reply.code(403).send({ error: "IA_NOT_SUBSCRIBED" });
+    }
+
+    const iaConfig = await getGlobalIaConfig();
+    if (!iaConfig.ollamaApiKey) {
+      return reply.code(503).send({ error: "IA_KEY_MISSING" });
+    }
+
+    const menuItems = await prisma.menuItem.findMany({
+      where: { restaurantId: me.restaurantId },
+      select: { name: true, priceCents: true, category: true, available: true },
+    });
+
+    const twoWeeksAgo = new Date(Date.now() - 14 * 86400_000);
+    const recentOrders = await prisma.order.findMany({
+      where: { table: { restaurantId: me.restaurantId }, createdAt: { gte: twoWeeksAgo }, status: { not: "CANCELLED" } },
+      select: { items: true },
+      take: 300,
+    });
+
+    const salesMap: Record<string, { qty: number; name: string }> = {};
+    for (const order of recentOrders) {
+      const items = order.items as any[];
+      if (!Array.isArray(items)) continue;
+      for (const item of items) {
+        const key = item.menuItemId || item.name;
+        if (!salesMap[key]) salesMap[key] = { qty: 0, name: item.name };
+        salesMap[key].qty += item.quantity || 1;
+      }
+    }
+
+    const catMap: Record<string, typeof menuItems> = {};
+    for (const m of menuItems) {
+      const cat = m.category || "Autres";
+      (catMap[cat] ||= []).push(m);
+    }
+    const categoryBreakdown = Object.entries(catMap).map(([cat, items]) =>
+      `--- ${cat.toUpperCase()} (${items.length} plats) ---\n` +
+      items.map(m => `  - ${m.name}`).join("\n")
+    ).join("\n\n");
+
+    const prompt = `Tu es Nova Stock IA. Analyse ce menu et ces ventes pour identifier TOUS les INGREDIENTS BRUTS que ce restaurant doit gérer en stock.
+
+LANGUE OBLIGATOIRE : Tu DOIS répondre INTÉGRALEMENT EN FRANÇAIS.
+- Tous les noms d'ingrédients DOIVENT être en français
+- Toutes les catégories DOIVENT être en français
+- JAMAIS de noms en anglais
+
+Restaurant: ${restaurant.name}
+
+=== MENU PAR CATEGORIE (${menuItems.length} plats) ===
+${categoryBreakdown}
+
+=== VENTES 14 JOURS ===
+${Object.values(salesMap).sort((a,b) => b.qty - a.qty).map(v => `- ${v.name}: ${v.qty} vendus`).join("\n") || "Aucune vente"}
+
+Retourne UNIQUEMENT un JSON valide (sans markdown) avec ce format EXACT:
+{
+  "items": [
+    {
+      "name": "Nom ingrédient EN FRANÇAIS",
+      "unit": "kg|L|pièce|botte|douzaine|sachet|bouteille|cl",
+      "category": "Viandes|Poissons|Légumes|Fruits|Produits laitiers|Alcools|Dilutants & Mixers|Sirops & Liqueurs|Fruits & Garnitures|Épicerie|Boulangerie|Consommables|Autres",
+      "isFresh": true,
+      "linkedDishes": ["plat1", "plat2"],
+      "weeklyEstimate": 0
+    }
+  ]
+}
+
+METHODE OBLIGATOIRE — procède CATEGORIE PAR CATEGORIE.
+NE PAS LIMITER le nombre d'articles — un restaurant de ${menuItems.length} plats a facilement 50-150 ingrédients.
+TOUT EN FRANÇAIS.`;
+
+    try {
+      let raw = (await ollamaCloudChat(iaConfig.ollamaApiKey, iaConfig.ollamaLangModel, [
+        { role: "user", content: prompt },
+      ])).trim().replace(/^```json\n?|```$/g, "").replace(/^```\n?|```$/g, "").trim();
+
+      const jsonMatch = raw.match(/\{[\s\S]*\}/);
+      if (jsonMatch) raw = jsonMatch[0];
+
+      let result: { items: any[] };
+      try { result = JSON.parse(raw); }
+      catch { return reply.code(502).send({ error: "AI_PARSE_ERROR", message: "L'IA n'a pas retourné un JSON valide." }); }
+
+      return { items: result.items ?? [], meta: { menuCount: menuItems.length, ordersAnalyzed: recentOrders.length } };
+    } catch (err: any) {
+      app.log.error(err);
+      return reply.code(502).send({ error: "AI_ERROR", details: err.message });
+    }
+  });
+
+  // ─────────────────────────────────────────────────────────────────────────────
   // POST /ia/stock-items/stream — SSE streaming variant of stock-items detection
   // ─────────────────────────────────────────────────────────────────────────────
   app.post("/ia/stock-items/stream", async (req, reply) => {
