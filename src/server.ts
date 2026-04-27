@@ -150,7 +150,12 @@ async function build() {
     },
   });
   await app.register(jwt, { secret: env.JWT_SECRET });
-  await app.register(compress, { global: true });
+  await app.register(compress, { 
+    global: true, 
+    // DO NOT compress SSE streams. Fastify/compress buffers output, which breaks SSE and causes "Premature close"
+    // and "Failed to fetch" when the buffer gets too large or the connection times out.
+    customTypes: /^(text\/(?!event-stream).*|application\/.*)$/, 
+  });
   await app.register(rateLimit, { max: 120, timeWindow: "1 minute" });
 
   app.get("/health", async () => {
