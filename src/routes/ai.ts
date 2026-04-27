@@ -967,7 +967,10 @@ TOUT EN FRANÇAIS.`;
         if (jsonMatch) cleaned = jsonMatch[0];
 
         try {
-          return JSON.parse(cleaned).items || [];
+          const parsedItems = JSON.parse(cleaned).items || [];
+          // Envoyer ces items directement au client pour qu'il les affiche tout de suite
+          sendSSE({ type: "partial_result", items: parsedItems });
+          return parsedItems;
         } catch {
           return [];
         }
