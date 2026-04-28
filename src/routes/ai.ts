@@ -1315,6 +1315,118 @@ Sois creatif, les descriptions doivent donner envie. Utilise des ingredients de 
     }
   });
 
+  // ─────────────────────────────────────────────────────────────────────────────
+  // POST /ia/menu-improve-pairings — Améliorer les plats (Accords Mets/Vins & Up-Selling)
+  // ─────────────────────────────────────────────────────────────────────────────
+  app.post("/ia/menu-improve-pairings", async (req, reply) => {
+    const me = await requirePro(req, reply);
+
+    const restaurant = await prisma.restaurant.findUnique({
+      where: { id: me.restaurantId },
+      select: { subscription: true, name: true },
+    });
+    if (!restaurant || restaurant.subscription !== "PRO_IA") {
+      return reply.code(403).send({ error: "IA_NOT_SUBSCRIBED" });
+    }
+
+    const iaConfig = await getGlobalIaConfig();
+    if (!iaConfig.ollamaApiKey) {
+      return reply.code(503).send({ error: "IA_KEY_MISSING" });
+    }
+
+    const body = z.object({
+      itemIds: z.array(z.string()).optional(), // Si vide, on améliore tout le menu
+    }).parse(req.body ?? {});
+
+    const menuItems = await prisma.menuItem.findMany({
+      where: { restaurantId: me.restaurantId, available: true },
+      select: { id: true, name: true, category: true, description: true, priceCents: true },
+    });
+
+    const itemsToImprove = body.itemIds?.length 
+      ? menuItems.filter(m => body.itemIds!.includes(m.id))
+      : menuItems;
+
+    if (!itemsToImprove.length) return reply.code(400).send({ error: "Aucun plat à améliorer" });
+
+    const { send, close } = setupSSE(reply);
+
+    try {
+      const prompt = `Tu es Nova Menu IA, sommelier et expert en restauration.
+Ta mission est d'améliorer la rentabilité du menu du restaurant "${restaurant.name}" en définissant des accords mets/vins ("suggestedPairings") et des ventes croisées ("upsellItemIds") pour chaque plat fourni.
+
+=== MENU COMPLET DISPONIBLE ===
+Voici la liste de tous les plats et boissons du restaurant pour piocher tes recommandations :
+${menuItems.map(m => `- [ID: ${m.id}] ${m.name} (${m.category || "Autre"}) - ${(m.priceCents / 100).toFixed(2)}€`).join("\n")}
+
+=== PLATS À AMÉLIORER ===
+Tu dois retourner une recommandation pour chacun de ces plats :
+${itemsToImprove.map(m => `- [ID: ${m.id}] ${m.name} | Desc: ${m.description || "Aucune"}`).join("\n")}
+
+Pour chaque plat à améliorer, fournis :
+1. "suggestedPairings": Un tableau de 1 à 3 suggestions d'accords textuels généraux (ex: ["Vin rouge charpenté", "Bière IPA", "Thé glacé maison"]).
+2. "upsellItemIds": Un tableau de 1 à 3 "ID" choisis STRICTEMENT dans la liste du "MENU COMPLET DISPONIBLE" ci-dessus, représentant la meilleure boisson, accompagnement ou dessert à suggérer (évite de suggérer des plats principaux). Ne mets que les IDs exacts.
+
+Réponds UNIQUEMENT en JSON valide avec ce format EXACT:
+{
+  "improvements": [
+    {
+      "menuItemId": "ID exact du plat",
+      "suggestedPairings": ["Vin blanc léger", "Eau gazeuse citron"],
+      "upsellItemIds": ["ID de la boisson 1", "ID du dessert 2"]
+    }
+  ]
+}`;
+
+      // Timeout spécifique à cette route IA (assez longue)
+      const timeout = setTimeout(() => { close(); }, 600_000);
+
+      let raw = "";
+      const fullResponse = await ollamaCloudChatStream(iaConfig.ollamaApiKey, iaConfig.ollamaLangModel, [
+        { role: "user", content: prompt }
+      ], (chars) => {
+        send({ type: "progress", chunk: "" });
+      });
+      raw = fullResponse;
+      clearTimeout(timeout);
+
+      const jsonMatch = raw.match(/\{[\s\S]*\}/);
+      if (jsonMatch) raw = jsonMatch[0];
+
+      let result: Record<string, any>;
+      try {
+        result = JSON.parse(raw);
+      } catch {
+        throw new Error("L'IA a renvoyé un format invalide.");
+      }
+
+      await saveAiHistory(me.restaurantId, "MENU", `Génération Accords & Upsell (${itemsToImprove.length} plats)`, { result });
+
+      // Application des modifications directement via ensure_columns.sql logic
+      const improvements = Array.isArray(result.improvements) ? result.improvements : [];
+      let updatedCount = 0;
+      
+      for (const imp of improvements) {
+        if (!imp.menuItemId) continue;
+        const pairings = Array.isArray(imp.suggestedPairings) ? imp.suggestedPairings : [];
+        const upsells = Array.isArray(imp.upsellItemIds) ? imp.upsellItemIds : [];
+        
+        await prisma.$executeRawUnsafe(
+          `UPDATE "MenuItem" SET "suggestedPairings" = $1::jsonb, "upsellItems" = $2::jsonb WHERE id = $3 AND "restaurantId" = $4`,
+          JSON.stringify(pairings), JSON.stringify(upsells), imp.menuItemId, me.restaurantId
+        );
+        updatedCount++;
+      }
+
+      send({ type: "result", improvements, updatedCount });
+    } catch (err: any) {
+      app.log.error(err);
+      send({ type: "error", message: err.message });
+    } finally {
+      close();
+    }
+  });
+
   // POST /ia/menu-generate/apply — bulk-create items from generated menu
   app.post("/ia/menu-generate/apply", async (req, reply) => {
     const me = await requirePro(req, reply);
