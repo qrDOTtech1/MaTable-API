@@ -550,22 +550,8 @@ Regles OBLIGATOIRES:
       const title = `Stock ${new Date().toLocaleDateString("fr-FR", { day: "numeric", month: "short" })} — ${shopCount} articles · ~${budgetEst.toFixed(0)}€`;
       await saveAiHistory(me.restaurantId, "STOCK", title, { analysis, meta });
 
-      // Auto-save shopping list to ShoppingHistory for tracking
-      if (shopCount > 0) {
-        try {
-          const shId = randomUUID();
-          await prisma.$executeRawUnsafe(
-            `INSERT INTO "ShoppingHistory" (id, "restaurantId", title, "itemCount", "estimatedBudget", "shoppingList", "createdAt")
-             VALUES ($1, $2, $3, $4, $5, $6::jsonb, NOW())`,
-            shId, me.restaurantId, title, shopCount, budgetEst, JSON.stringify(analysis.shoppingList),
-          );
-          sendSSE({ type: "result", analysis, meta, shoppingHistoryId: shId });
-        } catch {
-          sendSSE({ type: "result", analysis, meta });
-        }
-      } else {
-        sendSSE({ type: "result", analysis, meta });
-      }
+      // We do not auto-save to ShoppingHistory anymore. The frontend has an "Add to my lists" button.
+      sendSSE({ type: "result", analysis, meta });
     } catch (err: any) {
       app.log.error(err);
       sendSSE({ type: "error", message: err.message || "Erreur serveur IA" });

@@ -1352,8 +1352,8 @@ export async function proRoutes(app: FastifyInstance) {
       body.realCost, body.notes ?? null, id, me.restaurantId,
     );
 
-    // Mettre à jour currentQty dans StockProduct pour chaque article acheté
-    const shoppingList: Array<{ ingredient: string; toBuy: number; unit: string }> = rows[0].shoppingList ?? [];
+    // Mettre à jour currentQty dans StockProduct pour chaque article acheté, ou le créer
+    const shoppingList: Array<{ ingredient: string; toBuy: number; unit: string; category?: string }> = rows[0].shoppingList ?? [];
     let stockUpdated = 0;
     for (const item of shoppingList) {
       if (!item.ingredient || !item.toBuy || item.toBuy <= 0) continue;
@@ -1364,7 +1364,18 @@ export async function proRoutes(app: FastifyInstance) {
          WHERE "restaurantId" = $2 AND LOWER(name) = LOWER($3)`,
         item.toBuy, me.restaurantId, item.ingredient,
       );
-      if (Number(updated) > 0) stockUpdated++;
+      if (Number(updated) > 0) {
+        stockUpdated++;
+      } else {
+        // Si le produit n'existe pas, on le crée
+        const newId = crypto.randomUUID();
+        await prisma.$executeRawUnsafe(
+          `INSERT INTO "StockProduct" (id, "restaurantId", name, unit, category, "currentQty", "updatedAt", "createdAt")
+           VALUES ($1, $2, $3, $4, $5, $6, NOW(), NOW())`,
+          newId, me.restaurantId, item.ingredient, item.unit || "unité(s)", item.category || "Autre", item.toBuy
+        );
+        stockUpdated++;
+      }
     }
 
     return { ok: true, stockUpdated };
