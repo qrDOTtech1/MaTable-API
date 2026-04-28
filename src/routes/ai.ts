@@ -1356,24 +1356,29 @@ Sois creatif, les descriptions doivent donner envie. Utilise des ingredients de 
 Ta mission est d'améliorer la rentabilité du menu du restaurant "${restaurant.name}" en définissant des accords mets/vins ("suggestedPairings") et des ventes croisées ("upsellItemIds") pour chaque plat fourni.
 
 === MENU COMPLET DISPONIBLE ===
-Voici la liste de tous les plats et boissons du restaurant pour piocher tes recommandations :
+Voici la liste de tous les plats et boissons du restaurant pour piocher tes recommandations d'up-selling :
 ${menuItems.map(m => `- [ID: ${m.id}] ${m.name} (${m.category || "Autre"}) - ${(m.priceCents / 100).toFixed(2)}€`).join("\n")}
 
 === PLATS À AMÉLIORER ===
-Tu dois retourner une recommandation pour chacun de ces plats :
+Tu dois retourner une recommandation structurée pour CHACUN de ces plats :
 ${itemsToImprove.map(m => `- [ID: ${m.id}] ${m.name} | Desc: ${m.description || "Aucune"}`).join("\n")}
 
-Pour chaque plat à améliorer, fournis :
-1. "suggestedPairings": Un tableau de 1 à 3 suggestions d'accords textuels généraux (ex: ["Vin rouge charpenté", "Bière IPA", "Thé glacé maison"]).
-2. "upsellItemIds": Un tableau de 1 à 3 "ID" choisis STRICTEMENT dans la liste du "MENU COMPLET DISPONIBLE" ci-dessus, représentant la meilleure boisson, accompagnement ou dessert à suggérer (évite de suggérer des plats principaux). Ne mets que les IDs exacts.
+IMPORTANT: Pour CHACUN des plats de la liste "PLATS À AMÉLIORER", tu DOIS fournir un objet avec les 5 clés suivantes :
+1. "menuItemId": L'ID exact du plat à améliorer.
+2. "dishName": Le nom exact du plat à améliorer (indispensable pour l'affichage).
+3. "suggestedPairings": Un tableau de 1 à 3 suggestions d'accords textuels généraux (ex: ["Vin rouge charpenté", "Bière IPA", "Thé glacé maison"]).
+4. "upsellItemIds": Un tableau de 1 à 3 "ID" choisis STRICTEMENT dans le "MENU COMPLET DISPONIBLE" ci-dessus, représentant la meilleure boisson, accompagnement ou dessert à suggérer (évite de suggérer des plats principaux). Ne mets que les IDs exacts. S'il n'y a rien de pertinent, laisse vide [].
+5. "newBeverageSuggestions": Un tableau de 1 à 3 noms précis de boissons/vins qui NE SONT PAS dans le menu actuel mais qui s'accorderaient parfaitement avec ce plat. Cela donnera des idées d'achat au restaurateur. (ex: "Chablis Premier Cru", "Bière artisanale locale brune"). S'il y a déjà tout ce qu'il faut dans le menu, laisse vide [].
 
 Réponds UNIQUEMENT en JSON valide avec ce format EXACT:
 {
   "improvements": [
     {
       "menuItemId": "ID exact du plat",
+      "dishName": "Nom du plat",
       "suggestedPairings": ["Vin blanc léger", "Eau gazeuse citron"],
-      "upsellItemIds": ["ID de la boisson 1", "ID du dessert 2"]
+      "upsellItemIds": ["ID de la boisson 1", "ID du dessert 2"],
+      "newBeverageSuggestions": ["Nom vin spécifique à ajouter à la carte", "Autre idée d'achat"]
     }
   ]
 }`;
@@ -1396,6 +1401,17 @@ Réponds UNIQUEMENT en JSON valide avec ce format EXACT:
       let result: Record<string, any>;
       try {
         result = JSON.parse(raw);
+        // Force the missing properties if the AI missed them so they exist for the frontend
+        if (result.improvements && Array.isArray(result.improvements)) {
+          result.improvements = result.improvements.map((imp: any) => {
+             // Retrouver le nom du plat si manquant
+             if (!imp.dishName && imp.menuItemId) {
+                imp.dishName = menuItems.find(m => m.id === imp.menuItemId)?.name || `Plat #${imp.menuItemId}`;
+             }
+             if (!imp.newBeverageSuggestions) imp.newBeverageSuggestions = [];
+             return imp;
+          });
+        }
       } catch {
         throw new Error("L'IA a renvoyé un format invalide.");
       }
@@ -1405,12 +1421,16 @@ Réponds UNIQUEMENT en JSON valide avec ce format EXACT:
       // Application des modifications directement via ensure_columns.sql logic
       const improvements = Array.isArray(result.improvements) ? result.improvements : [];
       let updatedCount = 0;
+      const allNewBeverages = new Set<string>();
       
       for (const imp of improvements) {
         if (!imp.menuItemId) continue;
         const pairings = Array.isArray(imp.suggestedPairings) ? imp.suggestedPairings : [];
         const upsells = Array.isArray(imp.upsellItemIds) ? imp.upsellItemIds : [];
+        const newBevs = Array.isArray(imp.newBeverageSuggestions) ? imp.newBeverageSuggestions : [];
         
+        newBevs.forEach((b: string) => allNewBeverages.add(b));
+
         await prisma.$executeRawUnsafe(
           `UPDATE "MenuItem" SET "suggestedPairings" = $1::jsonb, "upsellItems" = $2::jsonb WHERE id = $3 AND "restaurantId" = $4`,
           JSON.stringify(pairings), JSON.stringify(upsells), imp.menuItemId, me.restaurantId
@@ -1418,7 +1438,12 @@ Réponds UNIQUEMENT en JSON valide avec ce format EXACT:
         updatedCount++;
       }
 
-      send({ type: "result", improvements, updatedCount });
+      send({ 
+        type: "result", 
+        improvements, 
+        updatedCount, 
+        newBeverageSuggestions: Array.from(allNewBeverages) 
+      });
     } catch (err: any) {
       app.log.error(err);
       send({ type: "error", message: err.message });
