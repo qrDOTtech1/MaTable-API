@@ -1551,7 +1551,124 @@ Règles:
   });
 
   // ─────────────────────────────────────────────────────────────────────────────
-  // GET  /ia/history?type=STOCK|MENU|CHAT|PLANNING|FINANCE  — list IA history
+  // NovaContab IA — Assistant de Déclaration URSSAF / TVA (SSE)
+  // ─────────────────────────────────────────────────────────────────────────────
+  app.post("/ia/novacontab", async (req, reply) => {
+    const me = await requirePro(req, reply);
+
+    const restaurant = await prisma.restaurant.findUnique({
+      where: { id: me.restaurantId },
+      select: { subscription: true, name: true },
+    });
+    if (!restaurant || restaurant.subscription !== "PRO_IA") {
+      return reply.code(403).send({ error: "IA_NOT_SUBSCRIBED" });
+    }
+
+    const iaConfig = await getGlobalIaConfig();
+    if (!iaConfig.ollamaApiKey) {
+      return reply.code(503).send({ error: "IA_KEY_MISSING" });
+    }
+
+    const body = z.object({
+      periodLabel: z.string(), // "Mai 2026", "T1 2026"
+      revenueTotal: z.number(),
+      revenueOnSite: z.number(),
+      revenueTakeAway: z.number(),
+      legalStatus: z.enum(["MICRO", "SASU", "SARL", "EURL", "OTHER"]).default("MICRO"),
+      taxRegime: z.enum(["FRANCHISE", "REEL_SIMPLIFIE", "REEL_NORMAL"]).default("FRANCHISE"),
+      vatRates: z.object({
+        vat10: z.number().optional().default(0),
+        vat55: z.number().optional().default(0),
+        vat20: z.number().optional().default(0),
+      }).optional(),
+      notes: z.string().max(1000).optional(),
+    }).parse(req.body ?? {});
+
+    const { send, close } = setupSSE(reply, { keepaliveMs: 15_000 });
+
+    try {
+      const prompt = `Tu es NovaContab IA, expert comptable et fiscal en France spécialisé dans la restauration.
+Un restaurateur te demande de l'aide pour sa déclaration de chiffre d'affaires URSSAF et sa TVA.
+
+=== DONNÉES DU RESTAURANT ===
+- Restaurant: ${restaurant.name}
+- Statut juridique: ${body.legalStatus}
+- Régime de TVA: ${body.taxRegime}
+- Période à déclarer: ${body.periodLabel}
+
+=== CHIFFRES DE LA PÉRIODE ===
+- Chiffre d'affaires TOTAL encaissé: ${body.revenueTotal.toFixed(2)} €
+- Dont Ventes à consommer sur place (restauration): ${body.revenueOnSite.toFixed(2)} €
+- Dont Ventes à emporter (marchandises): ${body.revenueTakeAway.toFixed(2)} €
+${body.vatRates ? `- TVA Collectée estimée : 10%: ${body.vatRates.vat10}€, 5.5%: ${body.vatRates.vat55}€, 20%: ${body.vatRates.vat20}€` : ""}
+${body.notes ? `- Notes additionnelles: ${body.notes}` : ""}
+
+=== MISSION ===
+Calcule exactement ce que le restaurateur doit déclarer et payer à l'URSSAF.
+Si c'est un micro-entrepreneur (MICRO), rappelle les taux applicables (ex: 21.2% ou 12.3% selon la part restauration vs vente de marchandises/à emporter).
+Fournis des alertes claires (ex: seuils de franchise en base de TVA pour la restauration à 91 900 €).
+Ajoute des conseils fiscaux d'optimisation (conservation tickets, notes de frais, TVA déductible si applicable).
+
+Retourne UNIQUEMENT du JSON valide avec cette structure EXACTE (sans markdown \`\`\`json):
+{
+  "summary": "Résumé de la déclaration (1-2 phrases)",
+  "urssaf": {
+    "totalRevenueToDeclare": 0,
+    "estimatedContributions": 0,
+    "breakdown": [
+      {"category": "Prestations de services / Restauration sur place", "revenue": 0, "ratePercent": 21.2, "contribution": 0},
+      {"category": "Ventes de marchandises / À emporter", "revenue": 0, "ratePercent": 12.3, "contribution": 0}
+    ]
+  },
+  "vat": {
+    "status": "FRANCHISE ou ASSUJETTI",
+    "alert": "Message d'alerte si proche d'un seuil, sinon null",
+    "estimatedToPay": 0
+  },
+  "tips": [
+    {"title": "Conseil 1", "description": "Explication"}
+  ]
+}
+
+Assure-toi de faire les calculs exacts basés sur les montants donnés. Le format DOIT être respecté strictement.`;
+
+      // Timeout spécifique à cette route IA (assez longue)
+      const timeout = setTimeout(() => { close(); }, 600_000);
+
+      let raw = "";
+      for await (const chunk of ollamaCloudChatStream(iaConfig.ollamaApiKey, iaConfig.ollamaLangModel, [
+        { role: "user", content: prompt }
+      ])) {
+        raw += chunk;
+        send({ type: "progress", chunk });
+      }
+      clearTimeout(timeout);
+
+      const jsonMatch = raw.match(/\{[\s\S]*\}/);
+      if (jsonMatch) raw = jsonMatch[0];
+
+      let analysis: Record<string, unknown>;
+      try {
+        analysis = JSON.parse(raw);
+      } catch {
+        throw new Error("L'IA a renvoyé un format invalide.");
+      }
+
+      await saveAiHistory(me.restaurantId, "NOVACONTAB", \`Déclaration URSSAF - \${body.periodLabel}\`, {
+        analysis,
+        inputs: body
+      });
+
+      send({ type: "result", analysis });
+    } catch (err: any) {
+      app.log.error(err);
+      send({ type: "error", message: err.message });
+    } finally {
+      close();
+    }
+  });
+  // ─────────────────────────────────────────────────────────────────────────────
+  // GET  /ia/history?type=STOCK|MENU|CHAT|PLANNING|FINANCE|NOVACONTAB  — list IA history
   // POST /ia/history                                 — save from frontend (chat/planning)
   // DELETE /ia/history/:id                           — delete one entry
   // ─────────────────────────────────────────────────────────────────────────────

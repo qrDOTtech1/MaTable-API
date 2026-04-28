@@ -1443,4 +1443,64 @@ export async function proRoutes(app: FastifyInstance) {
     `;
     return { ok: true };
   });
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // NovaContab IA — Aide à la déclaration URSSAF / TVA
+  // ─────────────────────────────────────────────────────────────────────────────
+
+  // GET /api/pro/novacontab/report — Données brutes URSSAF (disponible pour tous)
+  app.get("/novacontab/report", async (req, reply) => {
+    const me = await requirePro(req, reply);
+    const { year, month, quarter } = z.object({
+      year: z.string().regex(/^\d{4}$/),
+      month: z.string().regex(/^(0?[1-9]|1[0-2])$/).optional(),
+      quarter: z.string().regex(/^[1-4]$/).optional(),
+    }).parse(req.query);
+
+    const y = parseInt(year, 10);
+    let start: Date, end: Date;
+
+    if (month) {
+      const m = parseInt(month, 10);
+      start = new Date(y, m - 1, 1);
+      end = new Date(y, m, 1);
+    } else if (quarter) {
+      const q = parseInt(quarter, 10);
+      start = new Date(y, (q - 1) * 3, 1);
+      end = new Date(y, q * 3, 1);
+    } else {
+      return reply.code(400).send({ error: "missing_period" });
+    }
+
+    const orders = await prisma.order.findMany({
+      where: {
+        table: { restaurantId: me.restaurantId },
+        createdAt: { gte: start, lt: end },
+        status: { in: ["PAID", "SERVED", "COOKING", "PENDING"] } // usually PAID, but keeping it broad for now if status tracking isn't strict
+      },
+      select: { totalCents: true, items: true }
+    });
+
+    let totalCents = 0;
+    let onSiteCents = 0;
+    let takeAwayCents = 0;
+
+    for (const o of orders) {
+      totalCents += o.totalCents;
+      // Pour l'instant, on met tout dans "sur place" par défaut.
+      // Si une notion "à emporter" existe dans les items/orders, il faudra la parser ici.
+      onSiteCents += o.totalCents;
+    }
+
+    return {
+      period: { start, end },
+      revenue: {
+        totalCents,
+        onSiteCents,
+        takeAwayCents,
+      },
+      ordersCount: orders.length,
+    };
+  });
+
 }
