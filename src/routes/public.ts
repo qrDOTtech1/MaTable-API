@@ -112,20 +112,18 @@ export async function publicRoutes(app: FastifyInstance) {
         serviceCallEnabled: (table.restaurant as any).serviceCallEnabled ?? false,
         openingHours: table.restaurant.openingHours,
       },
-      menu: await (async () => {
-        const ids = table.restaurant.menuItems.map((m) => m.id);
-        type WR = { id: string; waitMinutes: number };
-        let wr: WR[] = [];
-        if (ids.length > 0) {
-          wr = await prisma.$queryRaw<WR[]>`
-            SELECT id, COALESCE("waitMinutes", 0)::int AS "waitMinutes"
-            FROM "MenuItem" WHERE id = ANY(${ids}::text[])
-          `;
-        }
-        const wm = new Map(wr.map((r) => [r.id, r.waitMinutes]));
-        return table.restaurant.menuItems.map((m) => ({ ...m, waitMinutes: wm.get(m.id) ?? 0 }));
-      })(),
-      server: server ? { id: server.id, name: server.name, photoUrl: server.photoUrl } : null,
+      menu: table.restaurant.menuItems.map((m) => ({
+        id: m.id,
+        name: m.name,
+        description: m.description,
+        priceCents: m.priceCents,
+        imageUrl: m.imageUrl,
+        category: m.category,
+        waitMinutes: (m as any).waitMinutes ?? 0,
+        suggestedPairings: (m as any).suggestedPairings ?? [],
+        upsellItems: (m as any).upsellItems ?? [],
+      })),
+      server,
     };
   });
 

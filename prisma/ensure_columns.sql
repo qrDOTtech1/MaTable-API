@@ -58,6 +58,10 @@ ALTER TABLE "TableSession" ADD COLUMN IF NOT EXISTS "billConfirmedBy" TEXT;
 -- MenuItem: wait time in minutes (0 = instant)
 ALTER TABLE "MenuItem" ADD COLUMN IF NOT EXISTS "waitMinutes" INTEGER NOT NULL DEFAULT 0;
 
+-- MenuItem: Smart up-selling & pairings (JSON arrays of MenuItem IDs or strings)
+ALTER TABLE "MenuItem" ADD COLUMN IF NOT EXISTS "suggestedPairings" JSONB NOT NULL DEFAULT '[]'::jsonb;
+ALTER TABLE "MenuItem" ADD COLUMN IF NOT EXISTS "upsellItems" JSONB NOT NULL DEFAULT '[]'::jsonb;
+
 -- Order: expected ready time (computed at order creation)
 ALTER TABLE "Order" ADD COLUMN IF NOT EXISTS "expectedReadyAt" TIMESTAMP(3);
 
