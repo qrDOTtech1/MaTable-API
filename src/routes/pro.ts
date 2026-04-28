@@ -1283,7 +1283,7 @@ export async function proRoutes(app: FastifyInstance) {
       title: z.string().min(1).max(300),
       itemCount: z.number().int().min(0),
       estimatedBudget: z.number().min(0),
-      shoppingList: z.array(z.any()).min(1),
+      shoppingList: z.array(z.any()),
     }).parse(req.body);
 
     const id = crypto.randomUUID();

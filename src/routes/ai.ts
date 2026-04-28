@@ -1584,7 +1584,7 @@ Règles:
       notes: z.string().max(1000).optional(),
     }).parse(req.body ?? {});
 
-    const { send, close } = setupSSE(reply, { keepaliveMs: 15_000 });
+    const { send, close } = setupSSE(reply);
 
     try {
       const prompt = `Tu es NovaContab IA, expert comptable et fiscal en France spécialisé dans la restauration.
@@ -1636,12 +1636,12 @@ Assure-toi de faire les calculs exacts basés sur les montants donnés. Le forma
       const timeout = setTimeout(() => { close(); }, 600_000);
 
       let raw = "";
-      for await (const chunk of ollamaCloudChatStream(iaConfig.ollamaApiKey, iaConfig.ollamaLangModel, [
+      const fullResponse = await ollamaCloudChatStream(iaConfig.ollamaApiKey, iaConfig.ollamaLangModel, [
         { role: "user", content: prompt }
-      ])) {
-        raw += chunk;
-        send({ type: "progress", chunk });
-      }
+      ], (chars) => {
+        send({ type: "progress", chunk: "" });
+      });
+      raw = fullResponse;
       clearTimeout(timeout);
 
       const jsonMatch = raw.match(/\{[\s\S]*\}/);
@@ -1654,7 +1654,7 @@ Assure-toi de faire les calculs exacts basés sur les montants donnés. Le forma
         throw new Error("L'IA a renvoyé un format invalide.");
       }
 
-      await saveAiHistory(me.restaurantId, "NOVACONTAB", \`Déclaration URSSAF - \${body.periodLabel}\`, {
+      await saveAiHistory(me.restaurantId, "NOVACONTAB", `Déclaration URSSAF - ${body.periodLabel}`, {
         analysis,
         inputs: body
       });
