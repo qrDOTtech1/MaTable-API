@@ -566,18 +566,31 @@ export async function proRoutes(app: FastifyInstance) {
       orderBy: [{ category: "asc" }, { position: "asc" }, { name: "asc" }],
       include: { modifierGroups: { include: { options: true }, orderBy: { position: "asc" } } },
     });
-    // Attach waitMinutes from raw (column added via ensure_columns.sql)
+    // Attach extended columns from raw (added via ensure_columns.sql)
     const ids = items.map((i) => i.id);
-    type WaitRow = { id: string; waitMinutes: number };
-    let waitRows: WaitRow[] = [];
+    type ExtRow = { id: string; waitMinutes: number; suggestedPairings: any; upsellItems: any };
+    let extRows: ExtRow[] = [];
     if (ids.length > 0) {
-      waitRows = await prisma.$queryRaw<WaitRow[]>`
-        SELECT id, COALESCE("waitMinutes", 0)::int AS "waitMinutes"
+      extRows = await prisma.$queryRaw<ExtRow[]>`
+        SELECT id, 
+               COALESCE("waitMinutes", 0)::int AS "waitMinutes",
+               "suggestedPairings",
+               "upsellItems"
         FROM "MenuItem" WHERE id = ANY(${ids}::text[])
       `;
     }
-    const waitMap = new Map(waitRows.map((r) => [r.id, r.waitMinutes]));
-    return { items: items.map((i) => ({ ...i, waitMinutes: waitMap.get(i.id) ?? 0 })) };
+    const extMap = new Map(extRows.map((r) => [r.id, r]));
+    return { 
+      items: items.map((i) => {
+        const ext = extMap.get(i.id);
+        return { 
+          ...i, 
+          waitMinutes: ext?.waitMinutes ?? 0,
+          suggestedPairings: ext?.suggestedPairings ?? [],
+          upsellItems: ext?.upsellItems ?? []
+        };
+      }) 
+    };
   });
 
   const menuInput = z.object({
@@ -594,31 +607,54 @@ export async function proRoutes(app: FastifyInstance) {
     lowStockThreshold: z.number().int().min(0).optional().nullable(),
     waitMinutes: z.number().int().min(0).max(180).optional(),
     position: z.number().int().optional(),
+    suggestedPairings: z.array(z.string()).optional(),
+    upsellItems: z.array(z.string()).optional(),
   });
 
   app.post("/menu", async (req, reply) => {
     const me = await requirePro(req, reply);
-    const { waitMinutes, ...data } = menuInput.parse(req.body);
+    const { waitMinutes, suggestedPairings, upsellItems, ...data } = menuInput.parse(req.body);
     const item = await prisma.menuItem.create({
       data: { ...data, imageUrl: data.imageUrl || null, restaurantId: me.restaurantId } as any,
     });
-    // waitMinutes is managed via ensure_columns.sql (not in Prisma schema)
-    if (waitMinutes !== undefined) {
-      await prisma.$executeRaw`UPDATE "MenuItem" SET "waitMinutes" = ${waitMinutes} WHERE id = ${item.id}`;
+    
+    // Extensions managed via ensure_columns.sql (not in Prisma schema)
+    const updates: string[] = [];
+    if (waitMinutes !== undefined) updates.push(`"waitMinutes" = ${Number(waitMinutes)}`);
+    if (suggestedPairings !== undefined) updates.push(`"suggestedPairings" = '${JSON.stringify(suggestedPairings)}'::jsonb`);
+    if (upsellItems !== undefined) updates.push(`"upsellItems" = '${JSON.stringify(upsellItems)}'::jsonb`);
+    
+    if (updates.length > 0) {
+      await prisma.$executeRawUnsafe(`UPDATE "MenuItem" SET ${updates.join(", ")} WHERE id = $1`, item.id);
     }
-    return { item: { ...item, waitMinutes: waitMinutes ?? 0 } };
+    
+    return { item: { ...item, waitMinutes: waitMinutes ?? 0, suggestedPairings: suggestedPairings ?? [], upsellItems: upsellItems ?? [] } };
   });
 
   app.patch("/menu/:id", async (req, reply) => {
     const me = await requirePro(req, reply);
     const { id } = req.params as { id: string };
-    const { waitMinutes, ...data } = menuInput.partial().parse(req.body);
+    const { waitMinutes, suggestedPairings, upsellItems, ...data } = menuInput.partial().parse(req.body);
     if (data.imageUrl === "") (data as any).imageUrl = null;
-    await prisma.menuItem.updateMany({ where: { id, restaurantId: me.restaurantId }, data: data as any });
-    // waitMinutes is managed via ensure_columns.sql
-    if (waitMinutes !== undefined) {
-      await prisma.$executeRaw`UPDATE "MenuItem" SET "waitMinutes" = ${waitMinutes} WHERE id = ${id}`;
+    
+    if (Object.keys(data).length > 0) {
+      await prisma.menuItem.updateMany({ where: { id, restaurantId: me.restaurantId }, data: data as any });
     }
+
+    // Extensions managed via ensure_columns.sql
+    const updates: string[] = [];
+    if (waitMinutes !== undefined) updates.push(`"waitMinutes" = ${Number(waitMinutes)}`);
+    if (suggestedPairings !== undefined) updates.push(`"suggestedPairings" = '${JSON.stringify(suggestedPairings)}'::jsonb`);
+    if (upsellItems !== undefined) updates.push(`"upsellItems" = '${JSON.stringify(upsellItems)}'::jsonb`);
+    
+    if (updates.length > 0) {
+      // Must verify ownership again to be safe before raw update
+      const exists = await prisma.menuItem.findFirst({ where: { id, restaurantId: me.restaurantId }});
+      if (exists) {
+        await prisma.$executeRawUnsafe(`UPDATE "MenuItem" SET ${updates.join(", ")} WHERE id = $1`, id);
+      }
+    }
+    
     return { ok: true };
   });
 

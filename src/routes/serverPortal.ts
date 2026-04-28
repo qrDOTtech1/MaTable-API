@@ -287,6 +287,31 @@ export async function serverPortalRoutes(app: FastifyInstance) {
     return { sessions, allTables, myEmptyTables };
   });
 
+  // ── GET /api/server/service-calls ──────────────────────────────────────────
+  // Returns all unresolved service calls for the restaurant
+  app.get("/service-calls", async (req, reply) => {
+    const me = await requireServer(req, reply);
+    const calls = await prisma.serviceCall.findMany({
+      where: { restaurantId: me.restaurantId, resolvedAt: null },
+      include: { table: { select: { id: true, number: true } } },
+      orderBy: { createdAt: "asc" },
+    });
+    return { calls };
+  });
+
+  // ── POST /api/server/service-calls/:id/resolve ────────────────────────────
+  // Server resolves (acknowledges) a service call
+  app.post("/service-calls/:id/resolve", async (req, reply) => {
+    const me = await requireServer(req, reply);
+    const { id } = req.params as { id: string };
+    const result = await prisma.serviceCall.updateMany({
+      where: { id, restaurantId: me.restaurantId, resolvedAt: null },
+      data: { resolvedAt: new Date() },
+    });
+    if (result.count === 0) return reply.code(404).send({ error: "CALL_NOT_FOUND_OR_ALREADY_RESOLVED" });
+    return { ok: true };
+  });
+
   // ── POST /api/server/tables/:sessionId/claim ──────────────────────────────
   // Server claims an unassigned (or reassignable) session
   app.post("/tables/:sessionId/claim", async (req, reply) => {
