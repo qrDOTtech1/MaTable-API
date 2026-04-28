@@ -1369,4 +1369,78 @@ export async function proRoutes(app: FastifyInstance) {
 
     return { ok: true, stockUpdated };
   });
+
+  // PUT /api/pro/shopping-history/:id — modifier une liste manuellement (titre, articles, budget)
+  app.put("/shopping-history/:id", async (req, reply) => {
+    const me = await requirePro(req, reply);
+    const { id } = req.params as { id: string };
+    const body = z.object({
+      title: z.string().min(1).max(300).optional(),
+      estimatedBudget: z.number().min(0).optional(),
+      shoppingList: z.array(z.object({
+        ingredient: z.string().min(1),
+        category: z.string().default("Autre"),
+        estimatedNeeded: z.number().min(0).default(0),
+        alreadyHave: z.number().min(0).default(0),
+        toBuy: z.number().min(0).default(0),
+        unit: z.string().default("unité(s)"),
+        priority: z.enum(["HIGH", "MEDIUM", "LOW"]).default("MEDIUM"),
+        estimatedCost: z.number().optional(),
+        reason: z.string().default(""),
+      })).optional(),
+    }).parse(req.body);
+
+    const rows = await prisma.$queryRaw<{ id: string }[]>`
+      SELECT id FROM "ShoppingHistory"
+      WHERE id = ${id} AND "restaurantId" = ${me.restaurantId}
+      LIMIT 1
+    `;
+    if (!rows.length) return reply.code(404).send({ error: "not_found" });
+
+    const updates: string[] = [];
+    const params: unknown[] = [];
+    let idx = 1;
+
+    if (body.title !== undefined) {
+      updates.push(`title = $${idx++}`);
+      params.push(body.title);
+    }
+    if (body.estimatedBudget !== undefined) {
+      updates.push(`"estimatedBudget" = $${idx++}`);
+      params.push(body.estimatedBudget);
+    }
+    if (body.shoppingList !== undefined) {
+      updates.push(`"shoppingList" = $${idx++}::jsonb`);
+      params.push(JSON.stringify(body.shoppingList));
+      updates.push(`"itemCount" = $${idx++}`);
+      params.push(body.shoppingList.length);
+    }
+
+    if (updates.length > 0) {
+      params.push(id, me.restaurantId);
+      await prisma.$executeRawUnsafe(
+        `UPDATE "ShoppingHistory" SET ${updates.join(", ")}
+         WHERE id = $${idx++} AND "restaurantId" = $${idx}`,
+        ...params,
+      );
+    }
+
+    const updated = await prisma.$queryRaw<any[]>`
+      SELECT id, title, "itemCount", "estimatedBudget", "realCost", "shoppingList", "completedAt", notes, "createdAt"
+      FROM "ShoppingHistory"
+      WHERE id = ${id}
+    `;
+    return updated[0];
+  });
+
+  // DELETE /api/pro/shopping-history/:id — supprimer une liste
+  app.delete("/shopping-history/:id", async (req, reply) => {
+    const me = await requirePro(req, reply);
+    const { id } = req.params as { id: string };
+    await prisma.$executeRaw`
+      DELETE FROM "ShoppingHistory"
+      WHERE id = ${id} AND "restaurantId" = ${me.restaurantId}
+    `;
+    return { ok: true };
+  });
 }
