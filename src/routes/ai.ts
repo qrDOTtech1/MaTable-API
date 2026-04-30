@@ -313,16 +313,13 @@ Ne renvoie STRICTEMENT rien d'autre que ce JSON (pas de bloc Markdown \`\`\`json
 }`;
 
       let output = "";
-      // On public endpoints without specific api keys we use default keys or error
-      const r = await prisma.restaurant.findUnique({
-        where: { id: body.restaurantId },
-        select: { ollamaApiKey: true, ollamaLangModel: true }
-      });
-      if (!r?.ollamaApiKey) throw new Error("No API Key");
+      
+      const iaConfig = await getGlobalIaConfig();
+      if (!iaConfig.ollamaApiKey) throw new Error("No API Key configured globally");
 
       const fullOutput = await ollamaCloudChatStream(
-        r.ollamaApiKey,
-        r.ollamaLangModel || "llama3.3",
+        iaConfig.ollamaApiKey,
+        iaConfig.ollamaLangModel || "llama3.3",
         [{ role: "user", content: p }],
         (chunk) => { send({ type: "chunk", text: chunk }); }
       );
