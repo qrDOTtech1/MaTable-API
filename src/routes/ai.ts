@@ -105,7 +105,7 @@ async function ollamaCloudChatStream(
   apiKey: string,
   model: string,
   messages: OllamaMsg[],
-  onProgress?: (chars: number) => void,
+  onProgress?: (chunk: string) => void,
   timeoutMs = CHAT_TIMEOUT_MS,
 ): Promise<string> {
   let lastErr: Error | null = null;
@@ -169,9 +169,7 @@ async function ollamaCloudChatStream(
               fullContent += chunk;
               chunkCount++;
               // Notify caller every 5 content chunks
-              if (chunkCount % 5 === 0 && onProgress) {
-                onProgress(fullContent.length);
-              }
+              if (onProgress) { onProgress(chunk); }
             }
             if (obj.done === true) break;
           } catch {
@@ -326,9 +324,7 @@ Ne renvoie STRICTEMENT rien d'autre que ce JSON (pas de bloc Markdown \`\`\`json
         r.ollamaApiKey,
         r.ollamaLangModel || "llama3.3",
         [{ role: "user", content: p }],
-        (chars) => {
-          send({ type: "progress" });
-        }
+        (chunk) => { send({ type: "chunk", text: chunk }); }
       );
       output = fullOutput;
 
@@ -595,7 +591,7 @@ Regles OBLIGATOIRES:
       const raw = await ollamaCloudChatStream(
         iaConfig.ollamaApiKey, iaConfig.ollamaLangModel,
         [{ role: "user", content: prompt }],
-        (chars) => sendSSE({ type: "chunk", chars }),
+        (chunk) => sendSSE({ type: "chunk", chars: chunk.length }),
         STOCK_TIMEOUT_MS,
       );
 
@@ -997,7 +993,7 @@ TOUT EN FRANÇAIS.`;
         const raw = await ollamaCloudChatStream(
           iaConfig.ollamaApiKey!, iaConfig.ollamaLangModel!,
           [{ role: "user", content: prompt }],
-          (chars) => sendSSE({ type: "chunk", chars }),
+          (chunk) => sendSSE({ type: "chunk", chars: chunk.length }),
           STOCK_TIMEOUT_MS,
         );
 
@@ -1335,7 +1331,7 @@ Sois creatif, les descriptions doivent donner envie. Utilise des ingredients de 
       const timeoutMs = imageMode ? VISION_TIMEOUT_MS : CHAT_TIMEOUT_MS;
       const raw = await ollamaCloudChatStream(
         iaConfig.ollamaApiKey, model, ollamaMessages,
-        (chars) => sendSSE({ type: "chunk", chars }),
+        (chunk) => sendSSE({ type: "chunk", chars: chunk.length }),
         timeoutMs,
       );
 
@@ -1455,7 +1451,7 @@ Réponds UNIQUEMENT en JSON valide avec ce format EXACT:
       let raw = "";
       const fullResponse = await ollamaCloudChatStream(iaConfig.ollamaApiKey, iaConfig.ollamaLangModel, [
         { role: "user", content: prompt }
-      ], (chars) => {
+      ], (chunk) => {
         send({ type: "progress", chunk: "" });
       });
       raw = fullResponse;
@@ -1827,7 +1823,7 @@ Assure-toi de faire les calculs exacts basés sur les montants donnés. Le forma
       let raw = "";
       const fullResponse = await ollamaCloudChatStream(iaConfig.ollamaApiKey, iaConfig.ollamaLangModel, [
         { role: "user", content: prompt }
-      ], (chars) => {
+      ], (chunk) => {
         send({ type: "progress", chunk: "" });
       });
       raw = fullResponse;
