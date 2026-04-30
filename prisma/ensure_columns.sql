@@ -26,6 +26,8 @@ ALTER TABLE "Restaurant" ADD COLUMN IF NOT EXISTS "stripePublicKey" TEXT;
 ALTER TABLE "Restaurant" ADD COLUMN IF NOT EXISTS "ollamaApiKey" TEXT;
 ALTER TABLE "Restaurant" ADD COLUMN IF NOT EXISTS "ollamaLangModel" TEXT DEFAULT 'gpt-oss:120b';
 ALTER TABLE "Restaurant" ADD COLUMN IF NOT EXISTS "ollamaVisionModel" TEXT DEFAULT 'qwen3-vl:235b';
+ALTER TABLE "Restaurant" ADD COLUMN IF NOT EXISTS "googleReviewLink" TEXT;
+ALTER TABLE "Restaurant" ADD COLUMN IF NOT EXISTS "reviewVoucherConfig" JSONB;
 ALTER TABLE "Restaurant" ADD COLUMN IF NOT EXISTS "subscriptionStartedAt" TIMESTAMP(3);
 ALTER TABLE "Restaurant" ADD COLUMN IF NOT EXISTS "subscriptionExpiresAt" TIMESTAMP(3);
 ALTER TABLE "Restaurant" ADD COLUMN IF NOT EXISTS slug TEXT;

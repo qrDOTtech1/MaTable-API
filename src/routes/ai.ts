@@ -284,6 +284,72 @@ export async function aiRoutes(app: FastifyInstance) {
   });
 
   // ─────────────────────────────────────────────────────────────────────────────
+  // POST /ia/review-draft — Générateur d'avis (Client / Public via QR Code)
+  // ─────────────────────────────────────────────────────────────────────────────
+  app.post("/ia/review-draft", async (req, reply) => {
+    // Note: Public endpoint, no auth required, just rate limited by default Fastify limits.
+    const body = z.object({
+      restaurantId: z.string().min(1),
+      serverName: z.string().min(1),
+      rating: z.number().int().min(1).max(5),
+      answers: z.array(z.string()).max(10)
+    }).parse(req.body);
+
+    // Setup SSE to keep connection alive on Railway (railway kills silent conns after 60s)
+    const { send, close } = setupSSE(reply);
+
+    try {
+      const p = `Tu es un rédacteur d'avis Google parfait et authentique.
+Un client vient de manger dans notre restaurant.
+Voici le contexte :
+- Note donnée : ${body.rating}/5
+- Serveur qui s'est occupé de lui : ${body.serverName}
+- Ses réponses aux questions sur son expérience : ${body.answers.join(" | ")}
+
+Génère 2 versions courtes, naturelles et différentes d'un avis Google basé sur ce contexte.
+L'avis doit faire entre 20 et 50 mots maximum. Il doit mentionner le nom du serveur.
+Ne renvoie STRICTEMENT rien d'autre que ce JSON (pas de bloc Markdown \`\`\`json):
+{
+  "version1": "Texte du premier avis",
+  "version2": "Texte du deuxième avis"
+}`;
+
+      let output = "";
+      // On public endpoints without specific api keys we use default keys or error
+      const r = await prisma.restaurant.findUnique({
+        where: { id: body.restaurantId },
+        select: { ollamaApiKey: true, ollamaLangModel: true }
+      });
+      if (!r?.ollamaApiKey) throw new Error("No API Key");
+
+      const fullOutput = await ollamaCloudChatStream(
+        r.ollamaApiKey,
+        r.ollamaLangModel || "llama3.3",
+        [{ role: "user", content: p }],
+        (chars) => {
+          send({ type: "progress" });
+        }
+      );
+      output = fullOutput;
+
+      // Clean the output
+      const cleanJson = output.replace(/```json/g, "").replace(/```/g, "").trim();
+      const result = JSON.parse(cleanJson);
+
+      send({
+        type: "done",
+        version1: result.version1,
+        version2: result.version2
+      });
+      close();
+    } catch (err: any) {
+      console.error("[IA] review-draft error:", err);
+      send({ type: "error", message: err.message || "Unknown error" });
+      close();
+    }
+  });
+
+  // ─────────────────────────────────────────────────────────────────────────────
   // POST /ia/chat  — chatbot / planning / descriptions
   // ─────────────────────────────────────────────────────────────────────────────
   app.post("/ia/chat", async (req, reply) => {

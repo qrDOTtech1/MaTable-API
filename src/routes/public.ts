@@ -253,6 +253,43 @@ export async function publicRoutes(app: FastifyInstance) {
     return { slots };
   });
 
+  // ---------------------------------------------------------------------------
+  // GET /api/public/r/:slug/review-campaign
+  // Returns configuration for the interactive review flow (servers, link, voucher)
+  // ---------------------------------------------------------------------------
+  app.get("/r/:slug/review-campaign", async (req, reply) => {
+    const { slug } = req.params as { slug: string };
+    
+    // Check main restaurant via Prisma
+    const r = await prisma.restaurant.findUnique({
+      where: { slug },
+      select: { id: true, name: true, reviewsEnabled: true },
+    });
+    
+    if (!r) return reply.code(404).send({ error: "NOT_FOUND" });
+    if (!r.reviewsEnabled) return reply.code(403).send({ error: "REVIEWS_DISABLED" });
+
+    // Get specific configuration fields via raw query because they are not in prisma schema yet
+    const configRaw = await prisma.$queryRawUnsafe<any[]>(
+      `SELECT "googleReviewLink", "reviewVoucherConfig" FROM "Restaurant" WHERE id = $1`, r.id
+    );
+    const googleReviewLink = configRaw[0]?.googleReviewLink || null;
+    const reviewVoucherConfig = configRaw[0]?.reviewVoucherConfig || null;
+
+    // Get list of active servers with their photos
+    const servers = await prisma.server.findMany({
+      where: { restaurantId: r.id, active: true },
+      select: { id: true, name: true, photoUrl: true }
+    });
+
+    return {
+      restaurant: { id: r.id, name: r.name },
+      googleReviewLink,
+      reviewVoucherConfig,
+      servers
+    };
+  });
+
   app.post("/r/:slug/reservations", async (req, reply) => {
     const { slug } = req.params as { slug: string };
     const input = z.object({

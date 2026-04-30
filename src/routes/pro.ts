@@ -169,6 +169,15 @@ export async function proRoutes(app: FastifyInstance) {
       where: { id: me.restaurantId },
       include: { openingHours: { orderBy: [{ dayOfWeek: "asc" }, { openMin: "asc" }] } },
     });
+    
+    if (restaurant) {
+      const configRaw = await prisma.$queryRawUnsafe<any[]>(
+        `SELECT "googleReviewLink", "reviewVoucherConfig" FROM "Restaurant" WHERE id = $1`, me.restaurantId
+      );
+      (restaurant as any).googleReviewLink = configRaw[0]?.googleReviewLink || null;
+      (restaurant as any).reviewVoucherConfig = configRaw[0]?.reviewVoucherConfig || null;
+    }
+    
     return { userId: me.userId, restaurant };
   });
 
@@ -198,6 +207,8 @@ export async function proRoutes(app: FastifyInstance) {
       tipsEnabled: z.boolean().optional(),
       serviceCallEnabled: z.boolean().optional(),
       reviewsEnabled: z.boolean().optional(),
+      googleReviewLink: z.string().optional().nullable(),
+      reviewVoucherConfig: z.any().optional(),
       openingHours: z.array(z.object({
         dayOfWeek: z.number().int().min(0).max(6),
         openMin: z.number().int().min(0).max(1440),
@@ -206,7 +217,7 @@ export async function proRoutes(app: FastifyInstance) {
       })).optional(),
     }).parse(req.body);
 
-    const { openingHours, ...restData } = body;
+    const { openingHours, googleReviewLink, reviewVoucherConfig, ...restData } = body;
 
     if (restData.slug) {
       const taken = await prisma.restaurant.findFirst({
@@ -218,6 +229,14 @@ export async function proRoutes(app: FastifyInstance) {
     const ops: any[] = [
       prisma.restaurant.update({ where: { id: me.restaurantId }, data: restData }),
     ];
+    
+    // Update review campaign fields if provided (outside of Prisma typed schema)
+    if (googleReviewLink !== undefined) {
+      ops.push(prisma.$executeRawUnsafe(`UPDATE "Restaurant" SET "googleReviewLink" = $1 WHERE id = $2`, googleReviewLink, me.restaurantId));
+    }
+    if (reviewVoucherConfig !== undefined) {
+      ops.push(prisma.$executeRawUnsafe(`UPDATE "Restaurant" SET "reviewVoucherConfig" = $1::jsonb WHERE id = $2`, JSON.stringify(reviewVoucherConfig || {}), me.restaurantId));
+    }
     if (openingHours !== undefined) {
       ops.push(prisma.openingHour.deleteMany({ where: { restaurantId: me.restaurantId } }));
       if (openingHours.length > 0) {
