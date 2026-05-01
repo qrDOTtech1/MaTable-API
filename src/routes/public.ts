@@ -7,6 +7,8 @@ import { sendEmail, reservationConfirmationHtml, canSendEmail } from "../email.j
 import { getGlobalIaConfig } from "../globalIaConfig.js";
 import { setupSSE, ollamaCloudChatStream } from "./ai.js";
 import { hasApp } from "../appGating.js";
+import { getStripeForRestaurant } from "./stripe.js";
+import { env } from "../env.js";
 
 export async function publicRoutes(app: FastifyInstance) {
   /* ── List all restaurants (for sitemap, public discovery) ── */
@@ -369,6 +371,54 @@ Ne renvoie STRICTEMENT rien d'autre que ce JSON (pas de bloc Markdown \`\`\`json
       send({ type: "error", message: err.message || "Unknown error" });
       close();
     }
+  });
+
+  // ---------------------------------------------------------------------------
+  // POST /api/r/:slug/tip — Pourboire public via Stripe Checkout (Apple Pay / Google Pay)
+  // Called from the review page after QR code scan — no auth required
+  // ---------------------------------------------------------------------------
+  app.post("/r/:slug/tip", async (req, reply) => {
+    const { slug } = req.params as { slug: string };
+    const body = z.object({
+      amountCents: z.number().int().min(100).max(50000), // 1€ min, 500€ max
+      serverName: z.string().min(1),
+      serverId: z.string().optional(),
+    }).parse(req.body);
+
+    const restaurant = await prisma.restaurant.findUnique({
+      where: { slug },
+      select: { id: true, name: true },
+    });
+    if (!restaurant) return reply.code(404).send({ error: "restaurant_not_found" });
+
+    const { stripe } = await getStripeForRestaurant(restaurant.id);
+    if (!stripe) return reply.code(503).send({ error: "stripe_not_configured" });
+
+    const session = await stripe.checkout.sessions.create({
+      mode: "payment",
+      line_items: [{
+        quantity: 1,
+        price_data: {
+          currency: "eur",
+          product_data: {
+            name: `Pourboire pour ${body.serverName}`,
+            description: `${restaurant.name}`,
+          },
+          unit_amount: body.amountCents,
+        },
+      }],
+      success_url: `${env.PUBLIC_WEB_URL}/r/${slug}/review?tip=success&amount=${body.amountCents}`,
+      cancel_url: `${env.PUBLIC_WEB_URL}/r/${slug}/review?tip=cancel`,
+      metadata: {
+        type: "tip",
+        restaurantId: restaurant.id,
+        serverId: body.serverId ?? "",
+        serverName: body.serverName,
+        slug,
+      },
+    });
+
+    return { url: session.url };
   });
 
   app.post("/r/:slug/reservations", async (req, reply) => {

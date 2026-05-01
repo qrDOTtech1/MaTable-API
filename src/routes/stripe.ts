@@ -19,7 +19,7 @@ function getStripeInstance(secretKey: string): Stripe {
 }
 
 // Get Stripe keys for a restaurant (per-restaurant first, then global fallback)
-async function getStripeForRestaurant(restaurantId: string): Promise<{
+export async function getStripeForRestaurant(restaurantId: string): Promise<{
   stripe: Stripe | null;
   webhookSecret: string | null;
 }> {
