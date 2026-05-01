@@ -4,6 +4,8 @@ import { prisma } from "../db.js";
 import { requireSessionToken } from "../auth.js";
 import { emitToRestaurant } from "../realtime.js";
 import { sendEmail, reservationConfirmationHtml, canSendEmail } from "../email.js";
+import { getGlobalIaConfig } from "../globalIaConfig.js";
+import { setupSSE, ollamaCloudChatStream } from "./ai.js";
 
 export async function publicRoutes(app: FastifyInstance) {
   /* ── List all restaurants (for sitemap, public discovery) ── */
@@ -288,6 +290,64 @@ export async function publicRoutes(app: FastifyInstance) {
       reviewVoucherConfig,
       servers
     };
+  });
+
+  // ---------------------------------------------------------------------------
+  // POST /api/ia/review-draft — Générateur d'avis Google IA (Public, no auth)
+  // Called by the client review page (/r/[slug]/review) via SSE streaming
+  // ---------------------------------------------------------------------------
+  app.post("/ia/review-draft", async (req, reply) => {
+    const body = z.object({
+      restaurantId: z.string().min(1),
+      serverName: z.string().min(1),
+      rating: z.number().int().min(1).max(5),
+      answers: z.array(z.string()).max(10),
+    }).parse(req.body);
+
+    // Setup SSE to keep connection alive on Railway (railway kills silent conns after 60s)
+    const { send, close } = setupSSE(reply);
+
+    try {
+      const p = `Tu es un rédacteur d'avis Google parfait et authentique.
+Un client vient de manger dans notre restaurant.
+Voici le contexte :
+- Note donnée : ${body.rating}/5
+- Serveur qui s'est occupé de lui : ${body.serverName}
+- Ses réponses aux questions sur son expérience : ${body.answers.join(" | ")}
+
+Génère 2 versions courtes, naturelles et différentes d'un avis Google basé sur ce contexte.
+L'avis doit faire entre 20 et 50 mots maximum. Il doit mentionner le nom du serveur.
+Ne renvoie STRICTEMENT rien d'autre que ce JSON (pas de bloc Markdown \`\`\`json):
+{
+  "version1": "Texte du premier avis",
+  "version2": "Texte du deuxième avis"
+}`;
+
+      const iaConfig = await getGlobalIaConfig();
+      if (!iaConfig.ollamaApiKey) throw new Error("No API Key configured globally");
+
+      const fullOutput = await ollamaCloudChatStream(
+        iaConfig.ollamaApiKey,
+        iaConfig.ollamaLangModel || "llama3.3",
+        [{ role: "user", content: p }],
+        (chunk) => { send({ type: "chunk", text: chunk }); },
+      );
+
+      // Clean the output
+      const cleanJson = fullOutput.replace(/```json/g, "").replace(/```/g, "").trim();
+      const result = JSON.parse(cleanJson);
+
+      send({
+        type: "done",
+        version1: result.version1,
+        version2: result.version2,
+      });
+      close();
+    } catch (err: any) {
+      console.error("[IA] review-draft error:", err);
+      send({ type: "error", message: err.message || "Unknown error" });
+      close();
+    }
   });
 
   app.post("/r/:slug/reservations", async (req, reply) => {

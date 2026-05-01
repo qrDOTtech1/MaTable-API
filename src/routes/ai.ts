@@ -101,7 +101,7 @@ async function ollamaCloudChat(
  *
  * `thinking` = chain-of-thought (ignored), `content` = actual output text.
  */
-async function ollamaCloudChatStream(
+export async function ollamaCloudChatStream(
   apiKey: string,
   model: string,
   messages: OllamaMsg[],
@@ -208,7 +208,7 @@ async function ollamaCloudChatStream(
  * - reply.hijack() tells Fastify to back off entirely
  * - We write CORS headers manually since Fastify hooks won't run
  */
-function setupSSE(reply: import("fastify").FastifyReply) {
+export function setupSSE(reply: import("fastify").FastifyReply) {
   const origin = reply.request.headers.origin || "*";
 
   // hijack = "Fastify, stop managing this response. I'll handle it."
@@ -278,67 +278,6 @@ export async function aiRoutes(app: FastifyInstance) {
     if (req.url?.includes("/ia/")) {
       (req.socket as any).setTimeout?.(300_000); // 5min socket
       reply.raw.setTimeout?.(300_000);            // 5min HTTP response
-    }
-  });
-
-  // ─────────────────────────────────────────────────────────────────────────────
-  // POST /ia/review-draft — Générateur d'avis (Client / Public via QR Code)
-  // ─────────────────────────────────────────────────────────────────────────────
-  app.post("/ia/review-draft", async (req, reply) => {
-    // Note: Public endpoint, no auth required, just rate limited by default Fastify limits.
-    const body = z.object({
-      restaurantId: z.string().min(1),
-      serverName: z.string().min(1),
-      rating: z.number().int().min(1).max(5),
-      answers: z.array(z.string()).max(10)
-    }).parse(req.body);
-
-    // Setup SSE to keep connection alive on Railway (railway kills silent conns after 60s)
-    const { send, close } = setupSSE(reply);
-
-    try {
-      const p = `Tu es un rédacteur d'avis Google parfait et authentique.
-Un client vient de manger dans notre restaurant.
-Voici le contexte :
-- Note donnée : ${body.rating}/5
-- Serveur qui s'est occupé de lui : ${body.serverName}
-- Ses réponses aux questions sur son expérience : ${body.answers.join(" | ")}
-
-Génère 2 versions courtes, naturelles et différentes d'un avis Google basé sur ce contexte.
-L'avis doit faire entre 20 et 50 mots maximum. Il doit mentionner le nom du serveur.
-Ne renvoie STRICTEMENT rien d'autre que ce JSON (pas de bloc Markdown \`\`\`json):
-{
-  "version1": "Texte du premier avis",
-  "version2": "Texte du deuxième avis"
-}`;
-
-      let output = "";
-      
-      const iaConfig = await getGlobalIaConfig();
-      if (!iaConfig.ollamaApiKey) throw new Error("No API Key configured globally");
-
-      const fullOutput = await ollamaCloudChatStream(
-        iaConfig.ollamaApiKey,
-        iaConfig.ollamaLangModel || "llama3.3",
-        [{ role: "user", content: p }],
-        (chunk) => { send({ type: "chunk", text: chunk }); }
-      );
-      output = fullOutput;
-
-      // Clean the output
-      const cleanJson = output.replace(/```json/g, "").replace(/```/g, "").trim();
-      const result = JSON.parse(cleanJson);
-
-      send({
-        type: "done",
-        version1: result.version1,
-        version2: result.version2
-      });
-      close();
-    } catch (err: any) {
-      console.error("[IA] review-draft error:", err);
-      send({ type: "error", message: err.message || "Unknown error" });
-      close();
     }
   });
 
