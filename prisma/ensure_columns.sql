@@ -269,3 +269,28 @@ CREATE TABLE IF NOT EXISTS "ShoppingHistory" (
   CONSTRAINT "ShoppingHistory_pkey" PRIMARY KEY (id)
 );
 CREATE INDEX IF NOT EXISTS "ShoppingHistory_restaurantId_idx" ON "ShoppingHistory"("restaurantId", "createdAt" DESC);
+
+-- CustomerReview: generated reviews by customers via AI
+CREATE TABLE IF NOT EXISTS "CustomerReview" (
+  id TEXT NOT NULL,
+  "restaurantId" TEXT NOT NULL,
+  "serverName" TEXT,
+  "ratings" JSONB NOT NULL DEFAULT '{}'::jsonb,
+  "reviewText" TEXT,
+  "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT "CustomerReview_pkey" PRIMARY KEY (id)
+);
+CREATE INDEX IF NOT EXISTS "CustomerReview_restaurantId_idx" ON "CustomerReview"("restaurantId", "createdAt" DESC);
+
+-- ServerTip: tips left by customers via review flow
+CREATE TABLE IF NOT EXISTS "ServerTip" (
+  id TEXT NOT NULL,
+  "restaurantId" TEXT NOT NULL,
+  "serverId" TEXT,
+  "serverName" TEXT NOT NULL,
+  "amountCents" INTEGER NOT NULL,
+  "stripeSessionId" TEXT,
+  "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT "ServerTip_pkey" PRIMARY KEY (id)
+);
+CREATE INDEX IF NOT EXISTS "ServerTip_restaurantId_idx" ON "ServerTip"("restaurantId", "createdAt" DESC);

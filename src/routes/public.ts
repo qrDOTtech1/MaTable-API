@@ -9,6 +9,7 @@ import { setupSSE, ollamaCloudChatStream } from "./ai.js";
 import { hasApp } from "../appGating.js";
 import { getStripeForRestaurant } from "./stripe.js";
 import { env } from "../env.js";
+import { randomUUID } from "crypto";
 
 export async function publicRoutes(app: FastifyInstance) {
   /* ── List all restaurants (for sitemap, public discovery) ── */
@@ -360,6 +361,17 @@ La cuisson de votre viande était-elle à votre goût ? | Parfaite | Un peu trop
         [{ role: "user", content: prompt }],
         (chunk) => { send({ type: "chunk", text: chunk }); },
       );
+
+      if (isFinalTurn) {
+        try {
+          await prisma.$executeRawUnsafe(
+            `INSERT INTO "CustomerReview" (id, "restaurantId", "serverName", ratings, "reviewText", "createdAt") VALUES ($1, $2, $3, $4::jsonb, $5, NOW())`,
+            randomUUID(), body.restaurantId, body.serverName, JSON.stringify(body.ratings), fullOutput
+          );
+        } catch (dbErr) {
+          console.error("Error saving CustomerReview:", dbErr);
+        }
+      }
 
       send({ type: "done", text: fullOutput });
       close();

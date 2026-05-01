@@ -5,6 +5,7 @@ import { prisma } from "../db.js";
 import { requireSessionToken } from "../auth.js";
 import { env } from "../env.js";
 import { emitToRestaurant } from "../realtime.js";
+import { randomUUID } from "crypto";
 
 // Cache Stripe instances per restaurant (key = secretKey)
 const stripeCache = new Map<string, Stripe>();
@@ -178,11 +179,25 @@ export async function stripeRoutes(app: FastifyInstance) {
 
       if (event.type === "checkout.session.completed") {
         const s = event.data.object as Stripe.Checkout.Session;
+        const metadataType = s.metadata?.type;
         const sessionId = s.metadata?.sessionId;
         const tableId = s.metadata?.tableId;
         const restaurantId = s.metadata?.restaurantId;
 
-        if (sessionId && tableId) {
+        if (metadataType === "tip" && restaurantId) {
+          const amountCents = s.amount_total || 0;
+          const serverId = s.metadata?.serverId || null;
+          const serverName = s.metadata?.serverName || "L'équipe";
+          
+          try {
+            await prisma.$executeRawUnsafe(
+              `INSERT INTO "ServerTip" (id, "restaurantId", "serverId", "serverName", "amountCents", "stripeSessionId", "createdAt") VALUES ($1, $2, $3, $4, $5, $6, NOW())`,
+              randomUUID(), restaurantId, serverId, serverName, amountCents, s.id
+            );
+          } catch (dbErr) {
+            console.error("Error saving ServerTip:", dbErr);
+          }
+        } else if (sessionId && tableId) {
           await prisma.order.updateMany({
             where: { sessionId, status: { notIn: ["PAID", "CANCELLED"] } },
             data: { status: "PAID" },

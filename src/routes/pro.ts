@@ -846,6 +846,20 @@ export async function proRoutes(app: FastifyInstance) {
   });
 
   // ---------------------------------------------------------------------------
+  // GET /api/pro/reviews/customers — Avis & Pourboires laissés via Campagne IA
+  // ---------------------------------------------------------------------------
+  app.get("/reviews/customers", async (req, reply) => {
+    const me = await requirePro(req, reply);
+    
+    const [reviews, tips] = await Promise.all([
+      prisma.$queryRawUnsafe<any[]>(`SELECT * FROM "CustomerReview" WHERE "restaurantId" = $1 ORDER BY "createdAt" DESC LIMIT 100`, me.restaurantId),
+      prisma.$queryRawUnsafe<any[]>(`SELECT * FROM "ServerTip" WHERE "restaurantId" = $1 ORDER BY "createdAt" DESC LIMIT 100`, me.restaurantId)
+    ]);
+
+    return { reviews, tips };
+  });
+
+  // ---------------------------------------------------------------------------
   // Service calls
   // ---------------------------------------------------------------------------
   app.get("/service-calls", async (req, reply) => {
