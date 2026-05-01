@@ -19,6 +19,7 @@ Format : [Keep a Changelog](https://keepachangelog.com/fr/1.0.0/)
 ### Corrigé
 - **Schéma Prisma** : Nettoyage des modèles dupliqués qui bloquaient le déploiement.
 - **Dépendances** : Ajout de `jsonwebtoken` manquant.
+- **Avis Google IA** : l'endpoint `POST /api/ia/review-draft` tolère les réponses non strictement JSON des modèles IA et renvoie toujours 2 propositions exploitables.
 
 ### Ajouté — Temps Réel (Client)
 - **Session Rooms** : Salons Socket.io par `sessionId` pour des notifications ciblées.

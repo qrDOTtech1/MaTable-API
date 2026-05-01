@@ -333,9 +333,29 @@ Ne renvoie STRICTEMENT rien d'autre que ce JSON (pas de bloc Markdown \`\`\`json
         (chunk) => { send({ type: "chunk", text: chunk }); },
       );
 
-      // Clean the output
+      // Clean and parse the output. Some models wrap JSON in prose despite the prompt.
       const cleanJson = fullOutput.replace(/```json/g, "").replace(/```/g, "").trim();
-      const result = JSON.parse(cleanJson);
+      const jsonStart = cleanJson.indexOf("{");
+      const jsonEnd = cleanJson.lastIndexOf("}");
+      const jsonCandidate = jsonStart >= 0 && jsonEnd > jsonStart
+        ? cleanJson.slice(jsonStart, jsonEnd + 1)
+        : cleanJson;
+
+      let result: { version1?: string; version2?: string };
+      try {
+        result = JSON.parse(jsonCandidate);
+      } catch {
+        const base = `Super expérience, accueil ${body.answers[0]?.toLowerCase() || "très agréable"}, plats ${body.answers[1]?.toLowerCase() || "très bons"} et ambiance ${body.answers[2]?.toLowerCase() || "réussie"}. Merci à ${body.serverName} pour le service.`;
+        result = {
+          version1: base,
+          version2: `Très bon moment dans ce restaurant. Le service de ${body.serverName} était attentionné, les plats étaient ${body.answers[1]?.toLowerCase() || "très bons"} et l'ambiance ${body.answers[2]?.toLowerCase() || "agréable"}. Je recommande.`,
+        };
+      }
+
+      if (!result.version1 || !result.version2) {
+        result.version1 ||= `Très bonne expérience, merci à ${body.serverName} pour le service. Les plats étaient ${body.answers[1]?.toLowerCase() || "très bons"} et l'accueil ${body.answers[0]?.toLowerCase() || "agréable"}.`;
+        result.version2 ||= `Nous avons passé un très bon moment. Service ${body.answers[0]?.toLowerCase() || "agréable"} avec ${body.serverName}, cuisine ${body.answers[1]?.toLowerCase() || "savoureuse"} et ambiance ${body.answers[2]?.toLowerCase() || "réussie"}.`;
+      }
 
       send({
         type: "done",
