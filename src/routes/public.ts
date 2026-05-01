@@ -296,6 +296,81 @@ export async function publicRoutes(app: FastifyInstance) {
   });
 
   // ---------------------------------------------------------------------------
+  // POST /api/ia/review-chat — Chat conversationnel IA pour récolter des avis
+  // ---------------------------------------------------------------------------
+  app.post("/ia/review-chat", async (req, reply) => {
+    const body = z.object({
+      restaurantId: z.string().min(1),
+      serverName: z.string().min(1),
+      ratings: z.object({
+        food: z.number(),
+        service: z.number(),
+        atmosphere: z.number(),
+        value: z.number()
+      }),
+      history: z.array(z.object({
+        role: z.enum(["ai", "user"]),
+        content: z.string()
+      }))
+    }).parse(req.body);
+
+    const { send, close } = setupSSE(reply);
+
+    try {
+      const iaConfig = await getGlobalIaConfig();
+      if (!iaConfig.ollamaApiKey) throw new Error("No API Key configured globally");
+
+      const isFinalTurn = body.history.filter(m => m.role === "user").length >= 2;
+
+      let prompt = `Tu es l'assistant virtuel parfait d'un restaurant, chargé de récolter les avis clients de manière chaleureuse.
+Notes du client (sur 5) : Cuisine: ${body.ratings.food}, Service: ${body.ratings.service}, Ambiance: ${body.ratings.atmosphere}, Qualité/Prix: ${body.ratings.value}.
+Serveur: ${body.serverName}.
+
+`;
+      if (body.history.length > 0) {
+        prompt += "Historique:\n";
+        body.history.forEach(m => {
+          prompt += `${m.role === 'ai' ? 'Toi' : 'Client'}: ${m.content}\n`;
+        });
+      }
+
+      if (isFinalTurn) {
+        prompt += `
+INSTRUCTION : Le client a répondu à tes questions. Tu dois maintenant GÉNÉRER L'AVIS GOOGLE FINAL.
+L'avis doit être naturel, mentionner le prénom du serveur, et refléter les notes et les réponses du client.
+Ne renvoie STRICTEMENT rien d'autre que ce JSON (pas de bloc markdown) :
+{
+  "version1": "Texte court de l'avis 1",
+  "version2": "Texte court de l'avis 2"
+}`;
+      } else {
+        prompt += `
+INSTRUCTION : Pose UNE SEULE question ciblée et très courte (maximum 15 mots) sur un aspect précis du repas, en fonction des notes données. N'utilise pas de politesse excessive. 
+Propose ensuite exactement 3 suggestions de réponses courtes séparées par le caractère " | ".
+Format attendu STRICTEMENT :
+<Ta question> | <Choix 1> | <Choix 2> | <Choix 3>
+
+Exemple:
+La cuisson de votre viande était-elle à votre goût ? | Parfaite | Un peu trop cuite | Saignante à souhait`;
+      }
+
+      const fullOutput = await ollamaCloudChatStream(
+        iaConfig.ollamaApiKey,
+        iaConfig.ollamaLangModel || "llama3.3",
+        [{ role: "user", content: prompt }],
+        (chunk) => { send({ type: "chunk", text: chunk }); },
+      );
+
+      send({ type: "done", text: fullOutput });
+      close();
+    } catch (err: any) {
+      console.error("[IA] review-chat error:", err);
+      send({ type: "error", message: err.message || "Unknown error" });
+      close();
+    }
+  });
+
+  // ---------------------------------------------------------------------------
   // POST /api/ia/review-draft — Générateur d'avis Google IA (Public, no auth)
   // Called by the client review page (/r/[slug]/review) via SSE streaming
   // ---------------------------------------------------------------------------
