@@ -5,6 +5,7 @@ import crypto from "crypto";
 import { prisma } from "../db.js";
 import { requirePro } from "../auth.js";
 import { emitToRestaurant, emitToSession } from "../realtime.js";
+import { getEnabledApps } from "../appGating.js";
 
 const ALLERGENS = [
   "GLUTEN","CRUSTACEANS","EGGS","FISH","PEANUTS","SOYBEANS","MILK","NUTS",
@@ -177,8 +178,10 @@ export async function proRoutes(app: FastifyInstance) {
       (restaurant as any).googleReviewLink = configRaw[0]?.googleReviewLink || null;
       (restaurant as any).reviewVoucherConfig = configRaw[0]?.reviewVoucherConfig || null;
     }
+
+    const enabledApps = await getEnabledApps(me.restaurantId);
     
-    return { userId: me.userId, restaurant };
+    return { userId: me.userId, restaurant, enabledApps: [...enabledApps] };
   });
 
   // ---------------------------------------------------------------------------

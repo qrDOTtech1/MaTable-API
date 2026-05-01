@@ -6,6 +6,7 @@ import { emitToRestaurant } from "../realtime.js";
 import { sendEmail, reservationConfirmationHtml, canSendEmail } from "../email.js";
 import { getGlobalIaConfig } from "../globalIaConfig.js";
 import { setupSSE, ollamaCloudChatStream } from "./ai.js";
+import { hasApp } from "../appGating.js";
 
 export async function publicRoutes(app: FastifyInstance) {
   /* ── List all restaurants (for sitemap, public discovery) ── */
@@ -387,6 +388,12 @@ Ne renvoie STRICTEMENT rien d'autre que ce JSON (pas de bloc Markdown \`\`\`json
     });
     if (!restaurant) {
       return reply.code(404).send({ error: "restaurant_not_found" });
+    }
+
+    // Check if reservations app is enabled
+    const canReserve = await hasApp(restaurant.id, "reservations");
+    if (!canReserve) {
+      return reply.code(403).send({ error: "APP_NOT_ENABLED", app: "reservations" });
     }
 
     const [hours, mins] = input.time.split(":").map(Number);

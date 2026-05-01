@@ -30,6 +30,28 @@ ALTER TABLE "Restaurant" ADD COLUMN IF NOT EXISTS "googleReviewLink" TEXT;
 ALTER TABLE "Restaurant" ADD COLUMN IF NOT EXISTS "reviewVoucherConfig" JSONB;
 ALTER TABLE "Restaurant" ADD COLUMN IF NOT EXISTS "subscriptionStartedAt" TIMESTAMP(3);
 ALTER TABLE "Restaurant" ADD COLUMN IF NOT EXISTS "subscriptionExpiresAt" TIMESTAMP(3);
+
+-- enabledApps: modular app system — JSON array of app IDs
+-- Default: ["reviews"] (base app, always included for new restaurants)
+ALTER TABLE "Restaurant" ADD COLUMN IF NOT EXISTS "enabledApps" JSONB NOT NULL DEFAULT '["reviews"]'::jsonb;
+
+-- Migrate existing PRO_IA restaurants: give them all apps
+UPDATE "Restaurant"
+SET "enabledApps" = '["reviews","reservations","orders","nova_ia","nova_stock","nova_contab","nova_finance"]'::jsonb
+WHERE subscription = 'PRO_IA' AND "enabledApps" = '["reviews"]'::jsonb;
+
+-- Migrate existing PRO restaurants: reviews + reservations + orders
+UPDATE "Restaurant"
+SET "enabledApps" = '["reviews","reservations","orders"]'::jsonb
+WHERE subscription = 'PRO' AND "enabledApps" = '["reviews"]'::jsonb;
+
+-- Migrate STARTER restaurants that had features enabled
+UPDATE "Restaurant"
+SET "enabledApps" = jsonb_build_array('reviews') ||
+  CASE WHEN "acceptReservations" = true THEN '["reservations"]'::jsonb ELSE '[]'::jsonb END ||
+  CASE WHEN "serviceCallEnabled" = true THEN '["orders"]'::jsonb ELSE '[]'::jsonb END
+WHERE subscription = 'STARTER' AND "enabledApps" = '["reviews"]'::jsonb
+  AND ("acceptReservations" = true OR "serviceCallEnabled" = true);
 ALTER TABLE "Restaurant" ADD COLUMN IF NOT EXISTS slug TEXT;
 ALTER TABLE "Restaurant" ADD COLUMN IF NOT EXISTS description TEXT;
 ALTER TABLE "Restaurant" ADD COLUMN IF NOT EXISTS address TEXT;

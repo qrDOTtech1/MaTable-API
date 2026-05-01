@@ -14,6 +14,7 @@
 import { requirePro } from "../auth.js";
 import { prisma } from "../db.js";
 import { getGlobalIaConfig } from "../globalIaConfig.js";
+import { hasApp, type AppId } from "../appGating.js";
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { randomUUID } from "crypto";
@@ -270,6 +271,15 @@ async function saveAiHistory(
   }
 }
 
+// ── Helper: require an app to be enabled ──────────────────────────────────────
+async function requireIaApp(restaurantId: string, app: AppId, reply: import("fastify").FastifyReply): Promise<void> {
+  const enabled = await hasApp(restaurantId, app);
+  if (!enabled) {
+    reply.code(403).send({ error: "APP_NOT_ENABLED", app, message: `L'application "${app}" n'est pas activee pour ce restaurant.` });
+    throw reply;
+  }
+}
+
 // ── Routes ────────────────────────────────────────────────────────────────────
 export async function aiRoutes(app: FastifyInstance) {
   // Timeout global pour toutes les routes IA (vision = jusqu'à 3min)
@@ -286,15 +296,7 @@ export async function aiRoutes(app: FastifyInstance) {
   // ─────────────────────────────────────────────────────────────────────────────
   app.post("/ia/chat", async (req, reply) => {
     const me = await requirePro(req, reply);
-
-    const restaurant = await prisma.restaurant.findUnique({
-      where: { id: me.restaurantId },
-      select: { subscription: true },
-    });
-
-    if (!restaurant || restaurant.subscription !== "PRO_IA") {
-      return reply.code(403).send({ error: "IA_NOT_SUBSCRIBED", message: "Abonnement PRO_IA requis." });
-    }
+    await requireIaApp(me.restaurantId, "nova_ia", reply);
 
     const iaConfig = await getGlobalIaConfig();
     if (!iaConfig.ollamaApiKey) {
@@ -322,15 +324,7 @@ export async function aiRoutes(app: FastifyInstance) {
   // ─────────────────────────────────────────────────────────────────────────────
   app.post("/ia/magic-scan", async (req, reply) => {
     const me = await requirePro(req, reply);
-
-    const restaurant = await prisma.restaurant.findUnique({
-      where: { id: me.restaurantId },
-      select: { subscription: true },
-    });
-
-    if (!restaurant || restaurant.subscription !== "PRO_IA") {
-      return reply.code(403).send({ error: "IA_NOT_SUBSCRIBED", message: "Abonnement PRO_IA requis." });
-    }
+    await requireIaApp(me.restaurantId, "nova_ia", reply);
 
     const iaConfig = await getGlobalIaConfig();
     if (!iaConfig.ollamaApiKey) {
@@ -384,14 +378,13 @@ Analyse ce plat.`;
   app.post("/ia/stock-analysis/stream", async (req, reply) => {
     // --- Validate BEFORE starting SSE ---
     const me = await requirePro(req, reply);
+    await requireIaApp(me.restaurantId, "nova_stock", reply);
 
     const restaurant = await prisma.restaurant.findUnique({
       where: { id: me.restaurantId },
-      select: { subscription: true, name: true },
+      select: { name: true },
     });
-    if (!restaurant || restaurant.subscription !== "PRO_IA") {
-      return reply.code(403).send({ error: "IA_NOT_SUBSCRIBED" });
-    }
+    if (!restaurant) return reply.code(404).send({ error: "NOT_FOUND" });
 
     const iaConfig = await getGlobalIaConfig();
     if (!iaConfig.ollamaApiKey) {
@@ -563,14 +556,13 @@ Regles OBLIGATOIRES:
   // ─────────────────────────────────────────────────────────────────────────────
   app.post("/ia/stock-analysis", async (req, reply) => {
     const me = await requirePro(req, reply);
+    await requireIaApp(me.restaurantId, "nova_stock", reply);
 
     const restaurant = await prisma.restaurant.findUnique({
       where: { id: me.restaurantId },
-      select: { subscription: true, name: true },
+      select: { name: true },
     });
-    if (!restaurant || restaurant.subscription !== "PRO_IA") {
-      return reply.code(403).send({ error: "IA_NOT_SUBSCRIBED" });
-    }
+    if (!restaurant) return reply.code(404).send({ error: "NOT_FOUND" });
 
     const iaConfig = await getGlobalIaConfig();
     if (!iaConfig.ollamaApiKey) {
@@ -742,14 +734,13 @@ Regles OBLIGATOIRES:
   // ─────────────────────────────────────────────────────────────────────────────
   app.post("/ia/stock-items", async (req, reply) => {
     const me = await requirePro(req, reply);
+    await requireIaApp(me.restaurantId, "nova_stock", reply);
 
     const restaurant = await prisma.restaurant.findUnique({
       where: { id: me.restaurantId },
-      select: { subscription: true, name: true },
+      select: { name: true },
     });
-    if (!restaurant || restaurant.subscription !== "PRO_IA") {
-      return reply.code(403).send({ error: "IA_NOT_SUBSCRIBED" });
-    }
+    if (!restaurant) return reply.code(404).send({ error: "NOT_FOUND" });
 
     const iaConfig = await getGlobalIaConfig();
     if (!iaConfig.ollamaApiKey) {
@@ -835,16 +826,8 @@ Retourne UNIQUEMENT un JSON valide (sans markdown):
   app.post("/ia/stock-items/stream", async (req, reply) => {
     // --- Validate BEFORE starting SSE (normal HTTP errors with CORS) ---
     const me = await requirePro(req, reply);
+    await requireIaApp(me.restaurantId, "nova_stock", reply);
     app.log.info(`[stock-items/stream] user=${me.userId} restaurant=${me.restaurantId}`);
-
-    const restaurant = await prisma.restaurant.findUnique({
-      where: { id: me.restaurantId },
-      select: { subscription: true, name: true },
-    });
-    if (!restaurant || restaurant.subscription !== "PRO_IA") {
-      app.log.warn(`[stock-items/stream] subscription=${restaurant?.subscription} — rejected`);
-      return reply.code(403).send({ error: "IA_NOT_SUBSCRIBED" });
-    }
 
     const iaConfig = await getGlobalIaConfig();
     if (!iaConfig.ollamaApiKey) {
@@ -983,14 +966,13 @@ TOUT EN FRANÇAIS.`;
   // ─────────────────────────────────────────────────────────────────────────────
   app.post("/ia/menu-generate", async (req, reply) => {
     const me = await requirePro(req, reply);
+    await requireIaApp(me.restaurantId, "nova_ia", reply);
 
     const restaurant = await prisma.restaurant.findUnique({
       where: { id: me.restaurantId },
-      select: { subscription: true, name: true },
+      select: { name: true },
     });
-    if (!restaurant || restaurant.subscription !== "PRO_IA") {
-      return reply.code(403).send({ error: "IA_NOT_SUBSCRIBED" });
-    }
+    if (!restaurant) return reply.code(404).send({ error: "NOT_FOUND" });
 
     const iaConfig = await getGlobalIaConfig();
     if (!iaConfig.ollamaApiKey) {
@@ -1141,14 +1123,13 @@ Sois creatif, les descriptions doivent donner envie. Utilise des ingredients de 
   app.post("/ia/menu-generate/stream", async (req, reply) => {
     // --- Validate BEFORE starting SSE ---
     const me = await requirePro(req, reply);
+    await requireIaApp(me.restaurantId, "nova_ia", reply);
 
     const restaurant = await prisma.restaurant.findUnique({
       where: { id: me.restaurantId },
-      select: { subscription: true, name: true },
+      select: { name: true },
     });
-    if (!restaurant || restaurant.subscription !== "PRO_IA") {
-      return reply.code(403).send({ error: "IA_NOT_SUBSCRIBED" });
-    }
+    if (!restaurant) return reply.code(404).send({ error: "NOT_FOUND" });
 
     const iaConfig = await getGlobalIaConfig();
     if (!iaConfig.ollamaApiKey) {
@@ -1318,14 +1299,13 @@ Sois creatif, les descriptions doivent donner envie. Utilise des ingredients de 
   // ─────────────────────────────────────────────────────────────────────────────
   app.post("/ia/menu-improve-pairings", async (req, reply) => {
     const me = await requirePro(req, reply);
+    await requireIaApp(me.restaurantId, "nova_ia", reply);
 
     const restaurant = await prisma.restaurant.findUnique({
       where: { id: me.restaurantId },
-      select: { subscription: true, name: true },
+      select: { name: true },
     });
-    if (!restaurant || restaurant.subscription !== "PRO_IA") {
-      return reply.code(403).send({ error: "IA_NOT_SUBSCRIBED" });
-    }
+    if (!restaurant) return reply.code(404).send({ error: "NOT_FOUND" });
 
     const iaConfig = await getGlobalIaConfig();
     if (!iaConfig.ollamaApiKey) {
@@ -1491,14 +1471,13 @@ Réponds UNIQUEMENT en JSON valide avec ce format EXACT:
   // ─────────────────────────────────────────────────────────────────────────────
   app.post("/ia/financial-advice", async (req, reply) => {
     const me = await requirePro(req, reply);
+    await requireIaApp(me.restaurantId, "nova_finance", reply);
 
     const restaurant = await prisma.restaurant.findUnique({
       where: { id: me.restaurantId },
-      select: { subscription: true, name: true },
+      select: { name: true },
     });
-    if (!restaurant || restaurant.subscription !== "PRO_IA") {
-      return reply.code(403).send({ error: "IA_NOT_SUBSCRIBED" });
-    }
+    if (!restaurant) return reply.code(404).send({ error: "NOT_FOUND" });
 
     const iaConfig = await getGlobalIaConfig();
     if (!iaConfig.ollamaApiKey) {
@@ -1676,14 +1655,13 @@ Règles:
   // ─────────────────────────────────────────────────────────────────────────────
   app.post("/ia/novacontab", async (req, reply) => {
     const me = await requirePro(req, reply);
+    await requireIaApp(me.restaurantId, "nova_contab", reply);
 
     const restaurant = await prisma.restaurant.findUnique({
       where: { id: me.restaurantId },
-      select: { subscription: true, name: true },
+      select: { name: true },
     });
-    if (!restaurant || restaurant.subscription !== "PRO_IA") {
-      return reply.code(403).send({ error: "IA_NOT_SUBSCRIBED" });
-    }
+    if (!restaurant) return reply.code(404).send({ error: "NOT_FOUND" });
 
     const iaConfig = await getGlobalIaConfig();
     if (!iaConfig.ollamaApiKey) {
