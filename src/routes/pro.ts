@@ -890,6 +890,109 @@ export async function proRoutes(app: FastifyInstance) {
   });
 
   // ---------------------------------------------------------------------------
+  // GET /api/pro/reviews/stats — Aggregated stats + daily history for radar chart
+  // ---------------------------------------------------------------------------
+  app.get("/reviews/stats", async (req, reply) => {
+    const me = await requirePro(req, reply);
+
+    // All reviews with ratings
+    const reviews = await prisma.$queryRawUnsafe<any[]>(
+      `SELECT ratings, "chatHistory", "serverName", "createdAt"
+       FROM "CustomerReview"
+       WHERE "restaurantId" = $1
+       ORDER BY "createdAt" DESC
+       LIMIT 500`,
+      me.restaurantId
+    );
+
+    // Global averages
+    let totalFood = 0, totalService = 0, totalAtmo = 0, totalValue = 0, count = 0;
+    // Daily buckets: { [YYYY-MM-DD]: { food, service, atmosphere, value, count, reviews[] } }
+    const daily: Record<string, { food: number; service: number; atmosphere: number; value: number; count: number; best: string | null; worst: string | null }> = {};
+
+    for (const r of reviews) {
+      const rat = r.ratings;
+      if (!rat || typeof rat !== "object") continue;
+      const f = Number(rat.food) || 0;
+      const s = Number(rat.service) || 0;
+      const a = Number(rat.atmosphere) || 0;
+      const v = Number(rat.value) || 0;
+      if (!f && !s && !a && !v) continue;
+
+      totalFood += f; totalService += s; totalAtmo += a; totalValue += v; count++;
+
+      const day = new Date(r.createdAt).toISOString().slice(0, 10);
+      if (!daily[day]) daily[day] = { food: 0, service: 0, atmosphere: 0, value: 0, count: 0, best: null, worst: null };
+      daily[day].food += f;
+      daily[day].service += s;
+      daily[day].atmosphere += a;
+      daily[day].value += v;
+      daily[day].count++;
+    }
+
+    const avg = count > 0 ? {
+      food: +(totalFood / count).toFixed(2),
+      service: +(totalService / count).toFixed(2),
+      atmosphere: +(totalAtmo / count).toFixed(2),
+      value: +(totalValue / count).toFixed(2),
+      global: +((totalFood + totalService + totalAtmo + totalValue) / (count * 4)).toFixed(2),
+    } : { food: 0, service: 0, atmosphere: 0, value: 0, global: 0 };
+
+    // Build daily history (last 30 days) with averages + best/worst extraction
+    const history = Object.entries(daily)
+      .sort(([a], [b]) => b.localeCompare(a))
+      .slice(0, 30)
+      .map(([date, d]) => {
+        const dayAvg = {
+          food: +(d.food / d.count).toFixed(2),
+          service: +(d.service / d.count).toFixed(2),
+          atmosphere: +(d.atmosphere / d.count).toFixed(2),
+          value: +(d.value / d.count).toFixed(2),
+        };
+
+        // Find best & worst criteria for that day
+        const criteria = [
+          { key: "Cuisine", val: dayAvg.food },
+          { key: "Service", val: dayAvg.service },
+          { key: "Ambiance", val: dayAvg.atmosphere },
+          { key: "Qualité/Prix", val: dayAvg.value },
+        ];
+        criteria.sort((a, b) => b.val - a.val);
+
+        return {
+          date,
+          count: d.count,
+          avg: dayAvg,
+          best: criteria[0].val > 0 ? `${criteria[0].key} (${criteria[0].val}/5)` : null,
+          worst: criteria[criteria.length - 1].val > 0 ? `${criteria[criteria.length - 1].key} (${criteria[criteria.length - 1].val}/5)` : null,
+        };
+      });
+
+    // Extract today's customer comments for synthesis
+    const today = new Date().toISOString().slice(0, 10);
+    const todayReviews = reviews.filter(r => new Date(r.createdAt).toISOString().slice(0, 10) === today);
+    const todayComments: string[] = [];
+    for (const r of todayReviews) {
+      if (r.chatHistory && Array.isArray(r.chatHistory)) {
+        for (const msg of r.chatHistory) {
+          if (msg.role === "user" && msg.content) todayComments.push(msg.content);
+        }
+      }
+    }
+
+    return {
+      totalReviews: count,
+      avg,
+      history,
+      today: {
+        date: today,
+        count: todayReviews.length,
+        comments: todayComments,
+      },
+    };
+  });
+
+  // ---------------------------------------------------------------------------
   // Service calls
   // ---------------------------------------------------------------------------
   app.get("/service-calls", async (req, reply) => {
