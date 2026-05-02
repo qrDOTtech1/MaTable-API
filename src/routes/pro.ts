@@ -821,9 +821,9 @@ export async function proRoutes(app: FastifyInstance) {
         sha256,
       },
     });
-    const photoUrl = `${process.env.API_URL ?? ""}/api/photo/${photo.id}`;
-    await prisma.server.update({ where: { id }, data: { photoUrl } });
-    return { ok: true, photoUrl };
+    const photoPath = `/api/photo/${photo.id}`;
+    await prisma.server.update({ where: { id }, data: { photoUrl: photoPath } });
+    return { ok: true, photoUrl: photoPath };
   });
 
   app.get("/servers/:id/schedules", async (req, reply) => {
