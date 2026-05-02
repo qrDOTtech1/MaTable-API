@@ -796,6 +796,36 @@ export async function proRoutes(app: FastifyInstance) {
     return { ok: true };
   });
 
+  // ---------------------------------------------------------------------------
+  // Upload server photo
+  // ---------------------------------------------------------------------------
+  app.post("/servers/:id/photo", async (req, reply) => {
+    const me = await requirePro(req, reply);
+    const { id } = req.params as { id: string };
+    const server = await prisma.server.findFirst({ where: { id, restaurantId: me.restaurantId } });
+    if (!server) return reply.code(404).send({ error: "not_found" });
+    const part = await (req as any).file();
+    if (!part) return reply.code(400).send({ error: "missing_file" });
+    if (typeof part.mimetype !== "string" || !part.mimetype.startsWith("image/"))
+      return reply.code(400).send({ error: "invalid_mime" });
+    const buf: Buffer = await part.toBuffer();
+    if (!buf.length) return reply.code(400).send({ error: "empty_file" });
+    const sha256 = crypto.createHash("sha256").update(buf).digest("hex");
+    const photo = await prisma.photo.create({
+      data: {
+        restaurantId: me.restaurantId,
+        mimeType: part.mimetype,
+        bytes: buf,
+        size: buf.length,
+        originalName: part.filename ?? "photo",
+        sha256,
+      },
+    });
+    const photoUrl = `${process.env.API_URL ?? ""}/api/photo/${photo.id}`;
+    await prisma.server.update({ where: { id }, data: { photoUrl } });
+    return { ok: true, photoUrl };
+  });
+
   app.get("/servers/:id/schedules", async (req, reply) => {
     const me = await requirePro(req, reply);
     const { id } = req.params as { id: string };
