@@ -287,6 +287,7 @@ ALTER TABLE "CustomerReview" ADD COLUMN IF NOT EXISTS "contactEmail" TEXT;
 ALTER TABLE "CustomerReview" ADD COLUMN IF NOT EXISTS "contactPhone" TEXT;
 ALTER TABLE "CustomerReview" ADD COLUMN IF NOT EXISTS "voucherClaimed" BOOLEAN NOT NULL DEFAULT false;
 ALTER TABLE "CustomerReview" ADD COLUMN IF NOT EXISTS "voucherCode" TEXT;
+ALTER TABLE "CustomerReview" ADD COLUMN IF NOT EXISTS "chatHistory" JSONB;
 
 -- ServerTip: tips left by customers via review flow
 CREATE TABLE IF NOT EXISTS "ServerTip" (

@@ -365,8 +365,8 @@ La cuisson de votre viande était-elle à votre goût ? | Parfaite | Un peu trop
       if (isFinalTurn) {
         try {
           await prisma.$executeRawUnsafe(
-            `INSERT INTO "CustomerReview" (id, "restaurantId", "serverName", ratings, "reviewText", "createdAt") VALUES ($1, $2, $3, $4::jsonb, $5, NOW())`,
-            randomUUID(), body.restaurantId, body.serverName, JSON.stringify(body.ratings), fullOutput
+            `INSERT INTO "CustomerReview" (id, "restaurantId", "serverName", ratings, "reviewText", "chatHistory", "createdAt") VALUES ($1, $2, $3, $4::jsonb, $5, $6::jsonb, NOW())`,
+            randomUUID(), body.restaurantId, body.serverName, JSON.stringify(body.ratings), fullOutput, JSON.stringify(body.history)
           );
         } catch (dbErr) {
           console.error("Error saving CustomerReview:", dbErr);
