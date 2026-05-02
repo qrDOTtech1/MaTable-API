@@ -282,6 +282,12 @@ CREATE TABLE IF NOT EXISTS "CustomerReview" (
 );
 CREATE INDEX IF NOT EXISTS "CustomerReview_restaurantId_idx" ON "CustomerReview"("restaurantId", "createdAt" DESC);
 
+-- Add contact columns (email / phone) for voucher claim
+ALTER TABLE "CustomerReview" ADD COLUMN IF NOT EXISTS "contactEmail" TEXT;
+ALTER TABLE "CustomerReview" ADD COLUMN IF NOT EXISTS "contactPhone" TEXT;
+ALTER TABLE "CustomerReview" ADD COLUMN IF NOT EXISTS "voucherClaimed" BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE "CustomerReview" ADD COLUMN IF NOT EXISTS "voucherCode" TEXT;
+
 -- ServerTip: tips left by customers via review flow
 CREATE TABLE IF NOT EXISTS "ServerTip" (
   id TEXT NOT NULL,

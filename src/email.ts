@@ -111,6 +111,35 @@ export function reservationConfirmationHtml(opts: {
 </html>`;
 }
 
+export function voucherCodeHtml(opts: {
+  restaurantName: string;
+  code: string;
+}): string {
+  return `
+<!DOCTYPE html>
+<html lang="fr">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
+<body style="margin:0;padding:0;background:#f8f8f8;font-family:sans-serif">
+  <div style="max-width:480px;margin:32px auto;background:#fff;border-radius:16px;overflow:hidden;box-shadow:0 2px 16px rgba(0,0,0,0.08)">
+    <div style="background:#ea580c;padding:32px 32px 24px;text-align:center">
+      <h1 style="color:#fff;margin:0;font-size:22px;font-weight:900">Votre code de vérification</h1>
+      <p style="color:rgba(255,255,255,0.85);margin:8px 0 0;font-size:14px">${opts.restaurantName}</p>
+    </div>
+    <div style="padding:40px 32px;text-align:center">
+      <p style="font-size:15px;color:#333;margin:0 0 24px">Saisissez ce code pour obtenir votre récompense :</p>
+      <div style="background:#f8f8f8;border:2px dashed #ea580c;border-radius:12px;padding:20px;display:inline-block">
+        <span style="font-family:monospace;font-size:36px;font-weight:900;letter-spacing:8px;color:#ea580c">${opts.code}</span>
+      </div>
+      <p style="font-size:12px;color:#999;margin:24px 0 0">Ce code expire dans 10 minutes.</p>
+    </div>
+    <div style="background:#f8f8f8;padding:14px 32px;text-align:center;font-size:11px;color:#999">
+      Envoyé via <strong>MaTable</strong> · matable.pro
+    </div>
+  </div>
+</body>
+</html>`;
+}
+
 export function invoiceHtml(opts: {
   restaurantName: string;
   restaurantAddress?: string | null;

@@ -3,7 +3,7 @@ import { z } from "zod";
 import { prisma } from "../db.js";
 import { requireSessionToken } from "../auth.js";
 import { emitToRestaurant } from "../realtime.js";
-import { sendEmail, reservationConfirmationHtml, canSendEmail } from "../email.js";
+import { sendEmail, reservationConfirmationHtml, voucherCodeHtml, canSendEmail } from "../email.js";
 import { getGlobalIaConfig } from "../globalIaConfig.js";
 import { setupSSE, ollamaCloudChatStream } from "./ai.js";
 import { hasApp } from "../appGating.js";
@@ -506,6 +506,107 @@ Ne renvoie STRICTEMENT rien d'autre que ce JSON (pas de bloc Markdown \`\`\`json
     });
 
     return { url: session.url };
+  });
+
+  // ---------------------------------------------------------------------------
+  // POST /api/r/:slug/voucher-request — envoie un code 6 chiffres par email
+  // Le code est stocké en mémoire avec TTL de 10 min
+  // ---------------------------------------------------------------------------
+  const voucherCodes = new Map<string, { code: string; restaurantId: string; expiresAt: number }>();
+
+  app.post("/r/:slug/voucher-request", async (req, reply) => {
+    const { slug } = req.params as { slug: string };
+    const { email } = z.object({ email: z.string().email() }).parse(req.body);
+    const emailLower = email.trim().toLowerCase();
+
+    const restaurant = await prisma.restaurant.findUnique({ where: { slug }, select: { id: true, name: true } });
+    if (!restaurant) return reply.code(404).send({ error: "restaurant_not_found" });
+
+    // Récupérer le code voucher actuel du restaurant
+    const configRaw = await prisma.$queryRawUnsafe<any[]>(
+      `SELECT "reviewVoucherConfig" FROM "Restaurant" WHERE id = $1`, restaurant.id
+    );
+    const currentVoucherCode = configRaw[0]?.reviewVoucherConfig?.code ?? null;
+
+    // Check si cet email a déjà réclamé un voucher AVEC LE MÊME code promo
+    // Si le resto a changé le code, l'ancien claim ne bloque plus
+    const existing = await prisma.$queryRawUnsafe<any[]>(
+      `SELECT id FROM "CustomerReview" WHERE "restaurantId" = $1 AND "contactEmail" = $2 AND "voucherClaimed" = true AND "voucherCode" = $3 LIMIT 1`,
+      restaurant.id, emailLower, currentVoucherCode
+    );
+    if (existing.length > 0) {
+      return reply.code(409).send({ error: "already_claimed", message: "Vous avez déjà bénéficié de cette offre." });
+    }
+
+    if (!canSendEmail()) {
+      return reply.code(503).send({ error: "email_not_configured" });
+    }
+
+    // Générer code 6 chiffres
+    const code = String(Math.floor(100000 + Math.random() * 900000));
+    const key = `${restaurant.id}:${emailLower}`;
+    voucherCodes.set(key, { code, restaurantId: restaurant.id, expiresAt: Date.now() + 10 * 60 * 1000 });
+
+    // Cleanup codes expirés (lazy)
+    for (const [k, v] of voucherCodes) {
+      if (v.expiresAt < Date.now()) voucherCodes.delete(k);
+    }
+
+    await sendEmail({
+      to: emailLower,
+      subject: `Votre code de vérification — ${restaurant.name}`,
+      html: voucherCodeHtml({ restaurantName: restaurant.name, code }),
+    });
+
+    return { ok: true };
+  });
+
+  // ---------------------------------------------------------------------------
+  // POST /api/r/:slug/voucher-verify — vérifie le code, marque le voucher comme réclamé
+  // ---------------------------------------------------------------------------
+  app.post("/r/:slug/voucher-verify", async (req, reply) => {
+    const { slug } = req.params as { slug: string };
+    const { email, code } = z.object({ email: z.string().email(), code: z.string().length(6) }).parse(req.body);
+    const emailLower = email.trim().toLowerCase();
+
+    const restaurant = await prisma.restaurant.findUnique({ where: { slug }, select: { id: true, name: true } });
+    if (!restaurant) return reply.code(404).send({ error: "restaurant_not_found" });
+
+    const key = `${restaurant.id}:${emailLower}`;
+    const stored = voucherCodes.get(key);
+
+    if (!stored || stored.code !== code) {
+      return reply.code(400).send({ error: "invalid_code", message: "Code incorrect ou expiré." });
+    }
+    if (stored.expiresAt < Date.now()) {
+      voucherCodes.delete(key);
+      return reply.code(400).send({ error: "expired", message: "Code expiré. Demandez-en un nouveau." });
+    }
+
+    // Récupérer le code voucher actuel pour le stocker dans le claim
+    const cfgRaw = await prisma.$queryRawUnsafe<any[]>(
+      `SELECT "reviewVoucherConfig" FROM "Restaurant" WHERE id = $1`, restaurant.id
+    );
+    const voucherConfig = cfgRaw[0]?.reviewVoucherConfig || null;
+    const claimedCode = voucherConfig?.code ?? null;
+
+    // Marquer le dernier CustomerReview de ce restaurant comme "claimed" avec l'email + le code promo utilisé
+    // On prend le plus récent non-claimed
+    await prisma.$executeRawUnsafe(
+      `UPDATE "CustomerReview" SET "contactEmail" = $1, "voucherClaimed" = true, "voucherCode" = $3
+       WHERE id = (
+         SELECT id FROM "CustomerReview"
+         WHERE "restaurantId" = $2 AND ("contactEmail" IS NULL OR "contactEmail" = $1)
+         AND "voucherClaimed" = false
+         ORDER BY "createdAt" DESC LIMIT 1
+       )`,
+      emailLower, restaurant.id, claimedCode
+    );
+
+    // Supprimer le code utilisé
+    voucherCodes.delete(key);
+
+    return { ok: true, voucher: voucherConfig };
   });
 
   app.post("/r/:slug/reservations", async (req, reply) => {
