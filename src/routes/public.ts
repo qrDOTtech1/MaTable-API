@@ -3,7 +3,7 @@ import { z } from "zod";
 import { prisma } from "../db.js";
 import { requireSessionToken } from "../auth.js";
 import { emitToRestaurant } from "../realtime.js";
-import { sendEmail, reservationConfirmationHtml, voucherCodeHtml, canSendEmail } from "../email.js";
+import { sendEmail, reservationConfirmationHtml, voucherCodeHtml, contactFormHtml, canSendEmail } from "../email.js";
 import { getGlobalIaConfig } from "../globalIaConfig.js";
 import { setupSSE, ollamaCloudChatStream } from "./ai.js";
 import { hasApp } from "../appGating.js";
@@ -12,6 +12,57 @@ import { env } from "../env.js";
 import { randomUUID } from "crypto";
 
 export async function publicRoutes(app: FastifyInstance) {
+  /* ── Contact Form from Landing Page ── */
+  app.post("/contact", async (req, reply) => {
+    const schema = z.object({
+      restaurantName: z.string().min(1, "Nom de l'établissement requis"),
+      managerName: z.string().min(1, "Nom du gérant requis"),
+      email: z.string().email("Email invalide"),
+      message: z.string().min(5, "Message trop court"),
+    });
+
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success) {
+      return reply.status(400).send({ error: parsed.error.errors[0].message });
+    }
+
+    const { restaurantName, managerName, email, message } = parsed.data;
+
+    try {
+      // Create Prospect in DB
+      await prisma.prospect.create({
+        data: {
+          name: restaurantName,
+          email: email,
+          description: message,
+          notes: `Gérant: ${managerName}\n(Depuis formulaire contact matable.pro)`,
+          sourceUrl: "matable.pro",
+          status: "NEW"
+        }
+      });
+
+      // Send email notification if possible
+      if (canSendEmail()) {
+        await sendEmail({
+          to: ["steven@matable.pro", "contact@matable.pro"],
+          subject: `Nouveau contact : ${restaurantName}`,
+          html: contactFormHtml({
+            restaurantName,
+            managerName,
+            email,
+            message
+          }),
+          replyTo: email
+        });
+      }
+
+      return { success: true };
+    } catch (e: any) {
+      req.log.error(e, "Error creating prospect");
+      return reply.status(500).send({ error: "Erreur serveur" });
+    }
+  });
+
   /* ── List all restaurants (for sitemap, public discovery) ── */
   app.get("/restaurants", async (req) => {
     const restaurants = await prisma.restaurant.findMany({

@@ -201,3 +201,40 @@ export function invoiceHtml(opts: {
 </body>
 </html>`;
 }
+
+export function contactFormHtml(opts: {
+  restaurantName: string;
+  managerName: string;
+  email: string;
+  message: string;
+}): string {
+  return `
+<!DOCTYPE html>
+<html lang="fr">
+<head><meta charset="utf-8"></head>
+<body style="margin:0;padding:0;background:#f8f8f8;font-family:sans-serif">
+  <div style="max-width:540px;margin:32px auto;background:#fff;border-radius:16px;overflow:hidden;box-shadow:0 2px 16px rgba(0,0,0,0.08)">
+    <div style="background:#ea580c;padding:24px 32px;text-align:center">
+      <h1 style="color:#fff;margin:0;font-size:20px;font-weight:900">Nouveau contact Landing Page</h1>
+    </div>
+    <div style="padding:32px">
+      <table style="width:100%;border-collapse:collapse;margin-bottom:24px">
+        <tr style="border-bottom:1px solid #f0f0f0">
+          <td style="padding:10px 0;color:#666;font-size:14px;width:120px">Établissement</td>
+          <td style="padding:10px 0;font-weight:700;font-size:14px">${opts.restaurantName}</td>
+        </tr>
+        <tr style="border-bottom:1px solid #f0f0f0">
+          <td style="padding:10px 0;color:#666;font-size:14px">Contact</td>
+          <td style="padding:10px 0;font-weight:700;font-size:14px">${opts.managerName}</td>
+        </tr>
+        <tr style="border-bottom:1px solid #f0f0f0">
+          <td style="padding:10px 0;color:#666;font-size:14px">Email</td>
+          <td style="padding:10px 0;font-weight:700;font-size:14px"><a href="mailto:${opts.email}" style="color:#ea580c;text-decoration:none">${opts.email}</a></td>
+        </tr>
+      </table>
+      <div style="background:#fff7ed;border-left:4px solid #ea580c;padding:16px;font-size:14px;line-height:1.6;color:#9a3412;white-space:pre-wrap">${opts.message}</div>
+    </div>
+  </div>
+</body>
+</html>`;
+}
