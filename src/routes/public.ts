@@ -251,12 +251,13 @@ export async function publicRoutes(app: FastifyInstance) {
         menuItems: restaurant.menuItems.map((m) => ({
           ...m,
           photos: (restaurant as any).photos
-            ?.filter((p: any) => p.menuItemId === m.id)
+            ?.filter((p: any) => p.menuItemId === m.id && p.kind !== "STAFF")
             .map((p: any) => ({ id: p.id, url: `/api/photo/${p.id}` })) ?? [],
         })),
         openingHours: restaurant.openingHours,
+        // STAFF photos are never exposed on the public restaurant page
         photos: (restaurant as any).photos
-          ?.filter((p: any) => !p.menuItemId)
+          ?.filter((p: any) => !p.menuItemId && p.kind !== "STAFF")
           .map((p: any) => ({ id: p.id, url: `/api/photo/${p.id}` })) ?? [],
         servers: restaurant.servers,
       },

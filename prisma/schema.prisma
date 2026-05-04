@@ -74,7 +74,7 @@ model Photo {
   restaurant   Restaurant @relation("RestaurantPhotos", fields: [restaurantId], references: [id], onDelete: Cascade)
   menuItemId   String?
   menuItem     MenuItem?  @relation("MenuItemPhotos", fields: [menuItemId], references: [id], onDelete: Cascade)
-  kind         String     @default("RESTAURANT") // RESTAURANT | DISH
+  kind         String     @default("RESTAURANT") // RESTAURANT | DISH | STAFF
   mimeType     String
   bytes        Bytes
   size         Int

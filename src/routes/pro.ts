@@ -814,6 +814,7 @@ export async function proRoutes(app: FastifyInstance) {
     const photo = await prisma.photo.create({
       data: {
         restaurantId: me.restaurantId,
+        kind: "STAFF",
         mimeType: part.mimetype,
         bytes: buf,
         size: buf.length,
@@ -1114,7 +1115,7 @@ export async function proRoutes(app: FastifyInstance) {
     const me = await requirePro(req, reply);
     const q = z.object({
       menuItemId: z.string().optional(),
-      kind: z.enum(["RESTAURANT", "DISH"]).optional(),
+      kind: z.enum(["RESTAURANT", "DISH", "STAFF"]).optional(),
     }).parse(req.query ?? {});
     const where: any = { restaurantId: me.restaurantId };
     if (q.menuItemId) where.menuItemId = q.menuItemId;
