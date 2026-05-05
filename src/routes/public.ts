@@ -10,8 +10,29 @@ import { hasApp } from "../appGating.js";
 import { getStripeForRestaurant } from "./stripe.js";
 import { env } from "../env.js";
 import { randomUUID } from "crypto";
+import { getProspectScraperController, isScraperAuthorized } from "../prospectScraper.js";
 
 export async function publicRoutes(app: FastifyInstance) {
+  app.get("/internal/prospects/scraper", async (req, reply) => {
+    const secret = (req.headers["x-scraper-secret"] as string | undefined) || undefined;
+    if (!isScraperAuthorized(secret)) {
+      return reply.code(401).send({ error: "unauthorized" });
+    }
+
+    const controller = getProspectScraperController();
+    return controller.getState();
+  });
+
+  app.post("/internal/prospects/scraper", async (req, reply) => {
+    const secret = (req.headers["x-scraper-secret"] as string | undefined) || undefined;
+    if (!isScraperAuthorized(secret)) {
+      return reply.code(401).send({ error: "unauthorized" });
+    }
+
+    const controller = getProspectScraperController();
+    return controller.start();
+  });
+
   /* ── Contact Form from Landing Page ── */
   app.post("/contact", async (req, reply) => {
     const schema = z.object({
