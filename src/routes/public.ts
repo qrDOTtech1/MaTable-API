@@ -132,18 +132,29 @@ export async function publicRoutes(app: FastifyInstance) {
     const media = await prisma.media.findUnique({ where: { id } });
     if (!media) return reply.code(404).send({ error: "not_found" });
 
+    const buffer = Buffer.from(media.bytes as any);
     reply.header("Content-Type", media.mimeType);
+    reply.header("Content-Length", String(buffer.length));
+    reply.header("Accept-Ranges", "bytes");
     reply.header("Cache-Control", "public, max-age=31536000, immutable");
-    return reply.send(Buffer.from(media.bytes as any));
+    reply.header("Access-Control-Allow-Origin", "*");
+    reply.header("Cross-Origin-Resource-Policy", "cross-origin");
+    return reply.send(buffer);
   });
 
   app.get("/photo/:id", async (req, reply) => {
     const { id } = req.params as { id: string };
     const photo = await prisma.photo.findUnique({ where: { id } });
     if (!photo) return reply.code(404).send({ error: "not_found" });
+
+    const buffer = Buffer.from(photo.bytes as any);
     reply.header("Content-Type", photo.mimeType);
+    reply.header("Content-Length", String(buffer.length));
+    reply.header("Accept-Ranges", "bytes");
     reply.header("Cache-Control", "public, max-age=31536000, immutable");
-    return reply.send(Buffer.from(photo.bytes as any));
+    reply.header("Access-Control-Allow-Origin", "*");
+    reply.header("Cross-Origin-Resource-Policy", "cross-origin");
+    return reply.send(buffer);
   });
 
   app.get("/tables/:tableId", async (req, reply) => {
