@@ -372,11 +372,133 @@ export async function publicRoutes(app: FastifyInstance) {
       select: { id: true, name: true, photoUrl: true }
     });
 
+    // Get restaurant photos (uploaded in config) — exclude staff portraits
+    const photos = await (prisma as any).photo.findMany({
+      where: {
+        restaurantId: r.id,
+        menuItemId: null,
+        kind: { not: "STAFF" },
+      },
+      orderBy: { position: "asc" },
+      select: { id: true },
+    });
+
     return {
-      restaurant: { id: r.id, name: r.name },
+      restaurant: {
+        id: r.id,
+        name: r.name,
+        photos: photos.map((p: any) => ({ id: p.id, url: `/api/photo/${p.id}` })),
+      },
       googleReviewLink,
       reviewVoucherConfig,
       servers
+    };
+  });
+
+  // ---------------------------------------------------------------------------
+  // GET /api/public/r/:slug/review-menu
+  // Light menu list for the review flow's dish picker (id, name, category, price)
+  // ---------------------------------------------------------------------------
+  app.get("/r/:slug/review-menu", async (req, reply) => {
+    const { slug } = req.params as { slug: string };
+    const r = await prisma.restaurant.findUnique({
+      where: { slug },
+      select: { id: true, reviewsEnabled: true },
+    });
+    if (!r) return reply.code(404).send({ error: "NOT_FOUND" });
+    if (!r.reviewsEnabled) return reply.code(403).send({ error: "REVIEWS_DISABLED" });
+
+    const items = await prisma.menuItem.findMany({
+      where: { restaurantId: r.id, available: true },
+      orderBy: [{ category: "asc" }, { position: "asc" }],
+      select: {
+        id: true,
+        name: true,
+        category: true,
+        priceCents: true,
+        imageUrl: true,
+      },
+    });
+
+    return { items };
+  });
+
+  // ---------------------------------------------------------------------------
+  // POST /api/public/r/:slug/review-feedback
+  // Public endpoint: client laisse une note serveur + plats depuis le flow review
+  // (sans token de session de table - pour avis spontanés via QR review)
+  // → crée ServerReview + DishReview visibles dans le dashboard du resto
+  // ---------------------------------------------------------------------------
+  app.post("/r/:slug/review-feedback", async (req, reply) => {
+    const { slug } = req.params as { slug: string };
+    const body = z.object({
+      serverId: z.string().optional(),
+      serverRating: z.number().int().min(1).max(5).optional(),
+      dishReviews: z.array(z.object({
+        menuItemId: z.string(),
+        rating: z.number().int().min(1).max(5),
+      })).optional(),
+    }).parse(req.body ?? {});
+
+    const r = await prisma.restaurant.findUnique({
+      where: { slug },
+      select: { id: true, reviewsEnabled: true },
+    });
+    if (!r) return reply.code(404).send({ error: "NOT_FOUND" });
+    if (!r.reviewsEnabled) return reply.code(403).send({ error: "REVIEWS_DISABLED" });
+
+    let serverReviewId: string | null = null;
+    const dishReviewIds: string[] = [];
+
+    // Server review
+    if (body.serverRating && body.serverId) {
+      const server = await prisma.server.findFirst({
+        where: { id: body.serverId, restaurantId: r.id },
+        select: { id: true },
+      });
+      if (server) {
+        const created = await prisma.serverReview.create({
+          data: {
+            restaurantId: r.id,
+            serverId: server.id,
+            rating: body.serverRating,
+          },
+          select: { id: true },
+        });
+        serverReviewId = created.id;
+      }
+    }
+
+    // Dish reviews
+    if (body.dishReviews && body.dishReviews.length > 0) {
+      const validIds = await prisma.menuItem.findMany({
+        where: {
+          restaurantId: r.id,
+          id: { in: body.dishReviews.map((d) => d.menuItemId) },
+        },
+        select: { id: true },
+      });
+      const validSet = new Set(validIds.map((m) => m.id));
+
+      for (const dr of body.dishReviews) {
+        if (!validSet.has(dr.menuItemId)) continue;
+        const created = await prisma.dishReview.create({
+          data: {
+            restaurantId: r.id,
+            menuItemId: dr.menuItemId,
+            rating: dr.rating,
+            verified: false,
+          },
+          select: { id: true },
+        });
+        dishReviewIds.push(created.id);
+      }
+    }
+
+    return {
+      ok: true,
+      serverReviewId,
+      dishReviewIds,
     };
   });
 
