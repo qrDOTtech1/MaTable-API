@@ -11,6 +11,7 @@ import { getStripeForRestaurant } from "./stripe.js";
 import { env } from "../env.js";
 import { randomUUID } from "crypto";
 import { getProspectScraperController, isScraperAuthorized } from "../prospectScraper.js";
+import { detectFlagsWithRating } from "../reviewFlagger.js";
 
 export async function publicRoutes(app: FastifyInstance) {
   app.get("/internal/prospects/scraper", async (req, reply) => {
@@ -140,6 +141,44 @@ export async function publicRoutes(app: FastifyInstance) {
     reply.header("Access-Control-Allow-Origin", "*");
     reply.header("Cross-Origin-Resource-Policy", "cross-origin");
     return reply.send(buffer);
+  });
+
+  // ---------------------------------------------------------------------------
+  // POST /api/public/r/:slug/review-photo
+  // Upload public d'une photo (jusqu'à 5 MB) lors du flow review d'un client.
+  // Retourne l'id de la Photo créée, à passer dans dishReviews[].photoIds.
+  // ---------------------------------------------------------------------------
+  app.post("/r/:slug/review-photo", async (req, reply) => {
+    const { slug } = req.params as { slug: string };
+    const r = await prisma.restaurant.findUnique({
+      where: { slug },
+      select: { id: true, reviewsEnabled: true },
+    });
+    if (!r) return reply.code(404).send({ error: "NOT_FOUND" });
+    if (!r.reviewsEnabled) return reply.code(403).send({ error: "REVIEWS_DISABLED" });
+
+    const part = await (req as any).file();
+    if (!part) return reply.code(400).send({ error: "missing_file" });
+    if (typeof part.mimetype !== "string" || !part.mimetype.startsWith("image/")) {
+      return reply.code(400).send({ error: "invalid_mime" });
+    }
+    const buf: Buffer = await part.toBuffer();
+    if (!buf.length) return reply.code(400).send({ error: "empty_file" });
+    if (buf.length > 5 * 1024 * 1024) return reply.code(400).send({ error: "too_large" });
+
+    const photo = await (prisma as any).photo.create({
+      data: {
+        restaurantId: r.id,
+        kind: "DISH_REVIEW",
+        mimeType: part.mimetype,
+        bytes: buf,
+        size: buf.length,
+        originalName: part.filename ?? "review-photo",
+      },
+      select: { id: true },
+    });
+
+    return { id: photo.id, url: `/api/public/photo/${photo.id}` };
   });
 
   app.get("/photo/:id", async (req, reply) => {
@@ -434,9 +473,12 @@ export async function publicRoutes(app: FastifyInstance) {
     const body = z.object({
       serverId: z.string().optional(),
       serverRating: z.number().int().min(1).max(5).optional(),
+      serverComment: z.string().max(800).optional(),
       dishReviews: z.array(z.object({
         menuItemId: z.string(),
         rating: z.number().int().min(1).max(5),
+        comment: z.string().max(800).optional(),
+        photoIds: z.array(z.string()).max(5).optional(),
       })).optional(),
     }).parse(req.body ?? {});
 
@@ -457,13 +499,17 @@ export async function publicRoutes(app: FastifyInstance) {
         select: { id: true, name: true },
       });
       if (server) {
+        const flags = detectFlagsWithRating(body.serverRating, body.serverComment);
         const created = await prisma.serverReview.create({
           data: {
             restaurantId: r.id,
             serverId: server.id,
             rating: body.serverRating,
+            comment: body.serverComment ?? null,
+            flagged: flags.flagged,
+            flagReasons: flags.reasons,
           },
-          select: { id: true, rating: true, comment: true, createdAt: true },
+          select: { id: true, rating: true, comment: true, createdAt: true, flagged: true, flagReasons: true },
         });
         serverReviewId = created.id;
 
@@ -474,9 +520,23 @@ export async function publicRoutes(app: FastifyInstance) {
             rating: created.rating,
             comment: created.comment,
             createdAt: created.createdAt,
+            flagged: created.flagged,
+            flagReasons: created.flagReasons,
             server: { id: server.id, name: server.name },
           },
         });
+
+        if (created.flagged) {
+          emitToRestaurant(r.id, "review:flagged", {
+            kind: "server",
+            id: created.id,
+            reasons: created.flagReasons,
+            label: server.name,
+            rating: created.rating,
+            comment: created.comment,
+            createdAt: created.createdAt,
+          });
+        }
       }
     }
 
@@ -491,17 +551,35 @@ export async function publicRoutes(app: FastifyInstance) {
       });
       const validById = new Map(validItems.map((m) => [m.id, m]));
 
+      // Validate photoIds belong to this restaurant
+      const allPhotoIds = Array.from(new Set(body.dishReviews.flatMap(d => d.photoIds ?? [])));
+      const validPhotos = allPhotoIds.length
+        ? await (prisma as any).photo.findMany({
+            where: { id: { in: allPhotoIds }, restaurantId: r.id },
+            select: { id: true },
+          })
+        : [];
+      const validPhotoSet = new Set<string>(validPhotos.map((p: any) => p.id));
+
       for (const dr of body.dishReviews) {
         const item = validById.get(dr.menuItemId);
         if (!item) continue;
+
+        const cleanPhotoIds = (dr.photoIds ?? []).filter(id => validPhotoSet.has(id));
+        const flags = detectFlagsWithRating(dr.rating, dr.comment);
+
         const created = await prisma.dishReview.create({
           data: {
             restaurantId: r.id,
             menuItemId: dr.menuItemId,
             rating: dr.rating,
+            comment: dr.comment ?? null,
+            photoIds: cleanPhotoIds,
+            flagged: flags.flagged,
+            flagReasons: flags.reasons,
             verified: false,
           },
-          select: { id: true, rating: true, comment: true, createdAt: true },
+          select: { id: true, rating: true, comment: true, photoIds: true, flagged: true, flagReasons: true, createdAt: true },
         });
         dishReviewIds.push(created.id);
 
@@ -511,10 +589,25 @@ export async function publicRoutes(app: FastifyInstance) {
             id: created.id,
             rating: created.rating,
             comment: created.comment,
+            photoIds: created.photoIds,
+            flagged: created.flagged,
+            flagReasons: created.flagReasons,
             createdAt: created.createdAt,
             menuItem: { id: item.id, name: item.name },
           },
         });
+
+        if (created.flagged) {
+          emitToRestaurant(r.id, "review:flagged", {
+            kind: "dish",
+            id: created.id,
+            reasons: created.flagReasons,
+            label: item.name,
+            rating: created.rating,
+            comment: created.comment,
+            createdAt: created.createdAt,
+          });
+        }
       }
     }
 

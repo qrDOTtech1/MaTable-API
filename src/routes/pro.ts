@@ -877,6 +877,133 @@ export async function proRoutes(app: FastifyInstance) {
   });
 
   // ---------------------------------------------------------------------------
+  // PATCH /api/pro/reviews/:kind/:id/resolve — Marquer un flag comme traité
+  // kind ∈ "dish" | "server"
+  // ---------------------------------------------------------------------------
+  app.patch<{ Params: { kind: "dish" | "server"; id: string }; Body: { resolved?: boolean } }>(
+    "/reviews/:kind/:id/resolve",
+    async (req, reply) => {
+      const me = await requirePro(req, reply);
+      const { kind, id } = req.params;
+      const resolved = req.body?.resolved !== false;
+
+      if (kind === "dish") {
+        const found = await prisma.dishReview.findFirst({ where: { id, restaurantId: me.restaurantId }, select: { id: true } });
+        if (!found) return reply.code(404).send({ error: "not_found" });
+        await prisma.dishReview.update({ where: { id }, data: { flagResolved: resolved } });
+      } else if (kind === "server") {
+        const found = await prisma.serverReview.findFirst({ where: { id, restaurantId: me.restaurantId }, select: { id: true } });
+        if (!found) return reply.code(404).send({ error: "not_found" });
+        await prisma.serverReview.update({ where: { id }, data: { flagResolved: resolved } });
+      } else {
+        return reply.code(400).send({ error: "invalid_kind" });
+      }
+      return { ok: true, resolved };
+    }
+  );
+
+  // ---------------------------------------------------------------------------
+  // GET /api/pro/reviews/insights — Plaintes récurrentes + alertes actives
+  // Agrège les flagReasons sur DishReview + ServerReview pour l'admin
+  // ---------------------------------------------------------------------------
+  app.get("/reviews/insights", async (req, reply) => {
+    const me = await requirePro(req, reply);
+
+    const [dishFlags, serverFlags, dishLowComments, customerReviewsForKw] = await Promise.all([
+      prisma.dishReview.findMany({
+        where: { restaurantId: me.restaurantId, flagged: true },
+        include: { menuItem: { select: { name: true } } },
+        orderBy: { createdAt: "desc" },
+        take: 200,
+      }),
+      prisma.serverReview.findMany({
+        where: { restaurantId: me.restaurantId, flagged: true },
+        include: { server: { select: { name: true } } },
+        orderBy: { createdAt: "desc" },
+        take: 200,
+      }),
+      prisma.dishReview.findMany({
+        where: { restaurantId: me.restaurantId, comment: { not: null } },
+        include: { menuItem: { select: { name: true } } },
+        orderBy: { createdAt: "desc" },
+        take: 200,
+      }),
+      prisma.$queryRawUnsafe<any[]>(
+        `SELECT id, "reviewText", ratings, "createdAt"
+         FROM "CustomerReview"
+         WHERE "restaurantId" = $1
+         ORDER BY "createdAt" DESC
+         LIMIT 200`,
+        me.restaurantId
+      ),
+    ]);
+
+    // Aggregate by reason
+    const counts: Record<string, number> = {};
+    const tally = (arr: any[]) => {
+      for (const r of arr) {
+        for (const reason of r.flagReasons ?? []) {
+          counts[reason] = (counts[reason] ?? 0) + 1;
+        }
+      }
+    };
+    tally(dishFlags);
+    tally(serverFlags);
+
+    // Also scan CustomerReview text for keywords (raw ratings for low-rating fallback)
+    const { detectFlagsWithRating } = await import("../reviewFlagger.js");
+    const customerFlagged: any[] = [];
+    for (const cr of customerReviewsForKw) {
+      const rat = cr.ratings ?? {};
+      const vals = [rat.food, rat.service, rat.atmosphere, rat.value].filter((v: any) => typeof v === "number");
+      const avg = vals.length ? vals.reduce((a: number, b: number) => a + b, 0) / vals.length : null;
+      const f = detectFlagsWithRating(avg, cr.reviewText);
+      if (f.flagged) {
+        customerFlagged.push({ id: cr.id, reasons: f.reasons, reviewText: cr.reviewText, createdAt: cr.createdAt });
+        for (const reason of f.reasons) {
+          counts[reason] = (counts[reason] ?? 0) + 1;
+        }
+      }
+    }
+
+    const reasonsRanked = Object.entries(counts)
+      .map(([reason, count]) => ({ reason, count }))
+      .sort((a, b) => b.count - a.count);
+
+    return {
+      counts: reasonsRanked,
+      dishFlags: dishFlags.map(d => ({
+        id: d.id,
+        rating: d.rating,
+        comment: d.comment,
+        reasons: d.flagReasons,
+        resolved: d.flagResolved,
+        createdAt: d.createdAt,
+        menuItemName: d.menuItem?.name ?? null,
+      })),
+      serverFlags: serverFlags.map(d => ({
+        id: d.id,
+        rating: d.rating,
+        comment: d.comment,
+        reasons: d.flagReasons,
+        resolved: d.flagResolved,
+        createdAt: d.createdAt,
+        serverName: d.server?.name ?? null,
+      })),
+      customerFlags: customerFlagged,
+      dishComments: dishLowComments.filter(d => (d.comment ?? "").length > 0).slice(0, 60).map(d => ({
+        id: d.id,
+        rating: d.rating,
+        comment: d.comment,
+        flagged: d.flagged,
+        reasons: d.flagReasons,
+        menuItemName: d.menuItem?.name ?? null,
+        createdAt: d.createdAt,
+      })),
+    };
+  });
+
+  // ---------------------------------------------------------------------------
   // GET /api/pro/reviews/customers — Avis & Pourboires laissés via Campagne IA
   // ---------------------------------------------------------------------------
   app.get("/reviews/customers", async (req, reply) => {

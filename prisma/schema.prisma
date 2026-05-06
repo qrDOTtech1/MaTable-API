@@ -325,11 +325,16 @@ model DishReview {
   orderId      String?
   rating       Int
   comment      String?
+  photoIds     String[]   @default([])
+  flagged      Boolean    @default(false)
+  flagReasons  String[]   @default([])
+  flagResolved Boolean    @default(false)
   verified     Boolean    @default(true)
   createdAt    DateTime   @default(now())
 
   @@index([restaurantId, createdAt])
   @@index([menuItemId, createdAt])
+  @@index([restaurantId, flagged, flagResolved])
 }
 
 model ServerReview {
@@ -342,10 +347,14 @@ model ServerReview {
   orderId      String?
   rating       Int
   comment      String?
+  flagged      Boolean    @default(false)
+  flagReasons  String[]   @default([])
+  flagResolved Boolean    @default(false)
   createdAt    DateTime   @default(now())
 
   @@index([serverId, createdAt])
   @@index([restaurantId, createdAt])
+  @@index([restaurantId, flagged, flagResolved])
 }
 
 // ---------------------------------------------------------------------------
