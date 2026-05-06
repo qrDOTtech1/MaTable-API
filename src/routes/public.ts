@@ -454,7 +454,7 @@ export async function publicRoutes(app: FastifyInstance) {
     if (body.serverRating && body.serverId) {
       const server = await prisma.server.findFirst({
         where: { id: body.serverId, restaurantId: r.id },
-        select: { id: true },
+        select: { id: true, name: true },
       });
       if (server) {
         const created = await prisma.serverReview.create({
@@ -463,25 +463,37 @@ export async function publicRoutes(app: FastifyInstance) {
             serverId: server.id,
             rating: body.serverRating,
           },
-          select: { id: true },
+          select: { id: true, rating: true, comment: true, createdAt: true },
         });
         serverReviewId = created.id;
+
+        emitToRestaurant(r.id, "review:new", {
+          kind: "server",
+          review: {
+            id: created.id,
+            rating: created.rating,
+            comment: created.comment,
+            createdAt: created.createdAt,
+            server: { id: server.id, name: server.name },
+          },
+        });
       }
     }
 
     // Dish reviews
     if (body.dishReviews && body.dishReviews.length > 0) {
-      const validIds = await prisma.menuItem.findMany({
+      const validItems = await prisma.menuItem.findMany({
         where: {
           restaurantId: r.id,
           id: { in: body.dishReviews.map((d) => d.menuItemId) },
         },
-        select: { id: true },
+        select: { id: true, name: true },
       });
-      const validSet = new Set(validIds.map((m) => m.id));
+      const validById = new Map(validItems.map((m) => [m.id, m]));
 
       for (const dr of body.dishReviews) {
-        if (!validSet.has(dr.menuItemId)) continue;
+        const item = validById.get(dr.menuItemId);
+        if (!item) continue;
         const created = await prisma.dishReview.create({
           data: {
             restaurantId: r.id,
@@ -489,9 +501,20 @@ export async function publicRoutes(app: FastifyInstance) {
             rating: dr.rating,
             verified: false,
           },
-          select: { id: true },
+          select: { id: true, rating: true, comment: true, createdAt: true },
         });
         dishReviewIds.push(created.id);
+
+        emitToRestaurant(r.id, "review:new", {
+          kind: "dish",
+          review: {
+            id: created.id,
+            rating: created.rating,
+            comment: created.comment,
+            createdAt: created.createdAt,
+            menuItem: { id: item.id, name: item.name },
+          },
+        });
       }
     }
 
@@ -570,10 +593,22 @@ La cuisson de votre viande était-elle à votre goût ? | Parfaite | Un peu trop
 
       if (isFinalTurn) {
         try {
+          const reviewId = randomUUID();
           await prisma.$executeRawUnsafe(
             `INSERT INTO "CustomerReview" (id, "restaurantId", "serverName", ratings, "reviewText", "chatHistory", "createdAt") VALUES ($1, $2, $3, $4::jsonb, $5, $6::jsonb, NOW())`,
-            randomUUID(), body.restaurantId, body.serverName, JSON.stringify(body.ratings), fullOutput, JSON.stringify(body.history)
+            reviewId, body.restaurantId, body.serverName, JSON.stringify(body.ratings), fullOutput, JSON.stringify(body.history)
           );
+          emitToRestaurant(body.restaurantId, "review:new", {
+            kind: "customer",
+            review: {
+              id: reviewId,
+              serverName: body.serverName,
+              ratings: body.ratings,
+              reviewText: fullOutput,
+              chatHistory: body.history,
+              createdAt: new Date().toISOString(),
+            },
+          });
         } catch (dbErr) {
           console.error("Error saving CustomerReview:", dbErr);
         }
