@@ -259,6 +259,36 @@ export async function proRoutes(app: FastifyInstance) {
       }
     }
     const [restaurant] = await prisma.$transaction(ops);
+
+    // Auto-géocodage : quand l'adresse/ville change → mise à jour mapLat/mapLng (Nominatim, non-bloquant)
+    if (restData.address !== undefined || restData.city !== undefined) {
+      const q = [restData.address, restData.city].filter(Boolean).join(", ");
+      if (q) {
+        fetch(
+          `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(q)}&format=json&limit=1`,
+          { headers: { "User-Agent": "MaTable-Pro/1.0 contact@matable.pro" } }
+        )
+          .then((r) => r.json())
+          .then((data: any[]) => {
+            if (data.length > 0) {
+              const lat = parseFloat(data[0].lat);
+              const lng = parseFloat(data[0].lon);
+              if (!isNaN(lat) && !isNaN(lng)) {
+                prisma
+                  .$executeRawUnsafe(
+                    `UPDATE "Restaurant" SET "mapLat" = $1, "mapLng" = $2 WHERE id = $3`,
+                    lat,
+                    lng,
+                    me.restaurantId
+                  )
+                  .catch(() => {});
+              }
+            }
+          })
+          .catch(() => {});
+      }
+    }
+
     return { restaurant };
   });
 
