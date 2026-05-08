@@ -129,6 +129,9 @@ export async function chainRoutes(app: FastifyInstance) {
            FROM "CustomerReview" cr WHERE cr."restaurantId" = r.id
          ), 0) AS "avgRating",
          COALESCE((
+           SELECT COUNT(*)::int FROM "CustomerReview" cr WHERE cr."restaurantId" = r.id
+         ), 0) AS "reviewCount",
+         COALESCE((
            SELECT COUNT(*)::int FROM "Order" o
            JOIN "TableSession" ts ON ts.id = o."sessionId"
            JOIN "Table" t ON t.id = ts."tableId"
@@ -147,6 +150,7 @@ export async function chainRoutes(app: FastifyInstance) {
       totalOrders:       Number(r.totalOrders),
       totalRevenueCents: Number(r.totalRevenueCents),
       avgRating:         Number(r.avgRating),
+      reviewCount:       Number(r.reviewCount),
       ordersToday:       Number(r.ordersToday),
     }));
 
