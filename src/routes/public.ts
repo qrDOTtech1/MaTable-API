@@ -392,7 +392,7 @@ export async function publicRoutes(app: FastifyInstance) {
     // Check main restaurant via Prisma
     const r = await prisma.restaurant.findUnique({
       where: { slug },
-      select: { id: true, name: true, reviewsEnabled: true },
+      select: { id: true, name: true, reviewsEnabled: true, tipsEnabled: true },
     });
     
     if (!r) return reply.code(404).send({ error: "NOT_FOUND" });
@@ -431,6 +431,7 @@ export async function publicRoutes(app: FastifyInstance) {
         photos: photos.map((p: any) => ({ id: p.id, url: `/api/photo/${p.id}` })),
       },
       googleReviewLink,
+      tipsEnabled: r.tipsEnabled,
       reviewVoucherConfig,
       businessType,
       reviewCustomQuestions,
@@ -823,9 +824,10 @@ Ne renvoie STRICTEMENT rien d'autre que ce JSON (pas de bloc Markdown \`\`\`json
 
     const restaurant = await prisma.restaurant.findUnique({
       where: { slug },
-      select: { id: true, name: true },
+      select: { id: true, name: true, tipsEnabled: true },
     });
     if (!restaurant) return reply.code(404).send({ error: "restaurant_not_found" });
+    if (!restaurant.tipsEnabled) return reply.code(403).send({ error: "tips_disabled" });
 
     const { stripe } = await getStripeForRestaurant(restaurant.id);
     if (!stripe) return reply.code(503).send({ error: "stripe_not_configured" });
