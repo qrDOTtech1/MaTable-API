@@ -5,7 +5,41 @@ import { randomUUID } from "crypto";
 import { prisma } from "../db.js";
 import { requireChain } from "../auth.js";
 
+// ── Inline migration — run once per process startup ──────────────────────────
+let migrationDone = false;
+async function ensureChainSchema() {
+  if (migrationDone) return;
+  try {
+    await prisma.$executeRawUnsafe(`
+      CREATE TABLE IF NOT EXISTS "Chain" (
+        id TEXT NOT NULL,
+        name TEXT NOT NULL,
+        "logoUrl" TEXT,
+        "adminEmail" TEXT NOT NULL,
+        "adminPasswordHash" TEXT NOT NULL,
+        "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        "updatedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        CONSTRAINT "Chain_pkey" PRIMARY KEY (id)
+      )
+    `);
+    await prisma.$executeRawUnsafe(`CREATE UNIQUE INDEX IF NOT EXISTS "Chain_adminEmail_key" ON "Chain"("adminEmail")`);
+    await prisma.$executeRawUnsafe(`ALTER TABLE "Restaurant" ADD COLUMN IF NOT EXISTS "chainId" TEXT`);
+    await prisma.$executeRawUnsafe(`ALTER TABLE "Restaurant" ADD COLUMN IF NOT EXISTS "mapLat" DOUBLE PRECISION`);
+    await prisma.$executeRawUnsafe(`ALTER TABLE "Restaurant" ADD COLUMN IF NOT EXISTS "mapLng" DOUBLE PRECISION`);
+    await prisma.$executeRawUnsafe(`ALTER TABLE "Restaurant" ADD COLUMN IF NOT EXISTS "mapLabel" TEXT`);
+    await prisma.$executeRawUnsafe(`CREATE INDEX IF NOT EXISTS "Restaurant_chainId_idx" ON "Restaurant"("chainId")`);
+    await prisma.$executeRawUnsafe(`ALTER TABLE "Restaurant" ADD COLUMN IF NOT EXISTS "businessType" TEXT NOT NULL DEFAULT 'RESTAURANT'`);
+    await prisma.$executeRawUnsafe(`ALTER TABLE "Restaurant" ADD COLUMN IF NOT EXISTS "reviewCustomQuestions" TEXT`);
+    migrationDone = true;
+  } catch (err: any) {
+    console.error("[chain] ensureChainSchema error:", err.message);
+  }
+}
+
 export async function chainRoutes(app: FastifyInstance) {
+  // Run migration on every request until confirmed done
+  app.addHook("preHandler", async () => { await ensureChainSchema(); });
+
   // ─────────────────────────────────────────────────────────────────────────
   // POST /api/chain/register — créer un compte chaîne
   // ─────────────────────────────────────────────────────────────────────────
