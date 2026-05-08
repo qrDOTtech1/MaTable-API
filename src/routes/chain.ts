@@ -205,10 +205,12 @@ export async function chainRoutes(app: FastifyInstance) {
     const restaurantId = restaurants[0].id;
 
     // Vérifier que le token pro est valide pour ce restaurant
+    // Rétrocompatibilité : tokens anciens sans "kind" sont acceptés si restaurantId correspond
     let decoded: any;
     try {
       decoded = req.server.jwt.verify(proToken) as any;
-      if (decoded.kind !== "pro" || decoded.restaurantId !== restaurantId) throw new Error("mismatch");
+      const kindOk = !decoded.kind || decoded.kind === "pro"; // accept tokens without kind (legacy)
+      if (!kindOk || decoded.restaurantId !== restaurantId) throw new Error("mismatch");
     } catch {
       return reply.code(403).send({ error: "invalid_pro_token" });
     }
