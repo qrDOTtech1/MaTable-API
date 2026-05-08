@@ -1,5 +1,10 @@
 import type { FastifyReply, FastifyRequest } from "fastify";
 
+export type ChainTokenPayload = {
+  kind: "chain";
+  chainId: string;
+};
+
 export type SessionTokenPayload = {
   kind: "session";
   sessionId: string;
@@ -32,6 +37,20 @@ export async function requirePro(req: FastifyRequest, reply: FastifyReply) {
     const token = authHeader.slice(7);
     const decoded = req.server.jwt.verify<ProTokenPayload>(token);
     if (decoded.kind !== "pro") throw new Error("wrong kind");
+    return decoded;
+  } catch {
+    reply.code(401).send({ error: "unauthorized" });
+    throw reply;
+  }
+}
+
+export async function requireChain(req: FastifyRequest, reply: FastifyReply): Promise<ChainTokenPayload> {
+  try {
+    const authHeader = req.headers.authorization;
+    if (!authHeader?.startsWith("Bearer ")) throw new Error("no token");
+    const token = authHeader.slice(7);
+    const decoded = req.server.jwt.verify<ChainTokenPayload>(token);
+    if (decoded.kind !== "chain") throw new Error("wrong kind");
     return decoded;
   } catch {
     reply.code(401).send({ error: "unauthorized" });

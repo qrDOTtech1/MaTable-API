@@ -289,6 +289,28 @@ ALTER TABLE "CustomerReview" ADD COLUMN IF NOT EXISTS "voucherClaimed" BOOLEAN N
 ALTER TABLE "CustomerReview" ADD COLUMN IF NOT EXISTS "voucherCode" TEXT;
 ALTER TABLE "CustomerReview" ADD COLUMN IF NOT EXISTS "chatHistory" JSONB;
 
+-- ─────────────────────────────────────────────────────────────────────────────
+-- Chain management — multi-establishment groups (restaurants or boutiques)
+-- ─────────────────────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS "Chain" (
+  id                   TEXT        NOT NULL,
+  name                 TEXT        NOT NULL,
+  "logoUrl"            TEXT,
+  "adminEmail"         TEXT        NOT NULL,
+  "adminPasswordHash"  TEXT        NOT NULL,
+  "createdAt"          TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  "updatedAt"          TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT "Chain_pkey" PRIMARY KEY (id)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS "Chain_adminEmail_key" ON "Chain"("adminEmail");
+
+-- Link a restaurant to a chain + optional world-map pin
+ALTER TABLE "Restaurant" ADD COLUMN IF NOT EXISTS "chainId"   TEXT;
+ALTER TABLE "Restaurant" ADD COLUMN IF NOT EXISTS "mapLat"    DOUBLE PRECISION;
+ALTER TABLE "Restaurant" ADD COLUMN IF NOT EXISTS "mapLng"    DOUBLE PRECISION;
+ALTER TABLE "Restaurant" ADD COLUMN IF NOT EXISTS "mapLabel"  TEXT;
+CREATE INDEX IF NOT EXISTS "Restaurant_chainId_idx" ON "Restaurant"("chainId");
+
 -- Restaurant: business type (RESTAURANT | BOUTIQUE) + custom AI review questions
 ALTER TABLE "Restaurant" ADD COLUMN IF NOT EXISTS "businessType" TEXT NOT NULL DEFAULT 'RESTAURANT';
 ALTER TABLE "Restaurant" ADD COLUMN IF NOT EXISTS "reviewCustomQuestions" TEXT;
