@@ -400,10 +400,12 @@ export async function publicRoutes(app: FastifyInstance) {
 
     // Get specific configuration fields via raw query because they are not in prisma schema yet
     const configRaw = await prisma.$queryRawUnsafe<any[]>(
-      `SELECT "googleReviewLink", "reviewVoucherConfig" FROM "Restaurant" WHERE id = $1`, r.id
+      `SELECT "googleReviewLink", "reviewVoucherConfig", "businessType", "reviewCustomQuestions" FROM "Restaurant" WHERE id = $1`, r.id
     );
     const googleReviewLink = configRaw[0]?.googleReviewLink || null;
     const reviewVoucherConfig = configRaw[0]?.reviewVoucherConfig || null;
+    const businessType: string = configRaw[0]?.businessType || "RESTAURANT";
+    const reviewCustomQuestions: string | null = configRaw[0]?.reviewCustomQuestions || null;
 
     // Get list of active servers with their photos
     const servers = await prisma.server.findMany({
@@ -430,6 +432,8 @@ export async function publicRoutes(app: FastifyInstance) {
       },
       googleReviewLink,
       reviewVoucherConfig,
+      businessType,
+      reviewCustomQuestions,
       servers
     };
   });
@@ -634,7 +638,9 @@ export async function publicRoutes(app: FastifyInstance) {
       history: z.array(z.object({
         role: z.enum(["ai", "user"]),
         content: z.string()
-      }))
+      })),
+      businessType: z.enum(["RESTAURANT", "BOUTIQUE"]).optional().default("RESTAURANT"),
+      customQuestions: z.string().optional(),
     }).parse(req.body);
 
     const { send, close } = setupSSE(reply);
@@ -644,10 +650,16 @@ export async function publicRoutes(app: FastifyInstance) {
       if (!iaConfig.ollamaApiKey) throw new Error("No API Key configured globally");
 
       const isFinalTurn = body.history.filter(m => m.role === "user").length >= 2;
+      const isBoutique = body.businessType === "BOUTIQUE";
+      const entityLabel = isBoutique ? "établissement" : "restaurant";
+      const ratingLabels = isBoutique
+        ? `Produits/Services: ${body.ratings.food}, Accueil: ${body.ratings.service}, Ambiance: ${body.ratings.atmosphere}, Qualité/Prix: ${body.ratings.value}`
+        : `Cuisine: ${body.ratings.food}, Service: ${body.ratings.service}, Ambiance: ${body.ratings.atmosphere}, Qualité/Prix: ${body.ratings.value}`;
 
-      let prompt = `Tu es l'assistant virtuel parfait d'un restaurant, chargé de récolter les avis clients de manière chaleureuse.
-Notes du client (sur 5) : Cuisine: ${body.ratings.food}, Service: ${body.ratings.service}, Ambiance: ${body.ratings.atmosphere}, Qualité/Prix: ${body.ratings.value}.
-Serveur: ${body.serverName}.
+      let prompt = `Tu es l'assistant virtuel parfait d'un ${entityLabel}, chargé de récolter les avis clients de manière chaleureuse.
+Notes du client (sur 5) : ${ratingLabels}.
+${isBoutique ? `Membre de l'équipe : ${body.serverName}.` : `Serveur : ${body.serverName}.`}
+${isBoutique && body.customQuestions ? `L'établissement souhaite que tu explores particulièrement : ${body.customQuestions}.` : ""}
 
 `;
       if (body.history.length > 0) {
@@ -659,22 +671,25 @@ Serveur: ${body.serverName}.
 
       if (isFinalTurn) {
         prompt += `
-INSTRUCTION : Le client a répondu à tes questions. Tu dois maintenant GÉNÉRER L'AVIS GOOGLE FINAL.
-L'avis doit être naturel, mentionner le prénom du serveur, et refléter les notes et les réponses du client.
+INSTRUCTION : Le client a répondu à tes questions. Tu dois maintenant GÉNÉRER L'AVIS FINAL.
+L'avis doit être naturel${!isBoutique ? ", mentionner le prénom du serveur," : ""} et refléter les notes et les réponses du client.
 Ne renvoie STRICTEMENT rien d'autre que ce JSON (pas de bloc markdown) :
 {
   "version1": "Texte court de l'avis 1",
   "version2": "Texte court de l'avis 2"
 }`;
       } else {
+        const topicHint = isBoutique && body.customQuestions
+          ? `Oriente-toi sur les thèmes définis par l'établissement : ${body.customQuestions}.`
+          : `Pose une question sur un aspect précis ${isBoutique ? "de la visite" : "du repas"}.`;
         prompt += `
-INSTRUCTION : Pose UNE SEULE question ciblée et très courte (maximum 15 mots) sur un aspect précis du repas, en fonction des notes données. N'utilise pas de politesse excessive. 
+INSTRUCTION : ${topicHint} Pose UNE SEULE question ciblée et très courte (maximum 15 mots), en fonction des notes données. N'utilise pas de politesse excessive.
 Propose ensuite exactement 3 suggestions de réponses courtes séparées par le caractère " | ".
 Format attendu STRICTEMENT :
 <Ta question> | <Choix 1> | <Choix 2> | <Choix 3>
 
 Exemple:
-La cuisson de votre viande était-elle à votre goût ? | Parfaite | Un peu trop cuite | Saignante à souhait`;
+${isBoutique ? "La sélection de produits vous a-t-elle surpris ? | Oui, très originale | Classique mais bon | Quelques découvertes" : "La cuisson de votre viande était-elle à votre goût ? | Parfaite | Un peu trop cuite | Saignante à souhait"}`;
       }
 
       const fullOutput = await ollamaCloudChatStream(

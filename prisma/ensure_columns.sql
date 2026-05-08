@@ -289,6 +289,10 @@ ALTER TABLE "CustomerReview" ADD COLUMN IF NOT EXISTS "voucherClaimed" BOOLEAN N
 ALTER TABLE "CustomerReview" ADD COLUMN IF NOT EXISTS "voucherCode" TEXT;
 ALTER TABLE "CustomerReview" ADD COLUMN IF NOT EXISTS "chatHistory" JSONB;
 
+-- Restaurant: business type (RESTAURANT | BOUTIQUE) + custom AI review questions
+ALTER TABLE "Restaurant" ADD COLUMN IF NOT EXISTS "businessType" TEXT NOT NULL DEFAULT 'RESTAURANT';
+ALTER TABLE "Restaurant" ADD COLUMN IF NOT EXISTS "reviewCustomQuestions" TEXT;
+
 -- ServerTip: tips left by customers via review flow
 CREATE TABLE IF NOT EXISTS "ServerTip" (
   id TEXT NOT NULL,
