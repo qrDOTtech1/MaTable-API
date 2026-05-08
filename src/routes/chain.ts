@@ -111,13 +111,13 @@ export async function chainRoutes(app: FastifyInstance) {
            SELECT COUNT(*)::int FROM "Order" o
            JOIN "TableSession" ts ON ts.id = o."sessionId"
            JOIN "Table" t ON t.id = ts."tableId"
-           WHERE t."restaurantId" = r.id AND o.status = 'COMPLETED'
+           WHERE t."restaurantId" = r.id AND o.status = 'PAID'
          ), 0) AS "totalOrders",
          COALESCE((
            SELECT SUM(o."totalCents") FROM "Order" o
            JOIN "TableSession" ts ON ts.id = o."sessionId"
            JOIN "Table" t ON t.id = ts."tableId"
-           WHERE t."restaurantId" = r.id AND o.status = 'COMPLETED'
+           WHERE t."restaurantId" = r.id AND o.status = 'PAID'
          ), 0) AS "totalRevenueCents",
          COALESCE((
            SELECT ROUND(AVG(
@@ -133,7 +133,7 @@ export async function chainRoutes(app: FastifyInstance) {
            JOIN "TableSession" ts ON ts.id = o."sessionId"
            JOIN "Table" t ON t.id = ts."tableId"
            WHERE t."restaurantId" = r.id
-             AND o.status = 'COMPLETED'
+             AND o.status = 'PAID'
              AND o."createdAt" >= NOW() - INTERVAL '24 hours'
          ), 0) AS "ordersToday"
        FROM "Restaurant" r
