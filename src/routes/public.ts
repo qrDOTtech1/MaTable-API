@@ -35,6 +35,102 @@ export async function publicRoutes(app: FastifyInstance) {
   });
 
   /* ── Contact Form from Landing Page ── */
+  /**
+   * POST /api/public/pricing-request
+   * Demande de souscription depuis la landing /tarifs.
+   * Le client a sélectionné des modules + une durée d'engagement, on capture
+   * tout en DB pour que l'admin puisse rappeler et convertir en contrat.
+   */
+  app.post("/pricing-request", async (req, reply) => {
+    const schema = z.object({
+      restaurantName: z.string().min(1, "Nom de l'établissement requis"),
+      managerName: z.string().min(1, "Nom du contact requis"),
+      email: z.string().email("Email invalide"),
+      phone: z.string().optional(),
+      city: z.string().optional(),
+      selectedModules: z.array(z.string()).min(1, "Au moins un module requis"),
+      engagement: z.enum(["3m", "6m", "9m", "12m", "12a"]),
+      monthlyHtCents: z.number().int().min(0).default(0),
+      totalHtCents: z.number().int().min(0).default(0),
+      volumePercent: z.number().int().min(0).max(100).default(0),
+      message: z.string().max(2000).optional(),
+      sourceUrl: z.string().optional(),
+    });
+
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success) {
+      return reply.status(400).send({ error: parsed.error.errors[0].message });
+    }
+    const d = parsed.data;
+
+    try {
+      // Persiste la demande
+      const created = await (prisma as any).pricingRequest.create({
+        data: {
+          restaurantName: d.restaurantName,
+          managerName: d.managerName,
+          email: d.email,
+          phone: d.phone ?? null,
+          city: d.city ?? null,
+          selectedModules: d.selectedModules,
+          engagement: d.engagement,
+          monthlyHtCents: d.monthlyHtCents,
+          totalHtCents: d.totalHtCents,
+          volumePercent: d.volumePercent,
+          message: d.message ?? null,
+          sourceUrl: d.sourceUrl ?? "matable.pro/tarifs",
+        },
+      });
+
+      // Notification email à l'équipe MaTable
+      if (canSendEmail()) {
+        const moduleNames: Record<string, string> = {
+          avis: "Avis Google", qr: "Commande & Paiement", server: "Portail Serveur",
+          stock: "Nova Stock IA", finance: "Nova Finance IA", contab: "Nova Contab IA",
+          reservations: "Réservations",
+        };
+        const modulesList = d.selectedModules.map((id) => moduleNames[id] ?? id).join(", ");
+        const engagementLabel: Record<string, string> = {
+          "3m": "3 mois", "6m": "6 mois", "9m": "9 mois",
+          "12m": "12 mois", "12a": "12 mois (paiement annuel)",
+        };
+        const monthly = (d.monthlyHtCents / 100).toFixed(2);
+        const total = (d.totalHtCents / 100).toFixed(2);
+
+        await sendEmail({
+          to: ["steven@matable.pro", "contact@matable.pro"],
+          subject: `🎯 Nouvelle demande : ${d.restaurantName} — ${monthly} €/mois`,
+          html: `
+            <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;padding:20px;">
+              <h2 style="color:#f97316;margin:0 0 16px;">Nouvelle demande de souscription</h2>
+              <table style="width:100%;border-collapse:collapse;font-size:14px;">
+                <tr><td style="padding:6px;color:#666;width:140px;">Établissement</td><td style="padding:6px;"><b>${d.restaurantName}</b></td></tr>
+                <tr><td style="padding:6px;color:#666;">Contact</td><td style="padding:6px;">${d.managerName}</td></tr>
+                <tr><td style="padding:6px;color:#666;">Email</td><td style="padding:6px;"><a href="mailto:${d.email}">${d.email}</a></td></tr>
+                ${d.phone ? `<tr><td style="padding:6px;color:#666;">Téléphone</td><td style="padding:6px;"><a href="tel:${d.phone}">${d.phone}</a></td></tr>` : ""}
+                ${d.city ? `<tr><td style="padding:6px;color:#666;">Ville</td><td style="padding:6px;">${d.city}</td></tr>` : ""}
+                <tr><td style="padding:6px;color:#666;border-top:1px solid #eee;">Modules</td><td style="padding:6px;border-top:1px solid #eee;">${modulesList}</td></tr>
+                <tr><td style="padding:6px;color:#666;">Engagement</td><td style="padding:6px;"><b>${engagementLabel[d.engagement] ?? d.engagement}</b></td></tr>
+                <tr><td style="padding:6px;color:#666;">Mensualité HT</td><td style="padding:6px;color:#f97316;font-weight:900;font-size:18px;">${monthly} €</td></tr>
+                <tr><td style="padding:6px;color:#666;">Total période</td><td style="padding:6px;">${total} € HT${d.volumePercent > 0 ? ` (remise volume ${d.volumePercent}%)` : ""}</td></tr>
+                ${d.message ? `<tr><td style="padding:6px;color:#666;vertical-align:top;border-top:1px solid #eee;">Message</td><td style="padding:6px;border-top:1px solid #eee;white-space:pre-wrap;">${d.message.replace(/</g, "&lt;")}</td></tr>` : ""}
+              </table>
+              <p style="margin-top:24px;padding:12px;background:#fff7ed;border-left:4px solid #f97316;font-size:13px;">
+                💡 Cette demande est en attente dans <b>/dashboard/demandes</b>. Vous pouvez la convertir en contrat en un clic.
+              </p>
+            </div>
+          `,
+          replyTo: d.email,
+        });
+      }
+
+      return { success: true, requestId: created.id };
+    } catch (e: any) {
+      req.log.error(e, "Error creating pricing request");
+      return reply.status(500).send({ error: "Erreur serveur" });
+    }
+  });
+
   app.post("/contact", async (req, reply) => {
     const schema = z.object({
       restaurantName: z.string().min(1, "Nom de l'établissement requis"),

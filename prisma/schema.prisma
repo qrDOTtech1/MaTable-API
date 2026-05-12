@@ -576,6 +576,31 @@ enum SubscriptionPlan {
 // ---------------------------------------------------------------------------
 // Prospection CRM
 // ---------------------------------------------------------------------------
+// Demandes de souscription depuis /tarifs (landing)
+model PricingRequest {
+  id              String    @id @default(uuid())
+  status          String    @default("NEW") // NEW | CONTACTED | CONVERTED | REJECTED
+  restaurantName  String
+  managerName     String
+  email           String
+  phone           String?
+  city            String?
+  selectedModules String[]  @default([])
+  engagement      String
+  monthlyHtCents  Int       @default(0)
+  totalHtCents    Int       @default(0)
+  volumePercent   Int       @default(0)
+  message         String?   @db.Text
+  sourceUrl       String?
+  convertedRestaurantId String?
+  convertedAt     DateTime?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @default(now()) @updatedAt
+
+  @@index([status, createdAt])
+  @@index([createdAt])
+}
+
 model Prospect {
   id           String    @id @default(uuid())
   name         String
