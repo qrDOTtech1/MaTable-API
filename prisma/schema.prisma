@@ -64,8 +64,48 @@ model Restaurant {
   photos         Photo[] @relation("RestaurantPhotos")
   testimonial    Testimonial?
   socialProfiles SocialProfile[] // Active profiles in this restaurant
- 
+  generatedDocuments GeneratedDocument[]
+
   @@index([slug])
+}
+
+// ---------------------------------------------------------------------------
+// Documents générés (classeur virtuel admin) — déclaré aussi côté API pour
+// que les db push ne droppent pas les tables connues uniquement de l'admin.
+// ---------------------------------------------------------------------------
+model GeneratedDocument {
+  id            String     @id @default(uuid())
+  restaurant    Restaurant @relation(fields: [restaurantId], references: [id], onDelete: Cascade)
+  restaurantId  String
+  type          String
+  number        String
+  title         String
+  totalCents    Int        @default(0)
+  vendor        Json
+  client        Json
+  data          Json
+  pdfUrl        String?
+  signedAt      DateTime?
+  createdAt     DateTime   @default(now())
+  createdBy     String?
+  archivedInMonth String?
+
+  @@index([restaurantId, createdAt])
+  @@index([type, createdAt])
+  @@index([createdAt])
+  @@index([archivedInMonth])
+}
+
+// ---------------------------------------------------------------------------
+// Configuration admin globale (singleton) — déclaré aussi côté API.
+// ---------------------------------------------------------------------------
+model AdminConfig {
+  id                 String    @id @default("default")
+  archiveRecipient   String?
+  archiveEnabled     Boolean   @default(false)
+  archiveDayOfMonth  Int       @default(1)
+  lastArchiveSentAt  DateTime?
+  updatedAt          DateTime  @updatedAt
 }
 
 model Photo {
