@@ -104,7 +104,7 @@ export function reservationConfirmationHtml(opts: {
     </div>
     <!-- Footer -->
     <div style="background:#f8f8f8;padding:16px 32px;text-align:center;font-size:11px;color:#999">
-      Envoyé via <strong>MaTable</strong> · matable.pro
+      Envoyé via <strong>MaTable.Pro</strong> · matable.pro
     </div>
   </div>
 </body>
@@ -133,7 +133,7 @@ export function voucherCodeHtml(opts: {
       <p style="font-size:12px;color:#999;margin:24px 0 0">Ce code expire dans 10 minutes.</p>
     </div>
     <div style="background:#f8f8f8;padding:14px 32px;text-align:center;font-size:11px;color:#999">
-      Envoyé via <strong>MaTable</strong> · matable.pro
+      Envoyé via <strong>MaTable.Pro</strong> · matable.pro
     </div>
   </div>
 </body>
@@ -195,7 +195,7 @@ export function invoiceHtml(opts: {
       ${opts.invoiceUrl ? `<div style="margin-top:20px;text-align:center"><a href="${opts.invoiceUrl}" style="display:inline-block;background:#ea580c;color:#fff;text-decoration:none;padding:10px 24px;border-radius:8px;font-size:13px;font-weight:700">📄 Voir le ticket en ligne</a></div>` : ""}
     </div>
     <div style="background:#f8f8f8;padding:14px 28px;text-align:center;font-size:11px;color:#999">
-      Merci de votre visite · <strong>MaTable</strong> · matable.pro
+      Merci de votre visite · <strong>MaTable.Pro</strong> · matable.pro
     </div>
   </div>
 </body>
