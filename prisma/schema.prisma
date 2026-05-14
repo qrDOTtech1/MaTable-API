@@ -36,6 +36,7 @@ model Restaurant {
   tipsEnabled             Boolean  @default(true)
   serviceCallEnabled      Boolean  @default(true)
   reviewsEnabled          Boolean  @default(true)
+  serverUniqueReviewQr    Boolean  @default(true)  // true = QR/NFC unique par serveur, false = QR/NFC unique du restaurant
    
   // NovaTech IA Subscription
   subscription            SubscriptionPlan @default(STARTER)
