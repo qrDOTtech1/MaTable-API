@@ -173,12 +173,13 @@ export async function proRoutes(app: FastifyInstance) {
     
     if (restaurant) {
       const configRaw = await prisma.$queryRawUnsafe<any[]>(
-        `SELECT "googleReviewLink", "reviewVoucherConfig", "businessType", "reviewCustomQuestions" FROM "Restaurant" WHERE id = $1`, me.restaurantId
+        `SELECT "googleReviewLink", "reviewVoucherConfig", "businessType", "reviewCustomQuestions", "serverUniqueReviewQr" FROM "Restaurant" WHERE id = $1`, me.restaurantId
       );
       (restaurant as any).googleReviewLink = configRaw[0]?.googleReviewLink || null;
       (restaurant as any).reviewVoucherConfig = configRaw[0]?.reviewVoucherConfig || null;
       (restaurant as any).businessType = configRaw[0]?.businessType || "RESTAURANT";
       (restaurant as any).reviewCustomQuestions = configRaw[0]?.reviewCustomQuestions || null;
+      (restaurant as any).serverUniqueReviewQr = configRaw[0]?.serverUniqueReviewQr ?? true;
     }
 
     const enabledApps = await getEnabledApps(me.restaurantId);
@@ -212,6 +213,7 @@ export async function proRoutes(app: FastifyInstance) {
       tipsEnabled: z.boolean().optional(),
       serviceCallEnabled: z.boolean().optional(),
       reviewsEnabled: z.boolean().optional(),
+      serverUniqueReviewQr: z.boolean().optional(),
       googleReviewLink: z.string().optional().nullable(),
       reviewVoucherConfig: z.any().optional(),
       businessType: z.enum(["RESTAURANT", "BOUTIQUE"]).optional(),
