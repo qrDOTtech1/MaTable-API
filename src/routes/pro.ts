@@ -5,6 +5,7 @@ import crypto from "crypto";
 import { prisma } from "../db.js";
 import { requirePro } from "../auth.js";
 import { emitToRestaurant, emitToSession } from "../realtime.js";
+import { registerSseClient, unregisterSseClient } from "../sseHub.js";
 import { getEnabledApps } from "../appGating.js";
 
 const ALLERGENS = [
@@ -163,6 +164,37 @@ export async function proRoutes(app: FastifyInstance) {
      });
      return { id: photo.id, path: `/api/photo/${photo.id}` };
    });
+
+  // ───────────────────────────────────────────────────────────────────────
+  // GET /api/pro/events/stream — Server-Sent Events
+  // Stream temps reel pour les terminaux NovaOS et autres clients headless.
+  // Authentifie via JWT pro (header Authorization OU ?token=... query string,
+  // car le constructeur EventSource ne permet pas de header custom).
+  // ───────────────────────────────────────────────────────────────────────
+  app.get<{ Querystring: { token?: string } }>("/events/stream", async (req, reply) => {
+    // Allow token via query string for EventSource compatibility
+    const q = req.query;
+    if (q?.token && !req.headers.authorization) {
+      (req.headers as any).authorization = `Bearer ${q.token}`;
+    }
+
+    const me = await requirePro(req, reply);
+    if (!me) return; // requirePro already sent 401
+
+    const client = registerSseClient(me.restaurantId, reply);
+
+    // Cleanup on disconnect
+    req.raw.on("close", () => {
+      unregisterSseClient(me.restaurantId, client);
+    });
+    req.raw.on("error", () => {
+      unregisterSseClient(me.restaurantId, client);
+    });
+
+    // Fastify expects us to return — but we hijack the reply for SSE.
+    // Mark as hijacked so Fastify doesn't try to serialize a response.
+    return reply.hijack();
+  });
 
   app.get("/me", async (req, reply) => {
     const me = await requirePro(req, reply);
