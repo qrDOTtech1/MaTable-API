@@ -14,6 +14,7 @@ import { prisma } from "../db.js";
 import { env } from "../env.js";
 import jwt from "jsonwebtoken";
 import { emitToRestaurant, emitToSession } from "../realtime.js";
+import { registerSseClient, unregisterSseClient } from "../sseHub.js";
 
 type CuisineJwt = { restaurantId: string; role: "cuisine" };
 
@@ -196,5 +197,23 @@ export async function cuisinePortalRoutes(app: FastifyInstance) {
       status: order.status,
     });
     return { ok: true };
+  });
+
+  // ──────────────────────────────────────────────────────────────────────
+  // GET /api/cuisine/stream — Server-Sent Events (temps réel)
+  // Évènements pertinents : order:new, order:updated, order:overdue,
+  // menu:availability_changed.
+  // Auth : JWT cuisine (Authorization Bearer OU ?token= query string).
+  // ──────────────────────────────────────────────────────────────────────
+  app.get<{ Querystring: { token?: string } }>("/stream", async (req, reply) => {
+    if (req.query?.token && !req.headers.authorization) {
+      (req.headers as any).authorization = `Bearer ${req.query.token}`;
+    }
+    let me: CuisineJwt;
+    try { me = await requireCuisine(req, reply); } catch { return; }
+    const client = registerSseClient(me.restaurantId, reply);
+    req.raw.on("close", () => unregisterSseClient(me.restaurantId, client));
+    req.raw.on("error", () => unregisterSseClient(me.restaurantId, client));
+    return reply.hijack();
   });
 }

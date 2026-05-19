@@ -11,6 +11,7 @@ import { z } from "zod";
 import { prisma } from "../db.js";
 import { env } from "../env.js";
 import { emitToRestaurant } from "../realtime.js";
+import { registerSseClient, unregisterSseClient } from "../sseHub.js";
 import { getGlobalIaConfig, callCloudAI } from "../globalIaConfig.js";
 import { hasApp, getEnabledApps } from "../appGating.js";
 import jwt from "jsonwebtoken";
@@ -807,5 +808,23 @@ Réponds de façon concise en français, en bullet points.`;
     } catch (err: any) {
       return reply.code(500).send({ error: "AI_SERVICE_UNAVAILABLE" });
     }
+  });
+
+  // ──────────────────────────────────────────────────────────────────────
+  // GET /api/server/stream — Server-Sent Events (temps réel)
+  // Reçoit tous les évènements liés au restaurant : order:new, order:updated,
+  // service:called, bill:requested, etc.
+  // Auth : JWT serveur (Authorization Bearer OU ?token= query pour EventSource).
+  // ──────────────────────────────────────────────────────────────────────
+  app.get<{ Querystring: { token?: string } }>("/stream", async (req, reply) => {
+    if (req.query?.token && !req.headers.authorization) {
+      (req.headers as any).authorization = `Bearer ${req.query.token}`;
+    }
+    let me: ServerJwtPayload;
+    try { me = await requireServer(req, reply); } catch { return; }
+    const client = registerSseClient(me.restaurantId, reply);
+    req.raw.on("close", () => unregisterSseClient(me.restaurantId, client));
+    req.raw.on("error", () => unregisterSseClient(me.restaurantId, client));
+    return reply.hijack();
   });
 }

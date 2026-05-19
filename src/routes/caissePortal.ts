@@ -10,6 +10,7 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { prisma } from "../db.js";
+import { registerSseClient, unregisterSseClient } from "../sseHub.js";
 import { env } from "../env.js";
 import jwt from "jsonwebtoken";
 
@@ -219,5 +220,23 @@ export async function caissePortalRoutes(app: FastifyInstance) {
     ]);
 
     return { ok: true };
+  });
+
+  // ──────────────────────────────────────────────────────────────────────
+  // GET /api/caisse/stream — Server-Sent Events (temps réel)
+  // Évènements pertinents : bill:requested, tip:received, order:paid,
+  // order:updated (statut PAID notamment).
+  // Auth : JWT caisse (Authorization Bearer OU ?token= query string).
+  // ──────────────────────────────────────────────────────────────────────
+  app.get<{ Querystring: { token?: string } }>("/stream", async (req, reply) => {
+    if (req.query?.token && !req.headers.authorization) {
+      (req.headers as any).authorization = `Bearer ${req.query.token}`;
+    }
+    let me: CaisseJwt;
+    try { me = await requireCaisse(req, reply); } catch { return; }
+    const client = registerSseClient(me.restaurantId, reply);
+    req.raw.on("close", () => unregisterSseClient(me.restaurantId, client));
+    req.raw.on("error", () => unregisterSseClient(me.restaurantId, client));
+    return reply.hijack();
   });
 }
