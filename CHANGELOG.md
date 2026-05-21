@@ -7,6 +7,9 @@ Format : [Keep a Changelog](https://keepachangelog.com/fr/1.0.0/)
 
 ## [Unreleased] — v1.2 (Nova IA & Direct Feedback)
 
+### Ajouté — Reviews
+- **Catégories d'évaluation configurables** : nouvelle colonne JSONB `Restaurant.reviewRatingCategories`. Le pro peut activer/désactiver/renommer/ajouter ses propres critères en étoiles. Exposée via `GET /api/r/:slug/review-campaign`, persistée via `PATCH /api/pro/restaurant`. `POST /api/ia/review-chat` accepte désormais des clés de notes arbitraires (`ratings: Record<string, number>`) et des libellés (`ratingLabels`) pour générer le prompt avec le bon vocabulaire.
+
 ### Ajouté — Pricing
 - **Remises sur quantité par plat** : nouvelle colonne JSONB `MenuItem.quantityDiscounts` (paliers `PERCENT` ou `FIXED_CENTS`). Le palier appliqué est celui avec le plus grand `minQty` atteint par la quantité commandée. Pris en compte dans `POST /api/orders`, `PATCH /api/pro/orders/:id/items` et `PATCH /api/pro/orders/:id/modify`. Exposé via `GET /api/pro/menu` et `GET /api/tables/:tableId`.
 

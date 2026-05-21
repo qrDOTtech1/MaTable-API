@@ -323,6 +323,12 @@ CREATE INDEX IF NOT EXISTS "Restaurant_chainId_idx" ON "Restaurant"("chainId");
 ALTER TABLE "Restaurant" ADD COLUMN IF NOT EXISTS "businessType" TEXT NOT NULL DEFAULT 'RESTAURANT';
 ALTER TABLE "Restaurant" ADD COLUMN IF NOT EXISTS "reviewCustomQuestions" TEXT;
 
+-- Restaurant: configurable rating categories shown to customers in the review flow.
+-- Format: [{ "key": "food", "label": "Cuisine", "icon": "🍽️", "enabled": true }, ...]
+-- Reserved default keys: food, service, atmosphere, value (used by stats radar).
+-- Empty array = fall back to the 4 historical defaults.
+ALTER TABLE "Restaurant" ADD COLUMN IF NOT EXISTS "reviewRatingCategories" JSONB NOT NULL DEFAULT '[]'::jsonb;
+
 -- ServerTip: tips left by customers via review flow
 CREATE TABLE IF NOT EXISTS "ServerTip" (
   id TEXT NOT NULL,

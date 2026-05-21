@@ -207,13 +207,14 @@ export async function proRoutes(app: FastifyInstance) {
     
     if (restaurant) {
       const configRaw = await prisma.$queryRawUnsafe<any[]>(
-        `SELECT "googleReviewLink", "reviewVoucherConfig", "businessType", "reviewCustomQuestions", "serverUniqueReviewQr" FROM "Restaurant" WHERE id = $1`, me.restaurantId
+        `SELECT "googleReviewLink", "reviewVoucherConfig", "businessType", "reviewCustomQuestions", "serverUniqueReviewQr", "reviewRatingCategories" FROM "Restaurant" WHERE id = $1`, me.restaurantId
       );
       (restaurant as any).googleReviewLink = configRaw[0]?.googleReviewLink || null;
       (restaurant as any).reviewVoucherConfig = configRaw[0]?.reviewVoucherConfig || null;
       (restaurant as any).businessType = configRaw[0]?.businessType || "RESTAURANT";
       (restaurant as any).reviewCustomQuestions = configRaw[0]?.reviewCustomQuestions || null;
       (restaurant as any).serverUniqueReviewQr = configRaw[0]?.serverUniqueReviewQr ?? true;
+      (restaurant as any).reviewRatingCategories = Array.isArray(configRaw[0]?.reviewRatingCategories) ? configRaw[0].reviewRatingCategories : [];
     }
 
     const enabledApps = await getEnabledApps(me.restaurantId);
@@ -252,6 +253,12 @@ export async function proRoutes(app: FastifyInstance) {
       reviewVoucherConfig: z.any().optional(),
       businessType: z.enum(["RESTAURANT", "BOUTIQUE"]).optional(),
       reviewCustomQuestions: z.string().max(2000).optional().nullable(),
+      reviewRatingCategories: z.array(z.object({
+        key: z.string().min(1).max(40).regex(/^[a-z0-9_]+$/i, "key must be alphanumeric/underscore"),
+        label: z.string().min(1).max(60),
+        icon: z.string().max(8).optional().default(""),
+        enabled: z.boolean().optional().default(true),
+      })).max(12).optional(),
       openingHours: z.array(z.object({
         dayOfWeek: z.number().int().min(0).max(6),
         openMin: z.number().int().min(0).max(1440),
@@ -260,7 +267,7 @@ export async function proRoutes(app: FastifyInstance) {
       })).optional(),
     }).parse(req.body);
 
-    const { openingHours, googleReviewLink, reviewVoucherConfig, businessType, reviewCustomQuestions, ...restData } = body;
+    const { openingHours, googleReviewLink, reviewVoucherConfig, businessType, reviewCustomQuestions, reviewRatingCategories, ...restData } = body;
 
     if (restData.slug) {
       const taken = await prisma.restaurant.findFirst({
@@ -285,6 +292,17 @@ export async function proRoutes(app: FastifyInstance) {
     }
     if (reviewCustomQuestions !== undefined) {
       ops.push(prisma.$executeRawUnsafe(`UPDATE "Restaurant" SET "reviewCustomQuestions" = $1 WHERE id = $2`, reviewCustomQuestions, me.restaurantId));
+    }
+    if (reviewRatingCategories !== undefined) {
+      // Dedupe by key, keep order
+      const seen = new Set<string>();
+      const cleaned = reviewRatingCategories.filter(c => {
+        const k = c.key.toLowerCase();
+        if (seen.has(k)) return false;
+        seen.add(k);
+        return true;
+      });
+      ops.push(prisma.$executeRawUnsafe(`UPDATE "Restaurant" SET "reviewRatingCategories" = $1::jsonb WHERE id = $2`, JSON.stringify(cleaned), me.restaurantId));
     }
     if (openingHours !== undefined) {
       ops.push(prisma.openingHour.deleteMany({ where: { restaurantId: me.restaurantId } }));

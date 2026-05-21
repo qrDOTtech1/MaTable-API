@@ -509,12 +509,13 @@ export async function publicRoutes(app: FastifyInstance) {
 
     // Get specific configuration fields via raw query because they are not in prisma schema yet
     const configRaw = await prisma.$queryRawUnsafe<any[]>(
-      `SELECT "googleReviewLink", "reviewVoucherConfig", "businessType", "reviewCustomQuestions" FROM "Restaurant" WHERE id = $1`, r.id
+      `SELECT "googleReviewLink", "reviewVoucherConfig", "businessType", "reviewCustomQuestions", "reviewRatingCategories" FROM "Restaurant" WHERE id = $1`, r.id
     );
     const googleReviewLink = configRaw[0]?.googleReviewLink || null;
     const reviewVoucherConfig = configRaw[0]?.reviewVoucherConfig || null;
     const businessType: string = configRaw[0]?.businessType || "RESTAURANT";
     const reviewCustomQuestions: string | null = configRaw[0]?.reviewCustomQuestions || null;
+    const reviewRatingCategories = Array.isArray(configRaw[0]?.reviewRatingCategories) ? configRaw[0].reviewRatingCategories : [];
 
     // Get list of active servers with their photos
     const servers = await prisma.server.findMany({
@@ -544,6 +545,7 @@ export async function publicRoutes(app: FastifyInstance) {
       reviewVoucherConfig,
       businessType,
       reviewCustomQuestions,
+      reviewRatingCategories,
       servers
     };
   });
@@ -739,18 +741,18 @@ export async function publicRoutes(app: FastifyInstance) {
     const body = z.object({
       restaurantId: z.string().min(1),
       serverName: z.string().min(1),
-      ratings: z.object({
-        food: z.number(),
-        service: z.number(),
-        atmosphere: z.number(),
-        value: z.number()
-      }),
+      // Accept arbitrary category keys (defaults: food/service/atmosphere/value,
+      // plus any custom categories configured by the pro).
+      ratings: z.record(z.string(), z.number().min(0).max(5)),
       history: z.array(z.object({
         role: z.enum(["ai", "user"]),
         content: z.string()
       })),
       businessType: z.enum(["RESTAURANT", "BOUTIQUE"]).optional().default("RESTAURANT"),
       customQuestions: z.string().optional(),
+      // Optional human labels for each rating key (sent by the public review page so the
+      // prompt mentions the same wording the customer saw on screen).
+      ratingLabels: z.record(z.string(), z.string()).optional(),
     }).parse(req.body);
 
     const { send, close } = setupSSE(reply);
@@ -762,9 +764,15 @@ export async function publicRoutes(app: FastifyInstance) {
       const isFinalTurn = body.history.filter(m => m.role === "user").length >= 2;
       const isBoutique = body.businessType === "BOUTIQUE";
       const entityLabel = isBoutique ? "établissement" : "restaurant";
-      const ratingLabels = isBoutique
-        ? `Produits/Services: ${body.ratings.food}, Accueil: ${body.ratings.service}, Ambiance: ${body.ratings.atmosphere}, Qualité/Prix: ${body.ratings.value}`
-        : `Cuisine: ${body.ratings.food}, Service: ${body.ratings.service}, Ambiance: ${body.ratings.atmosphere}, Qualité/Prix: ${body.ratings.value}`;
+      // Default human-readable labels per key (used when ratingLabels not provided).
+      const defaultLabels: Record<string, string> = isBoutique
+        ? { food: "Produits/Services", service: "Accueil", atmosphere: "Ambiance", value: "Qualité/Prix" }
+        : { food: "Cuisine", service: "Service", atmosphere: "Ambiance", value: "Qualité/Prix" };
+      const labelOf = (key: string) => body.ratingLabels?.[key] ?? defaultLabels[key] ?? key;
+      const ratingLabels = Object.entries(body.ratings)
+        .filter(([, v]) => Number(v) > 0)
+        .map(([k, v]) => `${labelOf(k)}: ${v}`)
+        .join(", ");
 
       let prompt = `Tu es l'assistant virtuel parfait d'un ${entityLabel}, chargé de récolter les avis clients de manière chaleureuse.
 Notes du client (sur 5) : ${ratingLabels}.
