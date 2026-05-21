@@ -320,7 +320,10 @@ export async function aiRoutes(app: FastifyInstance) {
   });
 
   // ─────────────────────────────────────────────────────────────────────────────
-  // POST /ia/magic-scan  — vision / photo plat → JSON menu
+  // POST /ia/magic-scan  — vision OCR
+  //   mode "dish"  → photo d'UN plat   → { result: { suggestedName, ... } }
+  //   mode "menu"  → photo d'une CARTE papier → { items: [...], detected: "menu" }
+  //   mode "auto"  → auto-détecte         → soit l'un soit l'autre
   // ─────────────────────────────────────────────────────────────────────────────
   app.post("/ia/magic-scan", async (req, reply) => {
     const me = await requirePro(req, reply);
@@ -331,41 +334,100 @@ export async function aiRoutes(app: FastifyInstance) {
       return reply.code(503).send({ error: "IA_KEY_MISSING", message: "Cle API Ollama Cloud non configuree dans l'admin." });
     }
 
-    const { imageBase64 } = z.object({
+    const { imageBase64, mode = "auto" } = z.object({
       imageBase64: z.string(),
       mimeType: z.string().default("image/jpeg"),
+      mode: z.enum(["dish", "menu", "auto"]).optional(),
     }).parse(req.body);
 
     const model = iaConfig.ollamaVisionModel;
+    const cleanB64 = imageBase64.replace(/^data:[^;]+;base64,/, "");
 
-    // For vision models, merge the system prompt into the user message
-    // because some models (qwen3-vl, gemma4) don't support system role with images
-    const visionPrompt = `Tu es un expert culinaire. Analyse cette photo de plat et reponds UNIQUEMENT en JSON valide (sans markdown, sans backticks) avec ce format exact :
+    // ── Helper : exécute une requête vision et tente d'en extraire du JSON
+    async function runVision(prompt: string, expectArray = false) {
+      const messages: OllamaMsg[] = [
+        { role: "user", content: prompt, images: [cleanB64] },
+      ];
+      let raw = (await ollamaCloudChat(iaConfig.ollamaApiKey!, model, messages, VISION_TIMEOUT_MS))
+        .trim().replace(/^```json\n?|```$/g, "").replace(/^```\n?|```$/g, "").trim();
+
+      if (expectArray) {
+        // Extrait le 1er [...] complet
+        const m = raw.match(/\[[\s\S]*\]/);
+        if (m) raw = m[0];
+      } else {
+        const m = raw.match(/\{[\s\S]*\}/);
+        if (m) raw = m[0];
+      }
+
+      try { return JSON.parse(raw); }
+      catch { return null; }
+    }
+
+    // ── Prompt pour photo de PLAT unique ────────────────────────────────────
+    const dishPrompt = `Tu es un expert culinaire. Analyse cette photo de plat et reponds UNIQUEMENT en JSON valide (sans markdown, sans backticks) avec ce format exact :
 {"suggestedName":"nom du plat","description":"description 3-4 phrases pour menu","suggestedPrice":"18,00€","allergens":["Gluten"],"diets":["Vegetarien"],"confidence":85}
 Allergenes possibles : Gluten, Crustaces, Oeufs, Poisson, Arachides, Soja, Lait, Fruits a coque, Celeri, Moutarde, Sesame, Sulfites, Lupin, Mollusques.
 Regimes possibles : Vegetarien, Vegan, Sans gluten, Sans lactose, Halal, Casher.
 
 Analyse ce plat.`;
 
-    const cleanB64 = imageBase64.replace(/^data:[^;]+;base64,/, "");
+    // ── Prompt pour photo d'une CARTE / MENU PAPIER (OCR + extraction) ──────
+    const menuPrompt = `Tu es un assistant OCR pour cartes de restaurant. Lis ATTENTIVEMENT cette photo qui montre une carte/menu papier (entrees, plats, desserts, boissons, etc.).
+Extrais TOUS les items lisibles avec leurs prix.
+
+Reponds UNIQUEMENT par un tableau JSON valide (sans markdown, sans backticks, sans texte autour), chaque element au format :
+{"name":"Nom exact du plat","description":"Description si visible sur la carte, sinon courte description IA en 1 phrase","priceCents":1800,"category":"Entree|Plat|Dessert|Boisson|Apero|Autre","allergens":["Gluten"],"diets":["Vegetarien"],"confidence":85}
+
+REGLES IMPERATIVES :
+1. UN element par plat. Pas de regroupement.
+2. priceCents = prix en CENTIMES (ex: 18,50€ -> 1850, 9€ -> 900). Si prix illisible, mets 0.
+3. category obligatoire : devine selon le contexte si pas explicite.
+4. Si la description n'est PAS visible sur la carte, genere-la (1 phrase max, professionnelle).
+5. allergens et diets : detecte d'apres le nom (ex: "tartare de boeuf" -> ["Oeufs"], "salade vegan" -> diets:["Vegan"]).
+6. Ignore les en-tetes decoratifs ("Notre carte", "Bon appetit", "Maison fondee en 1923", etc.).
+7. Si tu ne vois aucun item, reponds [].
+
+Allergenes possibles : Gluten, Crustaces, Oeufs, Poisson, Arachides, Soja, Lait, Fruits a coque, Celeri, Moutarde, Sesame, Sulfites, Lupin, Mollusques.
+Regimes possibles : Vegetarien, Vegan, Sans gluten, Sans lactose, Halal, Casher.
+
+Extrais maintenant tous les items.`;
+
+    // ── Prompt court de classification auto ─────────────────────────────────
+    const classifyPrompt = `Regarde cette photo. C'est :
+A) Une photo d'UN seul plat (assiette servie, gros plan culinaire)
+B) Une photo d'une CARTE/MENU papier avec du texte et plusieurs prix
+Reponds UNIQUEMENT par "A" ou "B".`;
 
     try {
-      // Single user message with images — no separate system message for vision
-      const messages: OllamaMsg[] = [
-        { role: "user", content: visionPrompt, images: [cleanB64] },
-      ];
+      let effectiveMode = mode;
 
-      let raw = (await ollamaCloudChat(iaConfig.ollamaApiKey, model, messages, VISION_TIMEOUT_MS))
-        .trim().replace(/^```json\n?|```$/g, "").replace(/^```\n?|```$/g, "").trim();
+      // Auto-detection si demandee
+      if (effectiveMode === "auto") {
+        try {
+          const messages: OllamaMsg[] = [{ role: "user", content: classifyPrompt, images: [cleanB64] }];
+          const raw = (await ollamaCloudChat(iaConfig.ollamaApiKey, model, messages, VISION_TIMEOUT_MS))
+            .trim().toUpperCase();
+          // On extrait juste la 1ere lettre A ou B
+          if (raw.includes("B")) effectiveMode = "menu";
+          else effectiveMode = "dish";
+        } catch {
+          // En cas d'echec de classif, on tente "menu" (le cas le plus frequent)
+          effectiveMode = "menu";
+        }
+      }
 
-      // Some models wrap JSON in extra text — extract the JSON object
-      const jsonMatch = raw.match(/\{[\s\S]*\}/);
-      if (jsonMatch) raw = jsonMatch[0];
-
-      let result: Record<string, unknown>;
-      try { result = JSON.parse(raw); }
-      catch { result = { description: raw, confidence: 50 }; }
-      return { result };
+      if (effectiveMode === "menu") {
+        const parsed = await runVision(menuPrompt, true);
+        const items = Array.isArray(parsed) ? parsed : [];
+        return { mode: "menu", detected: "menu", items };
+      } else {
+        const parsed = await runVision(dishPrompt, false);
+        const result = (parsed && typeof parsed === "object")
+          ? parsed
+          : { description: "Analyse impossible.", confidence: 0 };
+        return { mode: "dish", detected: "dish", result };
+      }
     } catch (err: any) {
       app.log.error(err);
       return reply.code(502).send({ error: "AI_ERROR", details: err.message });
