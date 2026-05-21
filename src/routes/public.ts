@@ -773,6 +773,78 @@ export async function publicRoutes(app: FastifyInstance) {
         .filter(([, v]) => Number(v) > 0)
         .map(([k, v]) => `${labelOf(k)}: ${v}`)
         .join(", ");
+      const userAnswerCount = body.history.filter(m => m.role === "user").length;
+
+      const availableTopics = [
+        {
+          key: "food",
+          label: labelOf("food"),
+          score: body.ratings.food ?? 0,
+          positiveQuestion: isBoutique ? "Quel produit ou service vous a le plus marqué ?" : "Quel plat vous a le plus marqué ?",
+          neutralQuestion: isBoutique ? "Comment avez-vous trouvé la qualité des produits ?" : "Comment avez-vous trouvé la cuisine ?",
+          negativeQuestion: isBoutique ? "Qu'est-ce qui pourrait être amélioré côté produit ?" : "Qu'est-ce qui pourrait être amélioré côté cuisine ?",
+          choices: isBoutique ? ["Très qualitatif", "Correct", "Pas assez convaincant"] : ["Excellent", "Correct", "Décevant"],
+        },
+        {
+          key: "service",
+          label: labelOf("service"),
+          score: body.ratings.service ?? 0,
+          positiveQuestion: `Qu'avez-vous apprécié chez ${body.serverName} ?`,
+          neutralQuestion: isBoutique ? "Comment s'est passé l'accueil ?" : "Comment s'est passé le service ?",
+          negativeQuestion: isBoutique ? "Qu'est-ce qui a manqué dans l'accueil ?" : "Qu'est-ce qui a manqué dans le service ?",
+          choices: ["Très chaleureux", "Correct", "À améliorer"],
+        },
+        {
+          key: "atmosphere",
+          label: labelOf("atmosphere"),
+          score: body.ratings.atmosphere ?? 0,
+          positiveQuestion: "Qu'avez-vous aimé dans l'ambiance ?",
+          neutralQuestion: "Comment avez-vous trouvé l'ambiance ?",
+          negativeQuestion: "Qu'est-ce qui a gêné l'ambiance ?",
+          choices: ["Très agréable", "Plutôt calme", "Pas assez confortable"],
+        },
+        {
+          key: "value",
+          label: labelOf("value"),
+          score: body.ratings.value ?? 0,
+          positiveQuestion: "Le rapport qualité/prix vous a-t-il semblé juste ?",
+          neutralQuestion: "Que pensez-vous du rapport qualité/prix ?",
+          negativeQuestion: "Qu'est-ce qui justifie votre note prix ?",
+          choices: ["Très bon", "Correct", "Trop élevé"],
+        },
+        ...Object.entries(body.ratings)
+          .filter(([key, score]) => !["food", "service", "atmosphere", "value"].includes(key) && score > 0)
+          .map(([key, score]) => ({
+            key,
+            label: labelOf(key),
+            score,
+            positiveQuestion: `Qu'avez-vous apprécié concernant ${labelOf(key)} ?`,
+            neutralQuestion: `Comment avez-vous trouvé ${labelOf(key)} ?`,
+            negativeQuestion: `Qu'est-ce qui pourrait être amélioré concernant ${labelOf(key)} ?`,
+            choices: ["Très bien", "Correct", "À améliorer"],
+          })),
+      ].filter(t => t.score > 0);
+
+      const customTopics = (body.customQuestions ?? "")
+        .split(/[\n;,]+/)
+        .map(s => s.trim())
+        .filter(Boolean)
+        .slice(0, 4);
+
+      const prioritizedTopics = [...availableTopics]
+        .sort((a, b) => {
+          const aNeedsFollowUp = a.score > 0 && a.score <= 3 ? 0 : 1;
+          const bNeedsFollowUp = b.score > 0 && b.score <= 3 ? 0 : 1;
+          if (aNeedsFollowUp !== bNeedsFollowUp) return aNeedsFollowUp - bNeedsFollowUp;
+          if (aNeedsFollowUp === 0) return a.score - b.score;
+          return b.score - a.score;
+        })
+        .map(t => {
+          const question = t.score <= 3 ? t.negativeQuestion : t.score >= 5 ? t.positiveQuestion : t.neutralQuestion;
+          return `${t.label} (${t.score}/5) -> ${question} | ${t.choices.join(" | ")}`;
+        });
+
+      const selectedTopicHint = prioritizedTopics[userAnswerCount] ?? prioritizedTopics[0];
 
       let prompt = `Tu es l'assistant virtuel parfait d'un ${entityLabel}, chargé de récolter les avis clients de manière chaleureuse.
 Notes du client (sur 5) : ${ratingLabels}.
@@ -797,11 +869,21 @@ Ne renvoie STRICTEMENT rien d'autre que ce JSON (pas de bloc markdown) :
   "version2": "Texte court de l'avis 2"
 }`;
       } else {
-        const topicHint = isBoutique && body.customQuestions
-          ? `Oriente-toi sur les thèmes définis par l'établissement : ${body.customQuestions}.`
-          : `Pose une question sur un aspect précis ${isBoutique ? "de la visite" : "du repas"}.`;
+        const topicHint = customTopics.length > 0 && userAnswerCount === 1
+          ? `Questionne aussi le thème personnalisé suivant, sans ignorer les notes : ${customTopics[0]}.`
+          : `Utilise ce topic prioritaire exactement comme base : ${selectedTopicHint}.`;
         prompt += `
-INSTRUCTION : ${topicHint} Pose UNE SEULE question ciblée et très courte (maximum 15 mots), en fonction des notes données. N'utilise pas de politesse excessive.
+TOPICS DISPONIBLES, classés par pertinence selon les notes :
+${prioritizedTopics.map((t, i) => `${i + 1}. ${t}`).join("\n")}
+${customTopics.length > 0 ? `Topics personnalisés du restaurant : ${customTopics.join(" | ")}` : ""}
+
+INSTRUCTION : ${topicHint}
+Pose UNE SEULE question ciblée et très courte (maximum 15 mots).
+La question doit correspondre à une note réellement donnée :
+- note 1 à 3 : demande ce qui n'a pas marché ou ce qui doit être amélioré ;
+- note 4 à 5 : demande ce qui a plu ou ce qu'il faut mettre en avant ;
+- ne pose pas de question hors sujet (ex: prix si la mauvaise note est service).
+N'utilise pas de politesse excessive.
 Propose ensuite exactement 3 suggestions de réponses courtes séparées par le caractère " | ".
 Format attendu STRICTEMENT :
 <Ta question> | <Choix 1> | <Choix 2> | <Choix 3>
