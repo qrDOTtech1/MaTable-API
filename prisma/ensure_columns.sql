@@ -86,6 +86,11 @@ ALTER TABLE "MenuItem" ADD COLUMN IF NOT EXISTS "waitMinutes" INTEGER NOT NULL D
 ALTER TABLE "MenuItem" ADD COLUMN IF NOT EXISTS "suggestedPairings" JSONB NOT NULL DEFAULT '[]'::jsonb;
 ALTER TABLE "MenuItem" ADD COLUMN IF NOT EXISTS "upsellItems" JSONB NOT NULL DEFAULT '[]'::jsonb;
 
+-- MenuItem: quantity discount tiers
+-- Format: [{ "minQty": 3, "type": "PERCENT", "value": 10 }, { "minQty": 6, "type": "FIXED_CENTS", "value": 200 }]
+-- "PERCENT": value = % off unit price (0-100). "FIXED_CENTS": value = cents off per unit.
+ALTER TABLE "MenuItem" ADD COLUMN IF NOT EXISTS "quantityDiscounts" JSONB NOT NULL DEFAULT '[]'::jsonb;
+
 -- Order: expected ready time (computed at order creation)
 ALTER TABLE "Order" ADD COLUMN IF NOT EXISTS "expectedReadyAt" TIMESTAMP(3);
 

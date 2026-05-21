@@ -7,6 +7,7 @@ import { requirePro } from "../auth.js";
 import { emitToRestaurant, emitToSession } from "../realtime.js";
 import { registerSseClient, unregisterSseClient } from "../sseHub.js";
 import { getEnabledApps } from "../appGating.js";
+import { parseQuantityDiscounts, effectiveUnitPriceCents } from "../quantityDiscount.js";
 
 const ALLERGENS = [
   "GLUTEN","CRUSTACEANS","EGGS","FISH","PEANUTS","SOYBEANS","MILK","NUTS",
@@ -573,6 +574,13 @@ export async function proRoutes(app: FastifyInstance) {
     });
     const menuMap = new Map(menuItems.map((m) => [m.id, m]));
 
+    // Read quantity discount tiers for these items (column managed via ensure_columns.sql)
+    type DiscRow = { id: string; quantityDiscounts: any };
+    const discRows = menuItemIds.length === 0 ? [] : await prisma.$queryRaw<DiscRow[]>`
+      SELECT id, "quantityDiscounts" FROM "MenuItem" WHERE id = ANY(${menuItemIds}::text[])
+    `;
+    const tiersById = new Map(discRows.map((r) => [r.id, parseQuantityDiscounts(r.quantityDiscounts)]));
+
     // Merge into existing items array
     const existing: Array<{ menuItemId?: string; name: string; quantity: number; priceCents: number }> =
       Array.isArray(order.items) ? (order.items as any[]) : [];
@@ -585,6 +593,16 @@ export async function proRoutes(app: FastifyInstance) {
         existing[idx] = { ...existing[idx], quantity: existing[idx].quantity + incoming.quantity };
       } else {
         existing.push({ menuItemId: meta.id, name: meta.name, quantity: incoming.quantity, priceCents: meta.priceCents });
+      }
+    }
+
+    // Re-apply quantity discounts on the merged lines (base price = menu item's current priceCents)
+    for (const line of existing) {
+      if (!line.menuItemId) continue;
+      const meta = menuMap.get(line.menuItemId);
+      const tiers = tiersById.get(line.menuItemId);
+      if (meta && tiers && tiers.length > 0) {
+        line.priceCents = effectiveUnitPriceCents(meta.priceCents, line.quantity, tiers);
       }
     }
 
@@ -629,6 +647,29 @@ export async function proRoutes(app: FastifyInstance) {
       }
     }
 
+    // Re-apply quantity discounts on lines whose qty changed (base price from current MenuItem)
+    const remainingIds = existing.map((l) => l.menuItemId).filter((x): x is string => !!x);
+    if (remainingIds.length > 0) {
+      const menuItems = await prisma.menuItem.findMany({
+        where: { id: { in: remainingIds }, restaurantId: me.restaurantId },
+        select: { id: true, priceCents: true },
+      });
+      const baseById = new Map(menuItems.map((m) => [m.id, m.priceCents]));
+      type DiscRow = { id: string; quantityDiscounts: any };
+      const discRows = await prisma.$queryRaw<DiscRow[]>`
+        SELECT id, "quantityDiscounts" FROM "MenuItem" WHERE id = ANY(${remainingIds}::text[])
+      `;
+      const tiersById = new Map(discRows.map((r) => [r.id, parseQuantityDiscounts(r.quantityDiscounts)]));
+      for (const line of existing) {
+        if (!line.menuItemId) continue;
+        const base = baseById.get(line.menuItemId);
+        const tiers = tiersById.get(line.menuItemId);
+        if (base != null && tiers && tiers.length > 0) {
+          line.priceCents = effectiveUnitPriceCents(base, line.quantity, tiers);
+        }
+      }
+    }
+
     // Si la commande est vide apres modifs, annuler automatiquement
     if (existing.length === 0) {
       const updated = await prisma.order.update({
@@ -664,28 +705,30 @@ export async function proRoutes(app: FastifyInstance) {
     });
     // Attach extended columns from raw (added via ensure_columns.sql)
     const ids = items.map((i) => i.id);
-    type ExtRow = { id: string; waitMinutes: number; suggestedPairings: any; upsellItems: any };
+    type ExtRow = { id: string; waitMinutes: number; suggestedPairings: any; upsellItems: any; quantityDiscounts: any };
     let extRows: ExtRow[] = [];
     if (ids.length > 0) {
       extRows = await prisma.$queryRaw<ExtRow[]>`
-        SELECT id, 
+        SELECT id,
                COALESCE("waitMinutes", 0)::int AS "waitMinutes",
                "suggestedPairings",
-               "upsellItems"
+               "upsellItems",
+               "quantityDiscounts"
         FROM "MenuItem" WHERE id = ANY(${ids}::text[])
       `;
     }
     const extMap = new Map(extRows.map((r) => [r.id, r]));
-    return { 
+    return {
       items: items.map((i) => {
         const ext = extMap.get(i.id);
-        return { 
-          ...i, 
+        return {
+          ...i,
           waitMinutes: ext?.waitMinutes ?? 0,
           suggestedPairings: ext?.suggestedPairings ?? [],
-          upsellItems: ext?.upsellItems ?? []
+          upsellItems: ext?.upsellItems ?? [],
+          quantityDiscounts: parseQuantityDiscounts(ext?.quantityDiscounts),
         };
-      }) 
+      })
     };
   });
 
@@ -705,34 +748,49 @@ export async function proRoutes(app: FastifyInstance) {
     position: z.number().int().optional(),
     suggestedPairings: z.array(z.string()).optional(),
     upsellItems: z.array(z.string()).optional(),
+    quantityDiscounts: z.array(z.object({
+      minQty: z.number().int().min(2).max(999),
+      type: z.enum(["PERCENT", "FIXED_CENTS"]),
+      value: z.number().int().min(0).max(100000),
+    })).max(10).optional(),
   });
 
   app.post("/menu", async (req, reply) => {
     const me = await requirePro(req, reply);
-    const { waitMinutes, suggestedPairings, upsellItems, ...data } = menuInput.parse(req.body);
+    const { waitMinutes, suggestedPairings, upsellItems, quantityDiscounts, ...data } = menuInput.parse(req.body);
     const item = await prisma.menuItem.create({
       data: { ...data, imageUrl: data.imageUrl || null, restaurantId: me.restaurantId } as any,
     });
-    
+
     // Extensions managed via ensure_columns.sql (not in Prisma schema)
     const updates: string[] = [];
     if (waitMinutes !== undefined) updates.push(`"waitMinutes" = ${Number(waitMinutes)}`);
     if (suggestedPairings !== undefined) updates.push(`"suggestedPairings" = '${JSON.stringify(suggestedPairings)}'::jsonb`);
     if (upsellItems !== undefined) updates.push(`"upsellItems" = '${JSON.stringify(upsellItems)}'::jsonb`);
-    
+    if (quantityDiscounts !== undefined) {
+      const cleaned = parseQuantityDiscounts(quantityDiscounts);
+      updates.push(`"quantityDiscounts" = '${JSON.stringify(cleaned).replace(/'/g, "''")}'::jsonb`);
+    }
+
     if (updates.length > 0) {
       await prisma.$executeRawUnsafe(`UPDATE "MenuItem" SET ${updates.join(", ")} WHERE id = $1`, item.id);
     }
-    
-    return { item: { ...item, waitMinutes: waitMinutes ?? 0, suggestedPairings: suggestedPairings ?? [], upsellItems: upsellItems ?? [] } };
+
+    return { item: {
+      ...item,
+      waitMinutes: waitMinutes ?? 0,
+      suggestedPairings: suggestedPairings ?? [],
+      upsellItems: upsellItems ?? [],
+      quantityDiscounts: parseQuantityDiscounts(quantityDiscounts ?? []),
+    } };
   });
 
   app.patch("/menu/:id", async (req, reply) => {
     const me = await requirePro(req, reply);
     const { id } = req.params as { id: string };
-    const { waitMinutes, suggestedPairings, upsellItems, ...data } = menuInput.partial().parse(req.body);
+    const { waitMinutes, suggestedPairings, upsellItems, quantityDiscounts, ...data } = menuInput.partial().parse(req.body);
     if (data.imageUrl === "") (data as any).imageUrl = null;
-    
+
     if (Object.keys(data).length > 0) {
       await prisma.menuItem.updateMany({ where: { id, restaurantId: me.restaurantId }, data: data as any });
     }
@@ -742,7 +800,11 @@ export async function proRoutes(app: FastifyInstance) {
     if (waitMinutes !== undefined) updates.push(`"waitMinutes" = ${Number(waitMinutes)}`);
     if (suggestedPairings !== undefined) updates.push(`"suggestedPairings" = '${JSON.stringify(suggestedPairings)}'::jsonb`);
     if (upsellItems !== undefined) updates.push(`"upsellItems" = '${JSON.stringify(upsellItems)}'::jsonb`);
-    
+    if (quantityDiscounts !== undefined) {
+      const cleaned = parseQuantityDiscounts(quantityDiscounts);
+      updates.push(`"quantityDiscounts" = '${JSON.stringify(cleaned).replace(/'/g, "''")}'::jsonb`);
+    }
+
     if (updates.length > 0) {
       // Must verify ownership again to be safe before raw update
       const exists = await prisma.menuItem.findFirst({ where: { id, restaurantId: me.restaurantId }});

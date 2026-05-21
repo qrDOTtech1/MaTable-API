@@ -12,6 +12,7 @@ import { env } from "../env.js";
 import { randomUUID } from "crypto";
 import { getProspectScraperController, isScraperAuthorized } from "../prospectScraper.js";
 import { detectFlagsWithRating } from "../reviewFlagger.js";
+import { parseQuantityDiscounts, effectiveUnitPriceCents } from "../quantityDiscount.js";
 
 export async function publicRoutes(app: FastifyInstance) {
   app.get("/internal/prospects/scraper", async (req, reply) => {
@@ -346,6 +347,7 @@ export async function publicRoutes(app: FastifyInstance) {
         waitMinutes: (m as any).waitMinutes ?? 0,
         suggestedPairings: (m as any).suggestedPairings ?? [],
         upsellItems: (m as any).upsellItems ?? [],
+        quantityDiscounts: parseQuantityDiscounts((m as any).quantityDiscounts),
       })),
       server,
     };
@@ -1142,10 +1144,21 @@ Ne renvoie STRICTEMENT rien d'autre que ce JSON (pas de bloc Markdown \`\`\`json
       },
     });
     const byId = new Map(menuItems.map((m) => [m.id, m]));
+
+    // Read quantity discount tiers (column managed via ensure_columns.sql, not in Prisma schema)
+    const menuItemIdsForDiscount = body.items.map((i) => i.menuItemId);
+    type DiscRow = { id: string; quantityDiscounts: any };
+    const discRows = menuItemIdsForDiscount.length === 0 ? [] : await prisma.$queryRaw<DiscRow[]>`
+      SELECT id, "quantityDiscounts" FROM "MenuItem" WHERE id = ANY(${menuItemIdsForDiscount}::text[])
+    `;
+    const tiersById = new Map(discRows.map((r) => [r.id, parseQuantityDiscounts(r.quantityDiscounts)]));
+
     const lines = body.items.map((i) => {
       const m = byId.get(i.menuItemId);
       if (!m) throw reply.code(400).send({ error: "unknown_item" });
-      return { menuItemId: m.id, name: m.name, quantity: i.quantity, priceCents: m.priceCents };
+      const tiers = tiersById.get(m.id) ?? [];
+      const unit = effectiveUnitPriceCents(m.priceCents, i.quantity, tiers);
+      return { menuItemId: m.id, name: m.name, quantity: i.quantity, priceCents: unit };
     });
     const totalCents = lines.reduce((s, l) => s + l.priceCents * l.quantity, 0);
 
