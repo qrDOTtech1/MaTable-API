@@ -241,6 +241,9 @@ model MenuItem {
   lowStockThreshold Int?      @default(5)
   allergens         Allergen[] @default([])
   diets             Diet[]     @default([])
+  // Paliers de prix par quantite : [{ qty: 3, priceCents: 2200 }, { qty: 6, priceCents: 4000 }, ...]
+  // Le client choisit explicitement un palier dans la card du plat.
+  quantityTiers     Json?
   createdAt         DateTime  @default(now())
   updatedAt         DateTime  @default(now()) @updatedAt
 

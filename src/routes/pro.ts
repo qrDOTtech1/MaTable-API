@@ -8,6 +8,7 @@ import { emitToRestaurant, emitToSession } from "../realtime.js";
 import { registerSseClient, unregisterSseClient } from "../sseHub.js";
 import { getEnabledApps } from "../appGating.js";
 import { parseQuantityDiscounts, effectiveUnitPriceCents } from "../quantityDiscount.js";
+import { parseQuantityTiers } from "../quantityTiers.js";
 
 const ALLERGENS = [
   "GLUTEN","CRUSTACEANS","EGGS","FISH","PEANUTS","SOYBEANS","MILK","NUTS",
@@ -705,7 +706,7 @@ export async function proRoutes(app: FastifyInstance) {
     });
     // Attach extended columns from raw (added via ensure_columns.sql)
     const ids = items.map((i) => i.id);
-    type ExtRow = { id: string; waitMinutes: number; suggestedPairings: any; upsellItems: any; quantityDiscounts: any };
+    type ExtRow = { id: string; waitMinutes: number; suggestedPairings: any; upsellItems: any; quantityDiscounts: any; quantityTiers: any };
     let extRows: ExtRow[] = [];
     if (ids.length > 0) {
       extRows = await prisma.$queryRaw<ExtRow[]>`
@@ -713,7 +714,8 @@ export async function proRoutes(app: FastifyInstance) {
                COALESCE("waitMinutes", 0)::int AS "waitMinutes",
                "suggestedPairings",
                "upsellItems",
-               "quantityDiscounts"
+               "quantityDiscounts",
+               "quantityTiers"
         FROM "MenuItem" WHERE id = ANY(${ids}::text[])
       `;
     }
@@ -727,6 +729,7 @@ export async function proRoutes(app: FastifyInstance) {
           suggestedPairings: ext?.suggestedPairings ?? [],
           upsellItems: ext?.upsellItems ?? [],
           quantityDiscounts: parseQuantityDiscounts(ext?.quantityDiscounts),
+          quantityTiers: parseQuantityTiers(ext?.quantityTiers),
         };
       })
     };
@@ -753,11 +756,16 @@ export async function proRoutes(app: FastifyInstance) {
       type: z.enum(["PERCENT", "FIXED_CENTS"]),
       value: z.number().int().min(0).max(100000),
     })).max(10).optional(),
+    // Nouveaux paliers qty/prix total : [{ qty: 3, priceCents: 2200 }, ...]
+    quantityTiers: z.array(z.object({
+      qty: z.number().int().min(1).max(9999),
+      priceCents: z.number().int().min(0).max(1_000_000),
+    })).max(20).optional(),
   });
 
   app.post("/menu", async (req, reply) => {
     const me = await requirePro(req, reply);
-    const { waitMinutes, suggestedPairings, upsellItems, quantityDiscounts, ...data } = menuInput.parse(req.body);
+    const { waitMinutes, suggestedPairings, upsellItems, quantityDiscounts, quantityTiers, ...data } = menuInput.parse(req.body);
     const item = await prisma.menuItem.create({
       data: { ...data, imageUrl: data.imageUrl || null, restaurantId: me.restaurantId } as any,
     });
@@ -771,6 +779,10 @@ export async function proRoutes(app: FastifyInstance) {
       const cleaned = parseQuantityDiscounts(quantityDiscounts);
       updates.push(`"quantityDiscounts" = '${JSON.stringify(cleaned).replace(/'/g, "''")}'::jsonb`);
     }
+    if (quantityTiers !== undefined) {
+      const cleaned = parseQuantityTiers(quantityTiers);
+      updates.push(`"quantityTiers" = '${JSON.stringify(cleaned).replace(/'/g, "''")}'::jsonb`);
+    }
 
     if (updates.length > 0) {
       await prisma.$executeRawUnsafe(`UPDATE "MenuItem" SET ${updates.join(", ")} WHERE id = $1`, item.id);
@@ -782,13 +794,14 @@ export async function proRoutes(app: FastifyInstance) {
       suggestedPairings: suggestedPairings ?? [],
       upsellItems: upsellItems ?? [],
       quantityDiscounts: parseQuantityDiscounts(quantityDiscounts ?? []),
+      quantityTiers: parseQuantityTiers(quantityTiers ?? []),
     } };
   });
 
   app.patch("/menu/:id", async (req, reply) => {
     const me = await requirePro(req, reply);
     const { id } = req.params as { id: string };
-    const { waitMinutes, suggestedPairings, upsellItems, quantityDiscounts, ...data } = menuInput.partial().parse(req.body);
+    const { waitMinutes, suggestedPairings, upsellItems, quantityDiscounts, quantityTiers, ...data } = menuInput.partial().parse(req.body);
     if (data.imageUrl === "") (data as any).imageUrl = null;
 
     if (Object.keys(data).length > 0) {
@@ -803,6 +816,10 @@ export async function proRoutes(app: FastifyInstance) {
     if (quantityDiscounts !== undefined) {
       const cleaned = parseQuantityDiscounts(quantityDiscounts);
       updates.push(`"quantityDiscounts" = '${JSON.stringify(cleaned).replace(/'/g, "''")}'::jsonb`);
+    }
+    if (quantityTiers !== undefined) {
+      const cleaned = parseQuantityTiers(quantityTiers);
+      updates.push(`"quantityTiers" = '${JSON.stringify(cleaned).replace(/'/g, "''")}'::jsonb`);
     }
 
     if (updates.length > 0) {

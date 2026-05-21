@@ -13,6 +13,7 @@ import { randomUUID } from "crypto";
 import { getProspectScraperController, isScraperAuthorized } from "../prospectScraper.js";
 import { detectFlagsWithRating } from "../reviewFlagger.js";
 import { parseQuantityDiscounts, effectiveUnitPriceCents } from "../quantityDiscount.js";
+import { parseQuantityTiers, priceForQuantity } from "../quantityTiers.js";
 
 export async function publicRoutes(app: FastifyInstance) {
   app.get("/internal/prospects/scraper", async (req, reply) => {
@@ -402,6 +403,15 @@ export async function publicRoutes(app: FastifyInstance) {
       return reply.code(404).send({ error: "restaurant_not_found" });
     }
 
+    // Charge les paliers quantite/prix pour chaque plat (colonne extension)
+    const menuIds = restaurant.menuItems.map(m => m.id);
+    const tiersRows = menuIds.length > 0
+      ? await prisma.$queryRaw<Array<{ id: string; quantityTiers: any }>>`
+          SELECT id, "quantityTiers" FROM "MenuItem" WHERE id = ANY(${menuIds}::text[])
+        `
+      : [];
+    const tiersById = new Map(tiersRows.map(r => [r.id, parseQuantityTiers(r.quantityTiers)]));
+
     return {
       restaurant: {
         id: restaurant.id,
@@ -419,6 +429,7 @@ export async function publicRoutes(app: FastifyInstance) {
         depositPerGuestCents: restaurant.depositPerGuestCents,
         menuItems: restaurant.menuItems.map((m) => ({
           ...m,
+          quantityTiers: tiersById.get(m.id) ?? [],
           photos: (restaurant as any).photos
             ?.filter((p: any) => p.menuItemId === m.id && p.kind !== "STAFF")
             .map((p: any) => ({ id: p.id, url: `/api/photo/${p.id}` })) ?? [],
@@ -1128,7 +1139,12 @@ Ne renvoie STRICTEMENT rien d'autre que ce JSON (pas de bloc Markdown \`\`\`json
     const body = z
       .object({
         items: z
-          .array(z.object({ menuItemId: z.string(), quantity: z.number().int().min(1) }))
+          .array(z.object({
+            menuItemId: z.string(),
+            quantity: z.number().int().min(1),
+            // qty du palier explicitement choisi par le client (optionnel)
+            selectedTierQty: z.number().int().min(1).max(9999).optional(),
+          }))
           .min(1),
       })
       .parse(req.body);
@@ -1145,22 +1161,55 @@ Ne renvoie STRICTEMENT rien d'autre que ce JSON (pas de bloc Markdown \`\`\`json
     });
     const byId = new Map(menuItems.map((m) => [m.id, m]));
 
-    // Read quantity discount tiers (column managed via ensure_columns.sql, not in Prisma schema)
+    // Read quantity discount tiers + new quantity TIERS (qty → priceCents)
+    // Both columns managed via ensure_columns.sql.
     const menuItemIdsForDiscount = body.items.map((i) => i.menuItemId);
-    type DiscRow = { id: string; quantityDiscounts: any };
+    type DiscRow = { id: string; quantityDiscounts: any; quantityTiers: any };
     const discRows = menuItemIdsForDiscount.length === 0 ? [] : await prisma.$queryRaw<DiscRow[]>`
-      SELECT id, "quantityDiscounts" FROM "MenuItem" WHERE id = ANY(${menuItemIdsForDiscount}::text[])
+      SELECT id, "quantityDiscounts", "quantityTiers" FROM "MenuItem" WHERE id = ANY(${menuItemIdsForDiscount}::text[])
     `;
     const tiersById = new Map(discRows.map((r) => [r.id, parseQuantityDiscounts(r.quantityDiscounts)]));
+    const qtyTiersById = new Map(discRows.map((r) => [r.id, parseQuantityTiers(r.quantityTiers)]));
 
-    const lines = body.items.map((i) => {
+    // Le client peut envoyer un champ "selectedTierQty" pour indiquer qu'il a clique
+    // sur un palier explicitement (ex: il a choisi "3 unites = 22€"). Dans ce cas
+    // on facture le prix du palier. Sinon, fallback sur quantite × prix de base
+    // (en respectant les anciennes remises % si presentes).
+    const lines = body.items.map((i: any) => {
       const m = byId.get(i.menuItemId);
       if (!m) throw reply.code(400).send({ error: "unknown_item" });
-      const tiers = tiersById.get(m.id) ?? [];
-      const unit = effectiveUnitPriceCents(m.priceCents, i.quantity, tiers);
+
+      const qtyTiers = qtyTiersById.get(m.id) ?? [];
+      const selectedTierQty = typeof i.selectedTierQty === "number" ? i.selectedTierQty : null;
+
+      // Cas 1 : le client a clique sur un palier specifique
+      if (selectedTierQty !== null && qtyTiers.length > 0) {
+        const matched = qtyTiers.find(t => t.qty === selectedTierQty);
+        if (matched) {
+          // Le prix total du palier divise par la quantite = "prix unitaire effectif"
+          // (necessaire car le reste du code utilise priceCents × quantity).
+          // On force quantity = matched.qty pour que totalCents soit correct.
+          const unit = Math.round(matched.priceCents / matched.qty);
+          return {
+            menuItemId: m.id,
+            name: m.name,
+            quantity: matched.qty,
+            priceCents: unit,
+            // Adjustment cents pour compenser les arrondis (max ±1c × qty)
+            _totalOverride: matched.priceCents,
+          };
+        }
+      }
+
+      // Cas 2 : pas de palier choisi → ancienne logique % de remise
+      const oldTiers = tiersById.get(m.id) ?? [];
+      const unit = effectiveUnitPriceCents(m.priceCents, i.quantity, oldTiers);
       return { menuItemId: m.id, name: m.name, quantity: i.quantity, priceCents: unit };
     });
-    const totalCents = lines.reduce((s, l) => s + l.priceCents * l.quantity, 0);
+    const totalCents = lines.reduce((s: number, l: any) => {
+      if (typeof l._totalOverride === "number") return s + l._totalOverride;
+      return s + l.priceCents * l.quantity;
+    }, 0);
 
     // Compute expectedReadyAt: now + max(waitMinutes) across ordered items
     // waitMinutes is added via ensure_columns.sql, use raw query to read it
