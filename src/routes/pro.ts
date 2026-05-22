@@ -114,10 +114,10 @@ export async function proRoutes(app: FastifyInstance) {
     const { sendEmail } = await import("../email.js");
     await sendEmail({
       to: user.email,
-      subject: "🔑 Réinitialisation de votre mot de passe MaTable",
+      subject: "🔑 Réinitialisation de votre mot de passe MaTable.Pro",
       html: `
         <div style="font-family:sans-serif;max-width:520px;margin:0 auto;background:#0f172a;color:#e2e8f0;padding:32px;border-radius:12px">
-          <h2 style="color:#f97316;margin-bottom:8px">🍽️ MaTable</h2>
+          <h2 style="color:#f97316;margin-bottom:8px">🍽️ MaTable.Pro</h2>
           <h3 style="color:#fff;margin-bottom:24px">Mot de passe temporaire</h3>
           <p style="color:#94a3b8;margin-bottom:24px">
             Bonjour,<br>
