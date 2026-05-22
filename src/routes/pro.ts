@@ -19,6 +19,13 @@ const DIETS = [
   "PORK_FREE","LOW_CAL","SPICY",
 ] as const;
 
+function generatePassword(length = 12): string {
+  const chars = "abcdefghjkmnpqrstuvwxyzABCDEFGHJKMNPQRSTUVWXYZ23456789";
+  return Array.from(crypto.getRandomValues(new Uint8Array(length)))
+    .map((b) => chars[b % chars.length])
+    .join("");
+}
+
 const slugify = (s: string) =>
   s.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "")
    .replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 60);
@@ -87,6 +94,53 @@ export async function proRoutes(app: FastifyInstance) {
   });
 
   app.post("/logout", async () => ({ ok: true }));
+
+  // POST /forgot-password — envoie un mot de passe temporaire par email (sans auth)
+  app.post("/forgot-password", authRateLimit, async (req, reply) => {
+    const { email } = z.object({ email: z.string().email() }).parse(req.body);
+
+    const user = await prisma.user.findFirst({
+      where: { email: email.trim().toLowerCase() },
+      include: { restaurant: { select: { name: true, slug: true } } },
+    });
+
+    // Toujours répondre OK pour ne pas révéler si l'email existe
+    if (!user) return { ok: true };
+
+    const tmpPassword = generatePassword(10);
+    const passwordHash = await bcrypt.hash(tmpPassword, 10);
+    await prisma.user.update({ where: { id: user.id }, data: { passwordHash } });
+
+    const { sendEmail } = await import("../email.js");
+    await sendEmail({
+      to: user.email,
+      subject: "🔑 Réinitialisation de votre mot de passe MaTable",
+      html: `
+        <div style="font-family:sans-serif;max-width:520px;margin:0 auto;background:#0f172a;color:#e2e8f0;padding:32px;border-radius:12px">
+          <h2 style="color:#f97316;margin-bottom:8px">🍽️ MaTable</h2>
+          <h3 style="color:#fff;margin-bottom:24px">Mot de passe temporaire</h3>
+          <p style="color:#94a3b8;margin-bottom:24px">
+            Bonjour,<br>
+            Vous avez demandé la réinitialisation de votre mot de passe.<br>
+            Voici votre mot de passe temporaire :
+          </p>
+          <div style="background:#1e293b;border:1px solid #334155;border-radius:8px;padding:20px;margin-bottom:24px">
+            <p style="margin:0 0 8px;color:#94a3b8;font-size:13px">Email</p>
+            <p style="margin:0 0 16px;color:#fff;font-family:monospace;font-size:15px">${user.email}</p>
+            <p style="margin:0 0 8px;color:#94a3b8;font-size:13px">Mot de passe temporaire</p>
+            <p style="margin:0;color:#f97316;font-family:monospace;font-size:22px;font-weight:bold;letter-spacing:2px">${tmpPassword}</p>
+          </div>
+          ${user.restaurant ? `<a href="https://matable.pro/login" style="display:inline-block;background:#f97316;color:#fff;padding:12px 24px;border-radius:8px;text-decoration:none;font-weight:bold">Se connecter →</a>` : ""}
+          <p style="color:#475569;font-size:12px;margin-top:24px">
+            Connectez-vous puis changez ce mot de passe depuis vos <strong>Paramètres</strong>.<br>
+            Si vous n'avez pas fait cette demande, ignorez cet email.
+          </p>
+        </div>
+      `,
+    });
+
+    return { ok: true };
+  });
 
   // PATCH /account/password — change own password (client logged in)
   app.patch("/account/password", async (req, reply) => {
