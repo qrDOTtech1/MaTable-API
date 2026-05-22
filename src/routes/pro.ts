@@ -88,6 +88,28 @@ export async function proRoutes(app: FastifyInstance) {
 
   app.post("/logout", async () => ({ ok: true }));
 
+  // PATCH /account/password — change own password (client logged in)
+  app.patch("/account/password", async (req, reply) => {
+    const me = await requirePro(req, reply);
+    const { currentPassword, newPassword } = z.object({
+      currentPassword: z.string().min(1),
+      newPassword: z.string().min(6),
+    }).parse(req.body);
+
+    const user = await prisma.user.findUnique({ where: { id: me.userId } });
+    if (!user) return reply.code(404).send({ error: "not_found" });
+
+    const hash = user.passwordHash ?? (user as any).password;
+    if (!hash) return reply.code(401).send({ error: "no_password_set" });
+
+    const matches = await bcrypt.compare(currentPassword, hash);
+    if (!matches) return reply.code(401).send({ error: "wrong_current_password" });
+
+    const newHash = await bcrypt.hash(newPassword, 10);
+    await prisma.user.update({ where: { id: me.userId }, data: { passwordHash: newHash } });
+    return { ok: true };
+  });
+
   // ---------------------------------------------------------------------------
   // Testimonial (vitrine publique)
   // ---------------------------------------------------------------------------
