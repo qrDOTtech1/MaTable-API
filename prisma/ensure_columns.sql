@@ -278,6 +278,15 @@ CREATE TABLE IF NOT EXISTS "ShoppingHistory" (
 );
 CREATE INDEX IF NOT EXISTS "ShoppingHistory_restaurantId_idx" ON "ShoppingHistory"("restaurantId", "createdAt" DESC);
 
+-- AdminConfig: champs backup DB quotidien (alignés avec schema MaTableAdmin)
+ALTER TABLE "AdminConfig" ADD COLUMN IF NOT EXISTS "backupRecipient" TEXT;
+ALTER TABLE "AdminConfig" ADD COLUMN IF NOT EXISTS "backupEnabled" BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE "AdminConfig" ADD COLUMN IF NOT EXISTS "backupHourUtc" INTEGER NOT NULL DEFAULT 3;
+ALTER TABLE "AdminConfig" ADD COLUMN IF NOT EXISTS "lastBackupAt" TIMESTAMP(3);
+ALTER TABLE "AdminConfig" ADD COLUMN IF NOT EXISTS "lastBackupSize" INTEGER;
+ALTER TABLE "AdminConfig" ADD COLUMN IF NOT EXISTS "lastBackupTables" INTEGER;
+ALTER TABLE "AdminConfig" ADD COLUMN IF NOT EXISTS "lastBackupRows" INTEGER;
+
 -- CustomerReview: generated reviews by customers via AI
 CREATE TABLE IF NOT EXISTS "CustomerReview" (
   id TEXT NOT NULL,

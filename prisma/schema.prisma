@@ -106,6 +106,13 @@ model AdminConfig {
   archiveEnabled     Boolean   @default(false)
   archiveDayOfMonth  Int       @default(1)
   lastArchiveSentAt  DateTime?
+  backupRecipient    String?
+  backupEnabled      Boolean   @default(false)
+  backupHourUtc      Int       @default(3)
+  lastBackupAt       DateTime?
+  lastBackupSize     Int?
+  lastBackupTables   Int?
+  lastBackupRows     Int?
   updatedAt          DateTime  @updatedAt
 }
 
