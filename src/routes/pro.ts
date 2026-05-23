@@ -112,6 +112,9 @@ export async function proRoutes(app: FastifyInstance) {
     await prisma.user.update({ where: { id: user.id }, data: { passwordHash } });
 
     const { sendEmail } = await import("../email.js");
+    if (!user.email) {
+      return reply.code(400).send({ error: "no_email", message: "Cet utilisateur n'a pas d'email enregistré." });
+    }
     await sendEmail({
       to: user.email,
       subject: "🔑 Réinitialisation de votre mot de passe MaTable.Pro",
