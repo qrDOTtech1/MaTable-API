@@ -21,14 +21,16 @@ COPY --from=build /app/scripts ./scripts
 COPY --from=build /app/package.json ./package.json
 RUN npx playwright install --with-deps chromium
 
+#
+# ⚠ PERSISTANCE DES DONNÉES CLIENT — RÈGLE ABSOLUE
+#
+# JAMAIS de `prisma db push` automatique au boot (drop tables raw-SQL :
+# CustomerReview, GlobalConfig…). On utilise UNIQUEMENT le SQL idempotent
+# `ensure_columns.sql` qui fait `CREATE TABLE IF NOT EXISTS` + `ADD COLUMN IF NOT EXISTS`.
+# Les migrations schema doivent être ajoutées à `ensure_columns.sql` manuellement.
+#
 CMD ["sh", "-c", "\
-  echo '--- backup GlobalConfig ---' && \
-  sh ./prisma/backup_restore_config.sh backup || echo 'backup skip (table may not exist)'; \
-  echo '--- prisma db push ---' && \
-  npx prisma db push --skip-generate --accept-data-loss && echo 'push ok' || echo 'push warn'; \
-  echo '--- ensure_columns.sql ---' && \
+  echo '--- ensure_columns.sql (idempotent, ne supprime jamais de données) ---' && \
   npx prisma db execute --url=$DATABASE_URL --file=./prisma/ensure_columns.sql && echo 'columns ok' || echo 'SQL FAILED'; \
-  echo '--- restore GlobalConfig ---' && \
-  sh ./prisma/backup_restore_config.sh restore || echo 'restore skip'; \
   npx tsx prisma/seed.ts || true; \
   node dist/server.js"]

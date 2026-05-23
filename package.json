@@ -7,7 +7,8 @@
     "dev": "tsx watch src/server.ts",
     "build": "tsc -p tsconfig.json",
     "start": "node dist/server.js",
-    "db:push": "prisma db push --accept-data-loss",
+    "DANGER:db:push:WILL-WIPE-DATA": "prisma db push --accept-data-loss",
+    "db:ensure": "prisma db execute --url=$DATABASE_URL --file=./prisma/ensure_columns.sql",
     "db:seed": "tsx prisma/seed.ts"
   },
   "dependencies": {
