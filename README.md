@@ -101,9 +101,11 @@ NODE_ENV              = production
 ```
 
 **Au démarrage du container :**
-1. `prisma db push` — synchronise le schéma
+1. `prisma db execute --file=./prisma/ensure_columns.sql` — migrations idempotentes (`CREATE IF NOT EXISTS`, `ADD COLUMN IF NOT EXISTS`) — **JAMAIS de `prisma db push`**, voir `prisma/MIGRATIONS.md`
 2. `prisma db seed` — insère les données démo (idempotent)
 3. `node dist/server.js` — démarre l'API
+
+> ⚠ **Persistance des données client** : `prisma db push` est **interdit** en automatique (drop des tables raw-SQL comme `CustomerReview`). Toute évolution de schéma passe par `prisma/ensure_columns.sql`. Voir `prisma/MIGRATIONS.md`.
 
 ---
 
