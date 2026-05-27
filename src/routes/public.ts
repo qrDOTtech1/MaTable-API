@@ -1239,8 +1239,8 @@ Ne renvoie STRICTEMENT rien d'autre que ce JSON (pas de bloc Markdown \`\`\`json
 
     const restaurant = await prisma.restaurant.findUnique({
       where: { slug },
-      select: { id: true, name: true, address: true, phone: true },
-    });
+      select: { id: true, name: true, address: true, phone: true, reservationAlertEmail: true } as any,
+    }) as any;
     if (!restaurant) {
       return reply.code(404).send({ error: "restaurant_not_found" });
     }
@@ -1345,6 +1345,32 @@ Ne renvoie STRICTEMENT rien d'autre que ce JSON (pas de bloc Markdown \`\`\`json
         subject: `Réservation confirmée · ${restaurant.name}`,
         html,
       }).catch(err => console.error("[email] reservation confirmation failed:", err));
+    }
+
+    // Alerte email au restaurateur si configurée
+    const alertEmail = (restaurant as any).reservationAlertEmail;
+    if (alertEmail && canSendEmail()) {
+      const dateFormatted = startsAt.toLocaleDateString("fr-FR", { weekday: "long", day: "numeric", month: "long", year: "numeric" });
+      const alertHtml = `
+        <div style="font-family:sans-serif;max-width:480px;margin:0 auto;padding:24px">
+          <h2 style="margin:0 0 16px;font-size:20px">🔔 Nouvelle réservation — ${restaurant.name}</h2>
+          <table style="width:100%;border-collapse:collapse">
+            <tr><td style="padding:6px 0;color:#666;width:130px">Client</td><td style="padding:6px 0;font-weight:600">${input.name}</td></tr>
+            <tr><td style="padding:6px 0;color:#666">Date</td><td style="padding:6px 0">${dateFormatted} à ${input.time}</td></tr>
+            <tr><td style="padding:6px 0;color:#666">Couverts</td><td style="padding:6px 0">${input.guests}</td></tr>
+            ${input.phone ? `<tr><td style="padding:6px 0;color:#666">Téléphone</td><td style="padding:6px 0">${input.phone}</td></tr>` : ""}
+            ${input.email ? `<tr><td style="padding:6px 0;color:#666">Email</td><td style="padding:6px 0">${input.email}</td></tr>` : ""}
+          </table>
+          <p style="margin:16px 0 0;font-size:12px;color:#999">
+            Gérez vos réservations sur <a href="https://matable.pro/dashboard/reservations">matable.pro/dashboard</a>
+          </p>
+        </div>`;
+      sendEmail({
+        to: alertEmail,
+        from: "reservations@matable.pro",
+        subject: `🔔 Nouvelle réservation · ${input.name} · ${input.guests} cvt · ${input.time}`,
+        html: alertHtml,
+      }).catch(err => console.error("[email] reservation alert failed:", err));
     }
 
     return { ok: true, reservationId: reservation.id };

@@ -286,7 +286,7 @@ export async function proRoutes(app: FastifyInstance) {
     
     if (restaurant) {
       const configRaw = await prisma.$queryRawUnsafe<any[]>(
-        `SELECT "googleReviewLink", "reviewVoucherConfig", "businessType", "reviewCustomQuestions", "serverUniqueReviewQr", "reviewRatingCategories" FROM "Restaurant" WHERE id = $1`, me.restaurantId
+        `SELECT "googleReviewLink", "reviewVoucherConfig", "businessType", "reviewCustomQuestions", "serverUniqueReviewQr", "reviewRatingCategories", "reservationAlertEmail" FROM "Restaurant" WHERE id = $1`, me.restaurantId
       );
       (restaurant as any).googleReviewLink = configRaw[0]?.googleReviewLink || null;
       (restaurant as any).reviewVoucherConfig = configRaw[0]?.reviewVoucherConfig || null;
@@ -294,6 +294,7 @@ export async function proRoutes(app: FastifyInstance) {
       (restaurant as any).reviewCustomQuestions = configRaw[0]?.reviewCustomQuestions || null;
       (restaurant as any).serverUniqueReviewQr = configRaw[0]?.serverUniqueReviewQr ?? true;
       (restaurant as any).reviewRatingCategories = Array.isArray(configRaw[0]?.reviewRatingCategories) ? configRaw[0].reviewRatingCategories : [];
+      (restaurant as any).reservationAlertEmail = configRaw[0]?.reservationAlertEmail ?? null;
     }
 
     const enabledApps = await getEnabledApps(me.restaurantId);
@@ -323,6 +324,7 @@ export async function proRoutes(app: FastifyInstance) {
       reservationLeadMinutes: z.number().int().min(0).max(2880).optional(),
       depositPerGuestCents: z.number().int().min(0).optional(),
       reservationPolicy: z.string().max(2000).optional(),
+      reservationAlertEmail: z.string().email().optional().nullable(),
       reservationSlotMinutes: z.number().int().min(10).max(120).optional(),
       tipsEnabled: z.boolean().optional(),
       serviceCallEnabled: z.boolean().optional(),
@@ -346,7 +348,7 @@ export async function proRoutes(app: FastifyInstance) {
       })).optional(),
     }).parse(req.body);
 
-    const { openingHours, googleReviewLink, reviewVoucherConfig, businessType, reviewCustomQuestions, reviewRatingCategories, ...restData } = body;
+    const { openingHours, googleReviewLink, reviewVoucherConfig, businessType, reviewCustomQuestions, reviewRatingCategories, reservationAlertEmail, ...restData } = body;
 
     if (restData.slug) {
       const taken = await prisma.restaurant.findFirst({
@@ -368,6 +370,9 @@ export async function proRoutes(app: FastifyInstance) {
     }
     if (businessType !== undefined) {
       ops.push(prisma.$executeRawUnsafe(`UPDATE "Restaurant" SET "businessType" = $1 WHERE id = $2`, businessType, me.restaurantId));
+    }
+    if (reservationAlertEmail !== undefined) {
+      ops.push(prisma.$executeRawUnsafe(`UPDATE "Restaurant" SET "reservationAlertEmail" = $1 WHERE id = $2`, reservationAlertEmail, me.restaurantId));
     }
     if (reviewCustomQuestions !== undefined) {
       ops.push(prisma.$executeRawUnsafe(`UPDATE "Restaurant" SET "reviewCustomQuestions" = $1 WHERE id = $2`, reviewCustomQuestions, me.restaurantId));
@@ -652,6 +657,64 @@ export async function proRoutes(app: FastifyInstance) {
       },
     });
     emitToRestaurant(me.restaurantId, "order:paid", { tableId: id });
+
+    // ── Attribution automatique de points fidélité ────────────────────────
+    try {
+      const loyaltyConfig = await prisma.$queryRawUnsafe<Array<{
+        enabled: boolean; ptsPerEuro: number; minSpendCents: number;
+      }>>(
+        `SELECT enabled, "ptsPerEuro", "minSpendCents" FROM "LoyaltyConfig"
+         WHERE "restaurantId" = $1 LIMIT 1`,
+        me.restaurantId
+      );
+      if (loyaltyConfig[0]?.enabled) {
+        const cfg = loyaltyConfig[0];
+        // Calculer le total de la session
+        const rows = await prisma.$queryRawUnsafe<Array<{ totalCents: number; customerName: string | null }>>(
+          `SELECT COALESCE(SUM(oi.quantity * oi."unitPriceCents"),0) AS "totalCents",
+                  ts."customerName"
+           FROM "TableSession" ts
+           JOIN "Order" o ON o."sessionId" = ts.id
+           JOIN "OrderItem" oi ON oi."orderId" = o.id
+           WHERE ts.id = $1
+           GROUP BY ts."customerName"`,
+          session.id
+        );
+        const totalCents = Number(rows[0]?.totalCents ?? 0);
+        if (totalCents >= cfg.minSpendCents && totalCents > 0) {
+          const ptsEarned = Math.floor((totalCents / 100) * cfg.ptsPerEuro);
+          if (ptsEarned > 0) {
+            const customerName = rows[0]?.customerName ?? null;
+            // Chercher ou créer le client fidélité anonyme lié à la session
+            const existing = customerName
+              ? await prisma.$queryRawUnsafe<Array<{ id: string; points: number }>>(
+                  `SELECT id, points FROM "LoyaltyCustomer"
+                   WHERE "restaurantId" = $1 AND LOWER("firstName") = LOWER($2) LIMIT 1`,
+                  me.restaurantId, customerName
+                )
+              : [];
+            if (existing[0]) {
+              const newPts = existing[0].points + ptsEarned;
+              const tier = newPts >= 5000 ? "platinum" : newPts >= 2000 ? "gold" : newPts >= 500 ? "silver" : "bronze";
+              await prisma.$executeRawUnsafe(
+                `UPDATE "LoyaltyCustomer" SET points = $1, tier = $2, "visitCount" = "visitCount" + 1,
+                 "totalSpent" = "totalSpent" + $3, "updatedAt" = NOW() WHERE id = $4`,
+                newPts, tier, totalCents / 100, existing[0].id
+              );
+              await prisma.$executeRawUnsafe(
+                `INSERT INTO "LoyaltyTransaction" (id, "customerId", type, points, description, "createdAt")
+                 VALUES (gen_random_uuid()::text, $1, 'earn', $2, $3, NOW())`,
+                existing[0].id, ptsEarned, `Table ${table.number} — commande payée`
+              );
+            }
+            // Si pas de client trouvé, on ne crée pas automatiquement (évite les doublons fantômes)
+          }
+        }
+      }
+    } catch (_e) {
+      // Non-bloquant — ne pas faire échouer le règlement
+    }
+
     return { ok: true };
   });
 
@@ -2636,6 +2699,44 @@ export async function proRoutes(app: FastifyInstance) {
       },
       recentActivity,
     };
+  });
+
+  // GET /loyalty/config — lire la config points fidélité
+  app.get("/loyalty/config", { preHandler: requirePro }, async (req) => {
+    const { restaurantId } = req.user as { restaurantId: string };
+    const rows = await prisma.$queryRawUnsafe<Array<{
+      enabled: boolean; ptsPerEuro: number; minSpendCents: number;
+    }>>(
+      `SELECT enabled, "ptsPerEuro", "minSpendCents" FROM "LoyaltyConfig"
+       WHERE "restaurantId" = $1 LIMIT 1`,
+      restaurantId
+    );
+    return rows[0] ?? { enabled: false, ptsPerEuro: 10, minSpendCents: 0 };
+  });
+
+  // PATCH /loyalty/config — mettre à jour la config points fidélité
+  app.patch("/loyalty/config", { preHandler: requirePro }, async (req) => {
+    const { restaurantId } = req.user as { restaurantId: string };
+    const { enabled, ptsPerEuro, minSpendCents } = z.object({
+      enabled:       z.boolean().optional(),
+      ptsPerEuro:    z.number().int().min(1).max(1000).optional(),
+      minSpendCents: z.number().int().min(0).optional(),
+    }).parse(req.body ?? {});
+
+    await prisma.$executeRawUnsafe(
+      `INSERT INTO "LoyaltyConfig" (id, "restaurantId", enabled, "ptsPerEuro", "minSpendCents", "updatedAt")
+       VALUES (gen_random_uuid()::text, $1, $2, $3, $4, NOW())
+       ON CONFLICT ("restaurantId") DO UPDATE
+       SET enabled = COALESCE($2, "LoyaltyConfig".enabled),
+           "ptsPerEuro" = COALESCE($3, "LoyaltyConfig"."ptsPerEuro"),
+           "minSpendCents" = COALESCE($4, "LoyaltyConfig"."minSpendCents"),
+           "updatedAt" = NOW()`,
+      restaurantId,
+      enabled ?? false,
+      ptsPerEuro ?? 10,
+      minSpendCents ?? 0
+    );
+    return { ok: true };
   });
 
 }
