@@ -1270,7 +1270,7 @@ Ne renvoie STRICTEMENT rien d'autre que ce JSON (pas de bloc Markdown \`\`\`json
 
     const restaurant = await prisma.restaurant.findUnique({
       where: { slug },
-      select: { id: true, name: true, address: true, phone: true, reservationAlertEmail: true } as any,
+      select: { id: true, name: true, address: true, phone: true, avgPrepMinutes: true },
     }) as any;
     if (!restaurant) {
       return reply.code(404).send({ error: "restaurant_not_found" });
@@ -1385,7 +1385,10 @@ Ne renvoie STRICTEMENT rien d'autre que ce JSON (pas de bloc Markdown \`\`\`json
     }
 
     // Alerte email au restaurateur si configurée
-    const alertEmail = (restaurant as any).reservationAlertEmail;
+    const alertRows = await prisma.$queryRaw<Array<{ reservationAlertEmail: string | null }>>`
+      SELECT "reservationAlertEmail" FROM "Restaurant" WHERE id = ${restaurant.id} LIMIT 1
+    `.catch(() => []);
+    const alertEmail = alertRows[0]?.reservationAlertEmail ?? null;
     if (alertEmail && canSendEmail()) {
       const dateFormatted = startsAt.toLocaleDateString("fr-FR", { weekday: "long", day: "numeric", month: "long", year: "numeric" });
       const alertHtml = `
