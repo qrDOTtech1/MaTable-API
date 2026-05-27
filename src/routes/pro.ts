@@ -2144,4 +2144,498 @@ export async function proRoutes(app: FastifyInstance) {
     };
   });
 
+  // ============================================================================
+  // LOYALTY — Programme de fidélisation
+  // ============================================================================
+
+  // Tier calculé selon les points
+  function computeTier(points: number): string {
+    if (points >= 5000) return "platinum";
+    if (points >= 2000) return "gold";
+    if (points >= 500)  return "silver";
+    return "bronze";
+  }
+
+  // Helper : upsert client par email ou phone dans la même transaction
+  async function upsertLoyaltyCustomer(
+    restaurantId: string,
+    data: {
+      firstName?: string; lastName?: string; email?: string; phone?: string;
+      points?: number; totalSpent?: number; visitCount?: number;
+      birthDate?: string; notes?: string; source?: string;
+    }
+  ) {
+    const id = crypto.randomUUID();
+    const points = data.points ?? 0;
+    const tier = computeTier(points);
+
+    // Try find by email first, then phone
+    let existing: { id: string; points: number } | null = null;
+    if (data.email) {
+      const rows = await prisma.$queryRawUnsafe<Array<{ id: string; points: number }>>(
+        `SELECT id, points FROM "LoyaltyCustomer" WHERE "restaurantId" = $1 AND email = $2 LIMIT 1`,
+        restaurantId, data.email
+      );
+      existing = rows[0] ?? null;
+    }
+    if (!existing && data.phone) {
+      const rows = await prisma.$queryRawUnsafe<Array<{ id: string; points: number }>>(
+        `SELECT id, points FROM "LoyaltyCustomer" WHERE "restaurantId" = $1 AND phone = $2 LIMIT 1`,
+        restaurantId, data.phone
+      );
+      existing = rows[0] ?? null;
+    }
+
+    if (existing) {
+      // Update — merge points
+      const newPoints = existing.points + points;
+      const newTier = computeTier(newPoints);
+      await prisma.$executeRawUnsafe(
+        `UPDATE "LoyaltyCustomer" SET
+          "firstName" = COALESCE($1, "firstName"),
+          "lastName"  = COALESCE($2, "lastName"),
+          "phone"     = COALESCE($3, "phone"),
+          "points"    = $4,
+          "tier"      = $5,
+          "totalSpent"  = "totalSpent" + $6,
+          "visitCount"  = "visitCount" + $7,
+          "birthDate"   = COALESCE($8::timestamp, "birthDate"),
+          "notes"       = COALESCE($9, "notes"),
+          "updatedAt"   = CURRENT_TIMESTAMP
+        WHERE id = $10`,
+        data.firstName ?? null, data.lastName ?? null, data.phone ?? null,
+        newPoints, newTier,
+        data.totalSpent ?? 0, data.visitCount ?? 0,
+        data.birthDate ? new Date(data.birthDate).toISOString() : null,
+        data.notes ?? null,
+        existing.id
+      );
+      return existing.id;
+    } else {
+      await prisma.$executeRawUnsafe(
+        `INSERT INTO "LoyaltyCustomer"
+          (id, "restaurantId", "firstName", "lastName", email, phone, points, tier,
+           "totalSpent", "visitCount", "birthDate", notes, source, "createdAt", "updatedAt")
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)`,
+        id, restaurantId,
+        data.firstName ?? null, data.lastName ?? null,
+        data.email ?? null, data.phone ?? null,
+        points, tier,
+        data.totalSpent ?? 0, data.visitCount ?? 0,
+        data.birthDate ? new Date(data.birthDate).toISOString() : null,
+        data.notes ?? null,
+        data.source ?? "manual"
+      );
+      return id;
+    }
+  }
+
+  // GET /loyalty/customers — liste paginée avec filtres
+  app.get("/loyalty/customers", { preHandler: requirePro }, async (req) => {
+    const { restaurantId } = req.user as { restaurantId: string };
+    const { search = "", tier = "", page = "1", limit = "50" } = req.query as Record<string, string>;
+    const offset = (Math.max(1, parseInt(page)) - 1) * Math.min(100, parseInt(limit));
+    const lim    = Math.min(100, parseInt(limit));
+
+    const tierFilter = tier && ["bronze","silver","gold","platinum"].includes(tier)
+      ? `AND tier = '${tier}'` : "";
+    const searchFilter = search
+      ? `AND (LOWER("firstName") LIKE $2 OR LOWER("lastName") LIKE $2 OR LOWER(email) LIKE $2 OR phone LIKE $2)` : "";
+    const searchVal = `%${search.toLowerCase()}%`;
+
+    const params: unknown[] = search
+      ? [restaurantId, searchVal]
+      : [restaurantId];
+
+    const customers = await prisma.$queryRawUnsafe<Array<{
+      id: string; firstName: string|null; lastName: string|null;
+      email: string|null; phone: string|null; points: number;
+      tier: string; totalSpent: number; visitCount: number;
+      birthDate: string|null; notes: string|null; source: string; createdAt: string;
+    }>>(
+      `SELECT id, "firstName", "lastName", email, phone, points, tier,
+              "totalSpent", "visitCount", "birthDate", notes, source, "createdAt"
+       FROM "LoyaltyCustomer"
+       WHERE "restaurantId" = $1 ${searchFilter} ${tierFilter}
+       ORDER BY points DESC, "createdAt" DESC
+       LIMIT ${lim} OFFSET ${offset}`,
+      ...params
+    );
+
+    const countRows = await prisma.$queryRawUnsafe<Array<{ count: bigint }>>(
+      `SELECT COUNT(*)::bigint AS count FROM "LoyaltyCustomer"
+       WHERE "restaurantId" = $1 ${searchFilter} ${tierFilter}`,
+      ...params
+    );
+    const total = Number(countRows[0]?.count ?? 0);
+
+    return { customers, total, page: parseInt(page), limit: lim };
+  });
+
+  // POST /loyalty/customers — créer un client
+  app.post("/loyalty/customers", { preHandler: requirePro }, async (req, reply) => {
+    const { restaurantId } = req.user as { restaurantId: string };
+    const data = z.object({
+      firstName: z.string().optional(),
+      lastName:  z.string().optional(),
+      email:     z.string().email().optional(),
+      phone:     z.string().optional(),
+      points:    z.number().int().min(0).default(0),
+      totalSpent: z.number().min(0).default(0),
+      visitCount: z.number().int().min(0).default(0),
+      birthDate:  z.string().optional(),
+      notes:      z.string().optional(),
+    }).parse(req.body);
+
+    const id = await upsertLoyaltyCustomer(restaurantId, { ...data, source: "manual" });
+    return reply.code(201).send({ id });
+  });
+
+  // POST /loyalty/customers/import — import CSV/JSON bulk
+  app.post("/loyalty/customers/import", { preHandler: requirePro }, async (req, reply) => {
+    const { restaurantId } = req.user as { restaurantId: string };
+    const body = z.object({
+      customers: z.array(z.object({
+        firstName: z.string().optional(),
+        lastName:  z.string().optional(),
+        email:     z.string().optional(),
+        phone:     z.string().optional(),
+        points:    z.number().int().min(0).optional().default(0),
+        totalSpent: z.number().min(0).optional().default(0),
+        visitCount: z.number().int().min(0).optional().default(0),
+        birthDate:  z.string().optional(),
+        notes:      z.string().optional(),
+      })).max(5000),
+    }).parse(req.body);
+
+    let imported = 0, skipped = 0;
+    for (const c of body.customers) {
+      if (!c.email && !c.phone && !c.firstName && !c.lastName) { skipped++; continue; }
+      try {
+        await upsertLoyaltyCustomer(restaurantId, { ...c, source: "import" });
+        imported++;
+      } catch { skipped++; }
+    }
+    return { imported, skipped, total: body.customers.length };
+  });
+
+  // GET /loyalty/customers/:id — détail + transactions
+  app.get("/loyalty/customers/:id", { preHandler: requirePro }, async (req, reply) => {
+    const { restaurantId } = req.user as { restaurantId: string };
+    const { id } = req.params as { id: string };
+
+    const rows = await prisma.$queryRawUnsafe<Array<{
+      id: string; firstName: string|null; lastName: string|null;
+      email: string|null; phone: string|null; points: number;
+      tier: string; totalSpent: number; visitCount: number;
+      birthDate: string|null; notes: string|null; source: string; createdAt: string;
+    }>>(
+      `SELECT * FROM "LoyaltyCustomer" WHERE id = $1 AND "restaurantId" = $2 LIMIT 1`,
+      id, restaurantId
+    );
+    if (!rows[0]) return reply.code(404).send({ error: "not_found" });
+
+    const txns = await prisma.$queryRawUnsafe<Array<{
+      id: string; type: string; points: number; description: string|null; createdAt: string; offerId: string|null;
+    }>>(
+      `SELECT id, type, points, description, "createdAt", "offerId"
+       FROM "LoyaltyTransaction" WHERE "customerId" = $1
+       ORDER BY "createdAt" DESC LIMIT 50`,
+      id
+    );
+
+    return { customer: rows[0], transactions: txns };
+  });
+
+  // PATCH /loyalty/customers/:id — modifier
+  app.patch("/loyalty/customers/:id", { preHandler: requirePro }, async (req, reply) => {
+    const { restaurantId } = req.user as { restaurantId: string };
+    const { id } = req.params as { id: string };
+    const data = z.object({
+      firstName: z.string().optional(),
+      lastName:  z.string().optional(),
+      email:     z.string().email().optional().nullable(),
+      phone:     z.string().optional().nullable(),
+      notes:     z.string().optional().nullable(),
+      birthDate: z.string().optional().nullable(),
+    }).parse(req.body);
+
+    await prisma.$executeRawUnsafe(
+      `UPDATE "LoyaltyCustomer" SET
+        "firstName" = COALESCE($1, "firstName"),
+        "lastName"  = COALESCE($2, "lastName"),
+        email       = COALESCE($3, email),
+        phone       = COALESCE($4, phone),
+        notes       = $5,
+        "birthDate" = $6::timestamp,
+        "updatedAt" = CURRENT_TIMESTAMP
+       WHERE id = $7 AND "restaurantId" = $8`,
+      data.firstName ?? null, data.lastName ?? null,
+      data.email ?? null, data.phone ?? null,
+      data.notes ?? null,
+      data.birthDate ? new Date(data.birthDate).toISOString() : null,
+      id, restaurantId
+    );
+    return { ok: true };
+  });
+
+  // POST /loyalty/customers/:id/points — ajouter/retirer des points
+  app.post("/loyalty/customers/:id/points", { preHandler: requirePro }, async (req, reply) => {
+    const { restaurantId } = req.user as { restaurantId: string };
+    const { id } = req.params as { id: string };
+    const { delta, description } = z.object({
+      delta:       z.number().int(),
+      description: z.string().optional(),
+    }).parse(req.body);
+
+    const rows = await prisma.$queryRawUnsafe<Array<{ points: number }>>(
+      `SELECT points FROM "LoyaltyCustomer" WHERE id = $1 AND "restaurantId" = $2 LIMIT 1`,
+      id, restaurantId
+    );
+    if (!rows[0]) return reply.code(404).send({ error: "not_found" });
+
+    const newPoints = Math.max(0, rows[0].points + delta);
+    const newTier   = computeTier(newPoints);
+
+    await prisma.$executeRawUnsafe(
+      `UPDATE "LoyaltyCustomer" SET points = $1, tier = $2, "updatedAt" = CURRENT_TIMESTAMP
+       WHERE id = $3 AND "restaurantId" = $4`,
+      newPoints, newTier, id, restaurantId
+    );
+
+    const txnId = crypto.randomUUID();
+    await prisma.$executeRawUnsafe(
+      `INSERT INTO "LoyaltyTransaction" (id, "customerId", type, points, description, "createdAt")
+       VALUES ($1, $2, $3, $4, $5, CURRENT_TIMESTAMP)`,
+      txnId, id,
+      delta >= 0 ? "earn" : "adjust",
+      delta,
+      description ?? (delta >= 0 ? `+${delta} points ajoutés manuellement` : `${delta} points ajustés`)
+    );
+
+    return { ok: true, newPoints, newTier };
+  });
+
+  // DELETE /loyalty/customers/:id
+  app.delete("/loyalty/customers/:id", { preHandler: requirePro }, async (req, reply) => {
+    const { restaurantId } = req.user as { restaurantId: string };
+    const { id } = req.params as { id: string };
+    await prisma.$executeRawUnsafe(
+      `DELETE FROM "LoyaltyCustomer" WHERE id = $1 AND "restaurantId" = $2`,
+      id, restaurantId
+    );
+    return { ok: true };
+  });
+
+  // ── Offres ──────────────────────────────────────────────────────────────────
+
+  // GET /loyalty/offers
+  app.get("/loyalty/offers", { preHandler: requirePro }, async (req) => {
+    const { restaurantId } = req.user as { restaurantId: string };
+    const offers = await prisma.$queryRawUnsafe<Array<{
+      id: string; name: string; description: string|null; type: string;
+      value: number; pointsCost: number; minTier: string|null;
+      active: boolean; expiresAt: string|null; usageLimit: number|null;
+      usageCount: number; createdAt: string;
+    }>>(
+      `SELECT id, name, description, type, value, "pointsCost", "minTier",
+              active, "expiresAt", "usageLimit", "usageCount", "createdAt"
+       FROM "LoyaltyOffer" WHERE "restaurantId" = $1 ORDER BY "createdAt" DESC`,
+      restaurantId
+    );
+    return { offers };
+  });
+
+  // POST /loyalty/offers
+  app.post("/loyalty/offers", { preHandler: requirePro }, async (req, reply) => {
+    const { restaurantId } = req.user as { restaurantId: string };
+    const data = z.object({
+      name:        z.string().min(1),
+      description: z.string().optional(),
+      type:        z.enum(["discount_pct","discount_fixed","free_item","double_points","birthday"]),
+      value:       z.number().min(0),
+      pointsCost:  z.number().int().min(0),
+      minTier:     z.enum(["bronze","silver","gold","platinum"]).optional(),
+      expiresAt:   z.string().optional(),
+      usageLimit:  z.number().int().positive().optional(),
+    }).parse(req.body);
+
+    const id = crypto.randomUUID();
+    await prisma.$executeRawUnsafe(
+      `INSERT INTO "LoyaltyOffer"
+         (id, "restaurantId", name, description, type, value, "pointsCost", "minTier",
+          active, "expiresAt", "usageLimit", "usageCount", "createdAt")
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,true,$9::timestamp,$10,0,CURRENT_TIMESTAMP)`,
+      id, restaurantId,
+      data.name, data.description ?? null,
+      data.type, data.value, data.pointsCost,
+      data.minTier ?? null,
+      data.expiresAt ? new Date(data.expiresAt).toISOString() : null,
+      data.usageLimit ?? null
+    );
+    return reply.code(201).send({ id });
+  });
+
+  // PATCH /loyalty/offers/:id
+  app.patch("/loyalty/offers/:id", { preHandler: requirePro }, async (req, reply) => {
+    const { restaurantId } = req.user as { restaurantId: string };
+    const { id } = req.params as { id: string };
+    const data = z.object({
+      name:        z.string().min(1).optional(),
+      description: z.string().optional().nullable(),
+      type:        z.enum(["discount_pct","discount_fixed","free_item","double_points","birthday"]).optional(),
+      value:       z.number().min(0).optional(),
+      pointsCost:  z.number().int().min(0).optional(),
+      minTier:     z.enum(["bronze","silver","gold","platinum"]).optional().nullable(),
+      active:      z.boolean().optional(),
+      expiresAt:   z.string().optional().nullable(),
+      usageLimit:  z.number().int().positive().optional().nullable(),
+    }).parse(req.body);
+
+    const sets: string[] = [];
+    const vals: unknown[] = [];
+    let i = 1;
+    if (data.name        !== undefined) { sets.push(`name = $${i++}`);          vals.push(data.name); }
+    if (data.description !== undefined) { sets.push(`description = $${i++}`);   vals.push(data.description); }
+    if (data.type        !== undefined) { sets.push(`type = $${i++}`);           vals.push(data.type); }
+    if (data.value       !== undefined) { sets.push(`value = $${i++}`);          vals.push(data.value); }
+    if (data.pointsCost  !== undefined) { sets.push(`"pointsCost" = $${i++}`);   vals.push(data.pointsCost); }
+    if (data.minTier     !== undefined) { sets.push(`"minTier" = $${i++}`);      vals.push(data.minTier); }
+    if (data.active      !== undefined) { sets.push(`active = $${i++}`);         vals.push(data.active); }
+    if (data.expiresAt   !== undefined) { sets.push(`"expiresAt" = $${i++}::timestamp`); vals.push(data.expiresAt ? new Date(data.expiresAt).toISOString() : null); }
+    if (data.usageLimit  !== undefined) { sets.push(`"usageLimit" = $${i++}`);   vals.push(data.usageLimit); }
+    if (!sets.length) return { ok: true };
+
+    vals.push(id, restaurantId);
+    await prisma.$executeRawUnsafe(
+      `UPDATE "LoyaltyOffer" SET ${sets.join(", ")} WHERE id = $${i++} AND "restaurantId" = $${i}`,
+      ...vals
+    );
+    return { ok: true };
+  });
+
+  // DELETE /loyalty/offers/:id
+  app.delete("/loyalty/offers/:id", { preHandler: requirePro }, async (req) => {
+    const { restaurantId } = req.user as { restaurantId: string };
+    const { id } = req.params as { id: string };
+    await prisma.$executeRawUnsafe(
+      `DELETE FROM "LoyaltyOffer" WHERE id = $1 AND "restaurantId" = $2`, id, restaurantId
+    );
+    return { ok: true };
+  });
+
+  // POST /loyalty/redeem — utiliser une offre pour un client
+  app.post("/loyalty/redeem", { preHandler: requirePro }, async (req, reply) => {
+    const { restaurantId } = req.user as { restaurantId: string };
+    const { customerId, offerId } = z.object({
+      customerId: z.string(),
+      offerId:    z.string(),
+    }).parse(req.body);
+
+    const custRows = await prisma.$queryRawUnsafe<Array<{ points: number; tier: string }>>(
+      `SELECT points, tier FROM "LoyaltyCustomer" WHERE id = $1 AND "restaurantId" = $2 LIMIT 1`,
+      customerId, restaurantId
+    );
+    const offerRows = await prisma.$queryRawUnsafe<Array<{
+      pointsCost: number; minTier: string|null; active: boolean;
+      usageLimit: number|null; usageCount: number; expiresAt: string|null;
+      name: string; type: string; value: number;
+    }>>(
+      `SELECT "pointsCost", "minTier", active, "usageLimit", "usageCount", "expiresAt", name, type, value
+       FROM "LoyaltyOffer" WHERE id = $1 AND "restaurantId" = $2 LIMIT 1`,
+      offerId, restaurantId
+    );
+    if (!custRows[0]) return reply.code(404).send({ error: "customer_not_found" });
+    const customer = custRows[0];
+    const offer    = offerRows[0];
+    if (!offer)          return reply.code(404).send({ error: "offer_not_found" });
+    if (!offer.active)   return reply.code(400).send({ error: "offer_inactive" });
+    if (offer.expiresAt && new Date(offer.expiresAt) < new Date()) return reply.code(400).send({ error: "offer_expired" });
+    if (offer.usageLimit && offer.usageCount >= offer.usageLimit) return reply.code(400).send({ error: "offer_limit_reached" });
+    const TIER_RANK: Record<string,number> = { bronze:0, silver:1, gold:2, platinum:3 };
+    if (offer.minTier && (TIER_RANK[customer.tier] ?? 0) < (TIER_RANK[offer.minTier] ?? 0)) {
+      return reply.code(400).send({ error: "tier_too_low" });
+    }
+    if (customer.points < offer.pointsCost) return reply.code(400).send({ error: "insufficient_points" });
+
+    const newPoints = customer.points - offer.pointsCost;
+    const newTier   = computeTier(newPoints);
+
+    await prisma.$executeRawUnsafe(
+      `UPDATE "LoyaltyCustomer" SET points = $1, tier = $2, "updatedAt" = CURRENT_TIMESTAMP
+       WHERE id = $3 AND "restaurantId" = $4`,
+      newPoints, newTier, customerId, restaurantId
+    );
+    await prisma.$executeRawUnsafe(
+      `UPDATE "LoyaltyOffer" SET "usageCount" = "usageCount" + 1 WHERE id = $1`, offerId
+    );
+    const txnId = crypto.randomUUID();
+    await prisma.$executeRawUnsafe(
+      `INSERT INTO "LoyaltyTransaction" (id, "customerId", "offerId", type, points, description, "createdAt")
+       VALUES ($1,$2,$3,'redeem',$4,$5,CURRENT_TIMESTAMP)`,
+      txnId, customerId, offerId, -offer.pointsCost,
+      `Offre utilisée : ${offer.name}`
+    );
+
+    return { ok: true, newPoints, newTier, offer: { name: offer.name, type: offer.type, value: offer.value } };
+  });
+
+  // GET /loyalty/stats
+  app.get("/loyalty/stats", { preHandler: requirePro }, async (req) => {
+    const { restaurantId } = req.user as { restaurantId: string };
+
+    const totals = await prisma.$queryRawUnsafe<Array<{
+      total: bigint; totalPoints: bigint; totalSpent: number;
+    }>>(
+      `SELECT COUNT(*)::bigint AS total, SUM(points)::bigint AS "totalPoints",
+              SUM("totalSpent") AS "totalSpent"
+       FROM "LoyaltyCustomer" WHERE "restaurantId" = $1`,
+      restaurantId
+    );
+
+    const tiers = await prisma.$queryRawUnsafe<Array<{ tier: string; count: bigint }>>(
+      `SELECT tier, COUNT(*)::bigint AS count FROM "LoyaltyCustomer"
+       WHERE "restaurantId" = $1 GROUP BY tier`,
+      restaurantId
+    );
+
+    const recentActivity = await prisma.$queryRawUnsafe<Array<{
+      type: string; points: number; description: string|null; createdAt: string;
+      firstName: string|null; lastName: string|null;
+    }>>(
+      `SELECT t.type, t.points, t.description, t."createdAt",
+              c."firstName", c."lastName"
+       FROM "LoyaltyTransaction" t
+       JOIN "LoyaltyCustomer" c ON c.id = t."customerId"
+       WHERE c."restaurantId" = $1
+       ORDER BY t."createdAt" DESC LIMIT 10`,
+      restaurantId
+    );
+
+    const offerStats = await prisma.$queryRawUnsafe<Array<{
+      total: bigint; active: bigint; totalRedemptions: bigint;
+    }>>(
+      `SELECT COUNT(*)::bigint AS total,
+              SUM(CASE WHEN active THEN 1 ELSE 0 END)::bigint AS active,
+              SUM("usageCount")::bigint AS "totalRedemptions"
+       FROM "LoyaltyOffer" WHERE "restaurantId" = $1`,
+      restaurantId
+    );
+
+    return {
+      customers: {
+        total:      Number(totals[0]?.total ?? 0),
+        totalPoints: Number(totals[0]?.totalPoints ?? 0),
+        totalSpent:  totals[0]?.totalSpent ?? 0,
+      },
+      tiers: Object.fromEntries(tiers.map(t => [t.tier, Number(t.count)])),
+      offers: {
+        total:           Number(offerStats[0]?.total ?? 0),
+        active:          Number(offerStats[0]?.active ?? 0),
+        totalRedemptions: Number(offerStats[0]?.totalRedemptions ?? 0),
+      },
+      recentActivity,
+    };
+  });
+
 }
