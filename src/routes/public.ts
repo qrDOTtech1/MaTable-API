@@ -559,6 +559,30 @@ export async function publicRoutes(app: FastifyInstance) {
   });
 
   // ---------------------------------------------------------------------------
+  // GET /api/public/r/:slug/zones — zones réservables disponibles
+  // ---------------------------------------------------------------------------
+  app.get("/r/:slug/zones", async (req, reply) => {
+    const { slug } = req.params as { slug: string };
+    const restaurant = await prisma.restaurant.findUnique({
+      where: { slug },
+      select: { id: true },
+    });
+    if (!restaurant) return reply.code(404).send({ error: "restaurant_not_found" });
+
+    const tables = await prisma.table.findMany({
+      where: { restaurantId: restaurant.id, reservable: true },
+      select: { zone: true },
+    });
+
+    // Zones uniques non-null, triées
+    const zones = [...new Set(
+      tables.map((t: any) => t.zone).filter((z: any): z is string => !!z)
+    )].sort();
+
+    return { zones };
+  });
+
+  // ---------------------------------------------------------------------------
   // GET /api/public/r/:slug/review-campaign
   // Returns configuration for the interactive review flow (servers, link, voucher)
   // ---------------------------------------------------------------------------
@@ -1235,6 +1259,7 @@ Ne renvoie STRICTEMENT rien d'autre que ce JSON (pas de bloc Markdown \`\`\`json
       date: z.string(), // ISO date
       time: z.string(), // HH:mm
       guests: z.number().int().min(1),
+      zone: z.string().optional().nullable(), // zone préférée
     }).parse(req.body);
 
     const restaurant = await prisma.restaurant.findUnique({
@@ -1260,7 +1285,13 @@ Ne renvoie STRICTEMENT rien d'autre que ce JSON (pas de bloc Markdown \`\`\`json
 
     // ── Trouver la meilleure table disponible en respectant les quotas ────────
     const reservableTables = await prisma.table.findMany({
-      where: { restaurantId: restaurant.id, reservable: true, seats: { gte: input.guests } },
+      where: {
+        restaurantId: restaurant.id,
+        reservable: true,
+        seats: { gte: input.guests },
+        // Si une zone est demandée, filtrer dessus
+        ...(input.zone ? { zone: input.zone } as any : {}),
+      },
       select: { id: true, zone: true, seats: true },
       orderBy: { seats: "asc" }, // préférer la table la plus petite qui convient
     });
