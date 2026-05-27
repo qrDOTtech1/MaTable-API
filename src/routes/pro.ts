@@ -524,6 +524,7 @@ export async function proRoutes(app: FastifyInstance) {
       label: z.string().max(40).optional(),
       zone: z.string().max(40).optional(),
       assignedServerId: z.string().nullable().optional(),
+      reservable: z.boolean().optional(),
     }).default({}).parse(req.body ?? {});
     const last = await prisma.table.findFirst({
       where: { restaurantId: me.restaurantId },
@@ -537,6 +538,7 @@ export async function proRoutes(app: FastifyInstance) {
         label: body.label,
         zone: body.zone,
         assignedServerId: body.assignedServerId ?? null,
+        reservable: body.reservable ?? true,
       },
     });
     return { table };
@@ -550,6 +552,7 @@ export async function proRoutes(app: FastifyInstance) {
       label: z.string().max(40).nullable().optional(),
       zone: z.string().max(40).nullable().optional(),
       assignedServerId: z.string().nullable().optional(),
+      reservable: z.boolean().optional(),
     }).parse(req.body);
     await prisma.table.updateMany({ where: { id, restaurantId: me.restaurantId }, data });
     return { ok: true };
@@ -570,6 +573,50 @@ export async function proRoutes(app: FastifyInstance) {
       distinct: ["zone"],
     });
     return { zones: rows.map((r) => r.zone).filter(Boolean) };
+  });
+
+  // ── Zone configs (quotas walk-in) ──────────────────────────────────────────
+
+  /** GET /zone-configs — liste tous les quotas du restaurant */
+  app.get("/zone-configs", async (req, reply) => {
+    const me = await requirePro(req, reply);
+    const configs = await (prisma as any).zoneConfig.findMany({
+      where: { restaurantId: me.restaurantId },
+      orderBy: { zone: "asc" },
+    });
+    return { configs };
+  });
+
+  /** PUT /zone-configs/:zone — crée ou met à jour le quota walk-in d'une zone */
+  app.put("/zone-configs/:zone", async (req, reply) => {
+    const me = await requirePro(req, reply);
+    const zone = decodeURIComponent((req.params as { zone: string }).zone);
+    const { minFreeWalkIn } = z.object({
+      minFreeWalkIn: z.number().int().min(0).max(50),
+    }).parse(req.body);
+
+    // Vérifier que la zone existe bien dans les tables du restaurant
+    const exists = await prisma.table.findFirst({
+      where: { restaurantId: me.restaurantId, zone },
+    });
+    if (!exists) return reply.code(404).send({ error: "zone_not_found" });
+
+    const config = await (prisma as any).zoneConfig.upsert({
+      where: { restaurantId_zone: { restaurantId: me.restaurantId, zone } },
+      create: { restaurantId: me.restaurantId, zone, minFreeWalkIn },
+      update: { minFreeWalkIn },
+    });
+    return { config };
+  });
+
+  /** DELETE /zone-configs/:zone — supprime la config walk-in d'une zone (quota → 0) */
+  app.delete("/zone-configs/:zone", async (req, reply) => {
+    const me = await requirePro(req, reply);
+    const zone = decodeURIComponent((req.params as { zone: string }).zone);
+    await (prisma as any).zoneConfig.deleteMany({
+      where: { restaurantId: me.restaurantId, zone },
+    });
+    return { ok: true };
   });
 
   app.post("/tables/:id/reset", async (req, reply) => {

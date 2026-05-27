@@ -451,8 +451,9 @@ export async function publicRoutes(app: FastifyInstance) {
 
   app.get("/r/:slug/availability", async (req, reply) => {
     const { slug } = req.params as { slug: string };
-    const { date } = z.object({
+    const { date, guests } = z.object({
       date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).default(() => new Date().toISOString().split("T")[0]),
+      guests: z.coerce.number().int().min(1).default(2),
     }).parse(req.query ?? {});
 
     const restaurant = await prisma.restaurant.findUnique({
@@ -462,28 +463,94 @@ export async function publicRoutes(app: FastifyInstance) {
     if (!restaurant) return reply.code(404).send({ error: "restaurant_not_found" });
     if (!(restaurant as any).acceptReservations) return { slots: [] };
 
-    const d = new Date(date + "T12:00:00"); // noon to avoid TZ issues
-    const dayOfWeek = d.getDay(); // 0=Sunday
-
-    const dayHours = restaurant.openingHours.filter((h) => h.dayOfWeek === dayOfWeek);
+    const d = new Date(date + "T12:00:00");
+    const dayOfWeek = d.getDay();
+    const dayHours = restaurant.openingHours.filter((h: any) => h.dayOfWeek === dayOfWeek);
     if (!dayHours.length) return { slots: [] };
 
     const slotMin: number = (restaurant as any).reservationSlotMinutes ?? 30;
     const leadMin: number = (restaurant as any).reservationLeadMinutes ?? 60;
     const mealMin: number = (restaurant as any).avgPrepMinutes ?? 90;
-
     const now = new Date();
+
+    // ── Charger toutes les tables réservables avec suffisamment de places ──
+    const reservableTables = await prisma.table.findMany({
+      where: { restaurantId: restaurant.id, reservable: true, seats: { gte: guests } },
+      select: { id: true, zone: true },
+    });
+
+    if (!reservableTables.length) return { slots: [] };
+
+    // ── Charger les quotas walk-in par zone ──
+    const zoneConfigs: { zone: string; minFreeWalkIn: number }[] = await (prisma as any).zoneConfig.findMany({
+      where: { restaurantId: restaurant.id },
+      select: { zone: true, minFreeWalkIn: true },
+    });
+    const quotaByZone = new Map<string, number>(zoneConfigs.map((c: any) => [c.zone, c.minFreeWalkIn]));
+
+    // ── Charger toutes les réservations confirmées/en attente de la journée ──
+    const dayStart = new Date(date + "T00:00:00");
+    const dayEnd   = new Date(date + "T23:59:59");
+    const dayReservations = await prisma.reservation.findMany({
+      where: {
+        restaurantId: restaurant.id,
+        startsAt: { gte: dayStart, lte: dayEnd },
+        status: { notIn: ["CANCELLED"] },
+        tableId: { not: null },
+      },
+      select: { tableId: true, startsAt: true, durationMin: true },
+    });
+
+    /**
+     * Vérifie si au moins une table réservable peut accueillir une nouvelle
+     * réservation sur le créneau [slotStart, slotStart + mealMin], en respectant
+     * les quotas walk-in par zone.
+     */
+    const canBook = (slotStart: Date): boolean => {
+      const slotEnd = new Date(slotStart.getTime() + mealMin * 60_000);
+
+      // Tables déjà occupées sur ce créneau
+      const occupiedTableIds = new Set<string>(
+        dayReservations
+          .filter((r) => {
+            const rEnd = new Date(r.startsAt.getTime() + (r.durationMin ?? mealMin) * 60_000);
+            // Chevauchement : r commence avant la fin du slot ET r finit après le début du slot
+            return r.startsAt < slotEnd && rEnd > slotStart;
+          })
+          .map((r) => r.tableId as string)
+      );
+
+      // Compter par zone : tables libres VS quota
+      // group reservableTables by zone
+      const byZone = new Map<string | null, string[]>();
+      for (const t of reservableTables) {
+        const key = t.zone ?? null;
+        if (!byZone.has(key)) byZone.set(key, []);
+        byZone.get(key)!.push(t.id);
+      }
+
+      for (const [zone, tableIds] of byZone.entries()) {
+        const quota = zone !== null ? (quotaByZone.get(zone) ?? 0) : 0;
+        const freeTables = tableIds.filter((id) => !occupiedTableIds.has(id));
+        // Nombre de tables que l'on peut encore réserver dans cette zone
+        const bookable = freeTables.length - quota;
+        if (bookable > 0) return true; // au moins une table dispo dans cette zone
+      }
+      return false;
+    };
+
     const slots: { date: string; time: string; available: boolean }[] = [];
 
     for (const period of dayHours) {
-      let cur: number = period.openMin;
-      const lastSlot = period.closeMin - mealMin;
+      let cur: number = (period as any).openMin;
+      const lastSlot = (period as any).closeMin - mealMin;
       while (cur <= lastSlot) {
         const slotDate = new Date(date + "T00:00:00");
         slotDate.setHours(Math.floor(cur / 60), cur % 60, 0, 0);
         const time = `${String(Math.floor(cur / 60)).padStart(2, "0")}:${String(cur % 60).padStart(2, "0")}`;
-        const available = slotDate.getTime() > now.getTime() + leadMin * 60_000;
-        slots.push({ date, time, available });
+        const afterLeadTime = slotDate.getTime() > now.getTime() + leadMin * 60_000;
+        const tableAvailable = afterLeadTime && canBook(slotDate);
+        slots.push({ date, time, available: tableAvailable });
         cur += slotMin;
       }
     }
@@ -1188,6 +1255,64 @@ Ne renvoie STRICTEMENT rien d'autre que ce JSON (pas de bloc Markdown \`\`\`json
     const startsAt = new Date(input.date);
     startsAt.setHours(hours, mins, 0, 0);
 
+    const mealMin: number = (restaurant as any).avgPrepMinutes ?? 90;
+    const slotEnd = new Date(startsAt.getTime() + mealMin * 60_000);
+
+    // ── Trouver la meilleure table disponible en respectant les quotas ────────
+    const reservableTables = await prisma.table.findMany({
+      where: { restaurantId: restaurant.id, reservable: true, seats: { gte: input.guests } },
+      select: { id: true, zone: true, seats: true },
+      orderBy: { seats: "asc" }, // préférer la table la plus petite qui convient
+    });
+
+    // Tables déjà occupées sur ce créneau
+    const overlapping = await prisma.reservation.findMany({
+      where: {
+        restaurantId: restaurant.id,
+        status: { notIn: ["CANCELLED"] },
+        tableId: { not: null },
+        startsAt: { lt: slotEnd },
+      },
+      select: { tableId: true, startsAt: true, durationMin: true },
+    });
+    const occupiedIds = new Set<string>(
+      overlapping
+        .filter((r) => {
+          const rEnd = new Date(r.startsAt.getTime() + (r.durationMin ?? mealMin) * 60_000);
+          return rEnd > startsAt;
+        })
+        .map((r) => r.tableId as string)
+    );
+
+    // Charger quotas walk-in
+    const zoneConfigs: { zone: string; minFreeWalkIn: number }[] = await (prisma as any).zoneConfig.findMany({
+      where: { restaurantId: restaurant.id },
+      select: { zone: true, minFreeWalkIn: true },
+    });
+    const quotaByZone = new Map<string, number>(zoneConfigs.map((c: any) => [c.zone, c.minFreeWalkIn]));
+
+    // Grouper par zone pour vérifier le quota
+    const byZone = new Map<string | null, typeof reservableTables>();
+    for (const t of reservableTables) {
+      const key = t.zone ?? null;
+      if (!byZone.has(key)) byZone.set(key, []);
+      byZone.get(key)!.push(t);
+    }
+
+    let assignedTableId: string | null = null;
+    for (const [zone, tables] of byZone.entries()) {
+      const quota = zone !== null ? (quotaByZone.get(zone) ?? 0) : 0;
+      const freeTables = tables.filter((t) => !occupiedIds.has(t.id));
+      if (freeTables.length - quota > 0) {
+        assignedTableId = freeTables[0].id; // première table libre qui respecte le quota
+        break;
+      }
+    }
+
+    if (!assignedTableId) {
+      return reply.code(409).send({ error: "no_table_available" });
+    }
+
     const reservation = await prisma.reservation.create({
       data: {
         restaurantId: restaurant.id,
@@ -1197,6 +1322,7 @@ Ne renvoie STRICTEMENT rien d'autre que ce JSON (pas de bloc Markdown \`\`\`json
         customerEmail: input.email ?? "",
         customerPhone: input.phone,
         status: "PENDING",
+        tableId: assignedTableId,
       },
     });
 

@@ -57,6 +57,7 @@ model Restaurant {
   servers        Server[]
   openingHours   OpeningHour[]
   reservations   Reservation[]
+  zoneConfigs    ZoneConfig[]
   serviceCalls   ServiceCall[]
   dishReviews    DishReview[]
   serverReviews  ServerReview[]
@@ -164,6 +165,7 @@ model Table {
   seats            Int            @default(2)
   label            String?
   zone             String?        // "Salle principale", "Terrasse", "Mezzanine", "VIP"…
+  reservable       Boolean        @default(true)   // false = walk-in uniquement, jamais proposée en ligne
   assignedServerId String?
   assignedServer   Server?        @relation("TableAssignedServer", fields: [assignedServerId], references: [id], onDelete: SetNull)
   restaurant       Restaurant     @relation(fields: [restaurantId], references: [id], onDelete: Cascade)
@@ -177,6 +179,21 @@ model Table {
   @@unique([restaurantId, number])
   @@index([restaurantId])
   @@index([restaurantId, zone])
+}
+
+// ---------------------------------------------------------------------------
+// Configuration walk-in par zone — quota de tables toujours libres pour les
+// arrivées spontanées (non-réservables en ligne) dans une zone donnée.
+// ---------------------------------------------------------------------------
+model ZoneConfig {
+  id            String     @id @default(uuid())
+  restaurant    Restaurant @relation(fields: [restaurantId], references: [id], onDelete: Cascade)
+  restaurantId  String
+  zone          String     // doit correspondre exactement au champ zone des tables
+  minFreeWalkIn Int        @default(0)  // nombre de tables à toujours garder libres dans cette zone
+
+  @@unique([restaurantId, zone])
+  @@index([restaurantId])
 }
 
 model TableSession {
