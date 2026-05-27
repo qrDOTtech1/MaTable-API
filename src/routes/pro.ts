@@ -286,7 +286,7 @@ export async function proRoutes(app: FastifyInstance) {
     
     if (restaurant) {
       const configRaw = await prisma.$queryRawUnsafe<any[]>(
-        `SELECT "googleReviewLink", "reviewVoucherConfig", "businessType", "reviewCustomQuestions", "serverUniqueReviewQr", "reviewRatingCategories", "reservationAlertEmail" FROM "Restaurant" WHERE id = $1`, me.restaurantId
+        `SELECT "googleReviewLink", "reviewVoucherConfig", "businessType", "reviewCustomQuestions", "serverUniqueReviewQr", "reviewRatingCategories", "reservationAlertEmail", "reservationAlertEmails" FROM "Restaurant" WHERE id = $1`, me.restaurantId
       );
       (restaurant as any).googleReviewLink = configRaw[0]?.googleReviewLink || null;
       (restaurant as any).reviewVoucherConfig = configRaw[0]?.reviewVoucherConfig || null;
@@ -295,6 +295,9 @@ export async function proRoutes(app: FastifyInstance) {
       (restaurant as any).serverUniqueReviewQr = configRaw[0]?.serverUniqueReviewQr ?? true;
       (restaurant as any).reviewRatingCategories = Array.isArray(configRaw[0]?.reviewRatingCategories) ? configRaw[0].reviewRatingCategories : [];
       (restaurant as any).reservationAlertEmail = configRaw[0]?.reservationAlertEmail ?? null;
+      (restaurant as any).reservationAlertEmails = Array.isArray(configRaw[0]?.reservationAlertEmails)
+        ? configRaw[0].reservationAlertEmails
+        : (configRaw[0]?.reservationAlertEmail ? [configRaw[0].reservationAlertEmail] : []);
     }
 
     const enabledApps = await getEnabledApps(me.restaurantId);
@@ -325,6 +328,7 @@ export async function proRoutes(app: FastifyInstance) {
       depositPerGuestCents: z.number().int().min(0).optional(),
       reservationPolicy: z.string().max(2000).optional(),
       reservationAlertEmail: z.string().email().optional().nullable(),
+      reservationAlertEmails: z.array(z.string().email()).max(10).optional(),
       reservationSlotMinutes: z.number().int().min(10).max(120).optional(),
       tipsEnabled: z.boolean().optional(),
       serviceCallEnabled: z.boolean().optional(),
@@ -348,7 +352,7 @@ export async function proRoutes(app: FastifyInstance) {
       })).optional(),
     }).parse(req.body);
 
-    const { openingHours, googleReviewLink, reviewVoucherConfig, businessType, reviewCustomQuestions, reviewRatingCategories, reservationAlertEmail, ...restData } = body;
+    const { openingHours, googleReviewLink, reviewVoucherConfig, businessType, reviewCustomQuestions, reviewRatingCategories, reservationAlertEmail, reservationAlertEmails, ...restData } = body;
 
     if (restData.slug) {
       const taken = await prisma.restaurant.findFirst({
@@ -373,6 +377,13 @@ export async function proRoutes(app: FastifyInstance) {
     }
     if (reservationAlertEmail !== undefined) {
       ops.push(prisma.$executeRawUnsafe(`UPDATE "Restaurant" SET "reservationAlertEmail" = $1 WHERE id = $2`, reservationAlertEmail, me.restaurantId));
+    }
+    if (reservationAlertEmails !== undefined) {
+      const cleaned = Array.from(new Set(reservationAlertEmails.map(e => e.trim().toLowerCase()).filter(Boolean))).slice(0, 10);
+      ops.push(prisma.$executeRawUnsafe(
+        `UPDATE "Restaurant" SET "reservationAlertEmails" = $1::jsonb, "reservationAlertEmail" = $2 WHERE id = $3`,
+        JSON.stringify(cleaned), cleaned[0] ?? null, me.restaurantId
+      ));
     }
     if (reviewCustomQuestions !== undefined) {
       ops.push(prisma.$executeRawUnsafe(`UPDATE "Restaurant" SET "reviewCustomQuestions" = $1 WHERE id = $2`, reviewCustomQuestions, me.restaurantId));
@@ -1537,6 +1548,80 @@ export async function proRoutes(app: FastifyInstance) {
     }
     return { sinceIso: since.toISOString(), revenueCents, ordersCount, avgTicketCents, topItems, revenueByDay,
       revenueByServer: Array.from(byServer.values()).sort((a, b) => b.revenueCents - a.revenueCents) };
+  });
+
+  app.get("/stats/overview", async (req, reply) => {
+    const me = await requirePro(req, reply);
+    const q = z.object({ days: z.coerce.number().int().min(1).max(90).default(30) }).parse(req.query ?? {});
+    const since = new Date(Date.now() - q.days * 24 * 3600 * 1000);
+
+    const [paidOrders, reservations, loyaltyStats, reviewAgg] = await Promise.all([
+      prisma.order.findMany({
+        where: { table: { restaurantId: me.restaurantId }, status: "PAID", createdAt: { gte: since } },
+        select: { totalCents: true, tipCents: true, createdAt: true, items: true },
+      }),
+      prisma.reservation.findMany({
+        where: { restaurantId: me.restaurantId, startsAt: { gte: since } },
+        select: { startsAt: true, partySize: true, status: true },
+      }),
+      prisma.$queryRawUnsafe<Array<{ customers: bigint; points: bigint; visits: bigint; offers: bigint; redemptions: bigint }>>(
+        `SELECT
+          (SELECT COUNT(*)::bigint FROM "LoyaltyCustomer" WHERE "restaurantId" = $1) AS customers,
+          (SELECT COALESCE(SUM(points),0)::bigint FROM "LoyaltyCustomer" WHERE "restaurantId" = $1) AS points,
+          (SELECT COALESCE(SUM("visitCount"),0)::bigint FROM "LoyaltyCustomer" WHERE "restaurantId" = $1) AS visits,
+          (SELECT COUNT(*)::bigint FROM "LoyaltyOffer" WHERE "restaurantId" = $1 AND active = true) AS offers,
+          (SELECT COUNT(*)::bigint FROM "LoyaltyTransaction" t JOIN "LoyaltyCustomer" c ON c.id = t."customerId" WHERE c."restaurantId" = $1 AND t.type = 'redeem') AS redemptions`,
+        me.restaurantId
+      ).catch(() => [{ customers: 0n, points: 0n, visits: 0n, offers: 0n, redemptions: 0n }]),
+      prisma.dishReview.aggregate({
+        where: { restaurantId: me.restaurantId, createdAt: { gte: since } },
+        _avg: { rating: true },
+        _count: { id: true },
+      }),
+    ]);
+
+    const revenueCents = paidOrders.reduce((s, o) => s + o.totalCents + o.tipCents, 0);
+    const ordersCount = paidOrders.length;
+    const avgTicketCents = ordersCount ? Math.round(revenueCents / ordersCount) : 0;
+    const reservationsCount = reservations.length;
+    const reservationCovers = reservations.reduce((s, r) => s + r.partySize, 0);
+    const honoredReservations = reservations.filter(r => ["SEATED", "HONORED"].includes(r.status)).length;
+    const noShows = reservations.filter(r => r.status === "NO_SHOW").length;
+    const cancelled = reservations.filter(r => r.status === "CANCELLED").length;
+
+    const byDay = new Map<string, { date: string; revenueCents: number; orders: number; reservations: number; covers: number }>();
+    const ensure = (date: string) => {
+      if (!byDay.has(date)) byDay.set(date, { date, revenueCents: 0, orders: 0, reservations: 0, covers: 0 });
+      return byDay.get(date)!;
+    };
+    for (const o of paidOrders) {
+      const d = o.createdAt.toISOString().slice(0, 10);
+      const row = ensure(d);
+      row.revenueCents += o.totalCents + o.tipCents;
+      row.orders += 1;
+    }
+    for (const r of reservations) {
+      const d = r.startsAt.toISOString().slice(0, 10);
+      const row = ensure(d);
+      row.reservations += 1;
+      row.covers += r.partySize;
+    }
+
+    const loyalty = loyaltyStats[0] ?? { customers: 0n, points: 0n, visits: 0n, offers: 0n, redemptions: 0n };
+    return {
+      sinceIso: since.toISOString(),
+      orders: { count: ordersCount, revenueCents, avgTicketCents },
+      reservations: { count: reservationsCount, covers: reservationCovers, honored: honoredReservations, noShows, cancelled },
+      loyalty: {
+        customers: Number(loyalty.customers ?? 0n),
+        points: Number(loyalty.points ?? 0n),
+        visits: Number(loyalty.visits ?? 0n),
+        activeOffers: Number(loyalty.offers ?? 0n),
+        redemptions: Number(loyalty.redemptions ?? 0n),
+      },
+      reviews: { count: reviewAgg._count.id, avgRating: reviewAgg._avg.rating ?? 0 },
+      daily: Array.from(byDay.values()).sort((a, b) => a.date.localeCompare(b.date)),
+    };
   });
 
   app.get("/export/z", async (req, reply) => {

@@ -1385,11 +1385,14 @@ Ne renvoie STRICTEMENT rien d'autre que ce JSON (pas de bloc Markdown \`\`\`json
     }
 
     // Alerte email au restaurateur si configurée
-    const alertRows = await prisma.$queryRaw<Array<{ reservationAlertEmail: string | null }>>`
-      SELECT "reservationAlertEmail" FROM "Restaurant" WHERE id = ${restaurant.id} LIMIT 1
+    const alertRows = await prisma.$queryRaw<Array<{ reservationAlertEmail: string | null; reservationAlertEmails: unknown | null }>>`
+      SELECT "reservationAlertEmail", "reservationAlertEmails" FROM "Restaurant" WHERE id = ${restaurant.id} LIMIT 1
     `.catch(() => []);
-    const alertEmail = alertRows[0]?.reservationAlertEmail ?? null;
-    if (alertEmail && canSendEmail()) {
+    const alertEmails = Array.from(new Set([
+      ...(Array.isArray(alertRows[0]?.reservationAlertEmails) ? alertRows[0]?.reservationAlertEmails as string[] : []),
+      ...(alertRows[0]?.reservationAlertEmail ? [alertRows[0].reservationAlertEmail] : []),
+    ].map(e => String(e).trim().toLowerCase()).filter(Boolean)));
+    if (alertEmails.length > 0 && canSendEmail()) {
       const dateFormatted = startsAt.toLocaleDateString("fr-FR", { weekday: "long", day: "numeric", month: "long", year: "numeric" });
       const alertHtml = `
         <div style="font-family:sans-serif;max-width:480px;margin:0 auto;padding:24px">
@@ -1406,7 +1409,7 @@ Ne renvoie STRICTEMENT rien d'autre que ce JSON (pas de bloc Markdown \`\`\`json
           </p>
         </div>`;
       sendEmail({
-        to: alertEmail,
+        to: alertEmails.join(","),
         from: "reservations@matable.pro",
         subject: `🔔 Nouvelle réservation · ${input.name} · ${input.guests} cvt · ${input.time}`,
         html: alertHtml,
