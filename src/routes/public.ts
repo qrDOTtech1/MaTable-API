@@ -451,9 +451,10 @@ export async function publicRoutes(app: FastifyInstance) {
 
   app.get("/r/:slug/availability", async (req, reply) => {
     const { slug } = req.params as { slug: string };
-    const { date, guests } = z.object({
+    const { date, guests, zone } = z.object({
       date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).default(() => new Date().toISOString().split("T")[0]),
       guests: z.coerce.number().int().min(1).default(2),
+      zone: z.string().optional(),
     }).parse(req.query ?? {});
 
     const restaurant = await prisma.restaurant.findUnique({
@@ -475,7 +476,12 @@ export async function publicRoutes(app: FastifyInstance) {
 
     // ── Charger toutes les tables réservables avec suffisamment de places ──
     const reservableTables = await prisma.table.findMany({
-      where: { restaurantId: restaurant.id, reservable: true, seats: { gte: guests } },
+      where: {
+        restaurantId: restaurant.id,
+        reservable: true,
+        seats: { gte: guests },
+        ...(zone ? { zone } as any : {}),
+      },
       select: { id: true, zone: true },
     });
 
