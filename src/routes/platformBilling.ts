@@ -82,8 +82,8 @@ async function logSubEvent(opts: {
   try {
     await prisma.$executeRawUnsafe(
       `INSERT INTO "SubscriptionEvent"
-        ("id","restaurantId","restaurantName","type","plan","mrrCents","mrrDeltaCents")
-       VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+        ("id","restaurantId","restaurantName","type","plan","mrrCents","mrrDeltaCents","method")
+       VALUES ($1,$2,$3,$4,$5,$6,$7,'stripe')`,
       `se_${randomUUID().replace(/-/g, "").slice(0, 20)}`,
       opts.restaurantId, opts.restaurantName ?? null, opts.type, opts.plan,
       opts.mrrCents, opts.mrrDeltaCents,
