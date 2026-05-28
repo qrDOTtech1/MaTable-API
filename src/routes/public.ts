@@ -504,30 +504,34 @@ export async function publicRoutes(app: FastifyInstance) {
         status: { notIn: ["CANCELLED"] },
         tableId: { not: null },
       },
-      select: { tableId: true, startsAt: true, durationMin: true },
+      select: { tableId: true, startsAt: true, durationMin: true, partySize: true },
     });
+
+    const maxCoversPerSlot: number | null = (restaurant as any).maxCoversPerSlot ?? null;
 
     /**
      * Vérifie si au moins une table réservable peut accueillir une nouvelle
      * réservation sur le créneau [slotStart, slotStart + mealMin], en respectant
-     * les quotas walk-in par zone.
+     * les quotas walk-in par zone et le plafond de couverts global.
      */
     const canBook = (slotStart: Date): boolean => {
       const slotEnd = new Date(slotStart.getTime() + mealMin * 60_000);
 
-      // Tables déjà occupées sur ce créneau
-      const occupiedTableIds = new Set<string>(
-        dayReservations
-          .filter((r) => {
-            const rEnd = new Date(r.startsAt.getTime() + (r.durationMin ?? mealMin) * 60_000);
-            // Chevauchement : r commence avant la fin du slot ET r finit après le début du slot
-            return r.startsAt < slotEnd && rEnd > slotStart;
-          })
-          .map((r) => r.tableId as string)
-      );
+      // Réservations chevauchant ce créneau
+      const overlapping = dayReservations.filter((r) => {
+        const rEnd = new Date(r.startsAt.getTime() + (r.durationMin ?? mealMin) * 60_000);
+        return r.startsAt < slotEnd && rEnd > slotStart;
+      });
 
-      // Compter par zone : tables libres VS quota
-      // group reservableTables by zone
+      // Vérifier le plafond global de couverts
+      if (maxCoversPerSlot !== null) {
+        const currentCovers = overlapping.reduce((s, r) => s + ((r as any).partySize ?? 0), 0);
+        if (currentCovers + guests > maxCoversPerSlot) return false;
+      }
+
+      const occupiedTableIds = new Set<string>(overlapping.map((r) => r.tableId as string));
+
+      // Compter par zone : tables libres VS quota walk-in
       const byZone = new Map<string | null, string[]>();
       for (const t of reservableTables) {
         const key = t.zone ?? null;
@@ -538,9 +542,8 @@ export async function publicRoutes(app: FastifyInstance) {
       for (const [zone, tableIds] of byZone.entries()) {
         const quota = zone !== null ? (quotaByZone.get(zone) ?? 0) : 0;
         const freeTables = tableIds.filter((id) => !occupiedTableIds.has(id));
-        // Nombre de tables que l'on peut encore réserver dans cette zone
         const bookable = freeTables.length - quota;
-        if (bookable > 0) return true; // au moins une table dispo dans cette zone
+        if (bookable > 0) return true;
       }
       return false;
     };
@@ -586,6 +589,58 @@ export async function publicRoutes(app: FastifyInstance) {
     )].sort();
 
     return { zones };
+  });
+
+  // ---------------------------------------------------------------------------
+  // GET /api/public/r/:slug/loyalty — consultation points client
+  // ---------------------------------------------------------------------------
+  app.get("/r/:slug/loyalty", async (req, reply) => {
+    const { slug } = req.params as { slug: string };
+    const { q } = z.object({ q: z.string().min(1) }).parse(req.query ?? {});
+
+    const restaurant = await prisma.restaurant.findUnique({ where: { slug }, select: { id: true } });
+    if (!restaurant) return reply.code(404).send({ error: "restaurant_not_found" });
+
+    const term = q.trim().toLowerCase();
+
+    // Chercher par email ou téléphone
+    const customers = await prisma.$queryRawUnsafe<Array<{
+      id: string; firstName: string|null; lastName: string|null;
+      email: string|null; phone: string|null;
+      points: number; tier: string; totalSpent: number; visitCount: number;
+    }>>(
+      `SELECT id, "firstName", "lastName", email, phone, points, tier, "totalSpent", "visitCount"
+       FROM "LoyaltyCustomer"
+       WHERE "restaurantId" = $1
+         AND (LOWER(COALESCE(email,'')) = $2 OR REPLACE(REPLACE(phone,' ',''),'.','') LIKE $3)
+       LIMIT 1`,
+      restaurant.id, term, `%${term.replace(/[\s.+\-()]/g, "")}%`
+    );
+
+    if (!customers[0]) return reply.code(404).send({ error: "not_found" });
+    const customer = customers[0];
+
+    // Transactions récentes
+    const transactions = await prisma.$queryRawUnsafe<Array<{
+      id: string; type: string; points: number; description: string|null; createdAt: string;
+    }>>(
+      `SELECT id, type, points, description, "createdAt"::text FROM "LoyaltyTransaction"
+       WHERE "customerId" = $1 ORDER BY "createdAt" DESC LIMIT 20`,
+      customer.id
+    );
+
+    // Offres actives du restaurant
+    const offers = await prisma.$queryRawUnsafe<Array<{
+      id: string; name: string; description: string|null; type: string;
+      pointsCost: number; minTier: string|null; active: boolean;
+    }>>(
+      `SELECT id, name, description, type, "pointsCost", "minTier", active
+       FROM "LoyaltyOffer" WHERE "restaurantId" = $1 AND active = true
+       ORDER BY "pointsCost" ASC`,
+      restaurant.id
+    );
+
+    return { customer: { ...customer, transactions, offers } };
   });
 
   // ---------------------------------------------------------------------------
@@ -1361,6 +1416,15 @@ Ne renvoie STRICTEMENT rien d'autre que ce JSON (pas de bloc Markdown \`\`\`json
         status: "PENDING",
         tableId: assignedTableId,
       },
+    });
+
+    // Notifier le dashboard en temps réel
+    emitToRestaurant(restaurant.id, "reservation:new", {
+      id:           reservation.id,
+      customerName: input.name,
+      partySize:    input.guests,
+      startsAt:     reservation.startsAt,
+      source:       "online",
     });
 
     // Send confirmation email if customer provided email + Resend is configured

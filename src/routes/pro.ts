@@ -329,6 +329,7 @@ export async function proRoutes(app: FastifyInstance) {
       reservationPolicy: z.string().max(2000).optional(),
       reservationAlertEmail: z.string().email().optional().nullable(),
       reservationAlertEmails: z.array(z.string().email()).max(10).optional(),
+      maxCoversPerSlot: z.number().int().min(0).nullable().optional(),
       reservationSlotMinutes: z.number().int().min(10).max(120).optional(),
       tipsEnabled: z.boolean().optional(),
       serviceCallEnabled: z.boolean().optional(),
@@ -352,7 +353,7 @@ export async function proRoutes(app: FastifyInstance) {
       })).optional(),
     }).parse(req.body);
 
-    const { openingHours, googleReviewLink, reviewVoucherConfig, businessType, reviewCustomQuestions, reviewRatingCategories, reservationAlertEmail, reservationAlertEmails, ...restData } = body;
+    const { openingHours, googleReviewLink, reviewVoucherConfig, businessType, reviewCustomQuestions, reviewRatingCategories, reservationAlertEmail, reservationAlertEmails, maxCoversPerSlot, ...restData } = body;
 
     if (restData.slug) {
       const taken = await prisma.restaurant.findFirst({
@@ -377,6 +378,9 @@ export async function proRoutes(app: FastifyInstance) {
     }
     if (reservationAlertEmail !== undefined) {
       ops.push(prisma.$executeRawUnsafe(`UPDATE "Restaurant" SET "reservationAlertEmail" = $1 WHERE id = $2`, reservationAlertEmail, me.restaurantId));
+    }
+    if (maxCoversPerSlot !== undefined) {
+      ops.push(prisma.$executeRawUnsafe(`UPDATE "Restaurant" SET "maxCoversPerSlot" = $1 WHERE id = $2`, maxCoversPerSlot, me.restaurantId));
     }
     if (reservationAlertEmails !== undefined) {
       const cleaned = Array.from(new Set(reservationAlertEmails.map(e => e.trim().toLowerCase()).filter(Boolean))).slice(0, 10);
@@ -1726,6 +1730,49 @@ export async function proRoutes(app: FastifyInstance) {
       include: { table: true }, orderBy: { startsAt: "asc" },
     });
     return { reservations };
+  });
+
+  // POST /reservations — création manuelle par le restaurateur
+  app.post("/reservations", async (req, reply) => {
+    const me = await requirePro(req, reply);
+    const input = z.object({
+      customerName:  z.string().min(1),
+      customerEmail: z.string().email().optional().or(z.literal("")).default(""),
+      customerPhone: z.string().optional().default(""),
+      date:          z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+      time:          z.string().regex(/^\d{2}:\d{2}$/),
+      partySize:     z.number().int().min(1).max(50),
+      notes:         z.string().optional(),
+      tableId:       z.string().optional().nullable(),
+    }).parse(req.body);
+
+    const [h, m] = input.time.split(":").map(Number);
+    const startsAt = new Date(`${input.date}T00:00:00`);
+    startsAt.setHours(h, m, 0, 0);
+
+    const reservation = await prisma.reservation.create({
+      data: {
+        restaurantId:  me.restaurantId,
+        startsAt,
+        partySize:     input.partySize,
+        customerName:  input.customerName,
+        customerEmail: input.customerEmail ?? "",
+        customerPhone: input.customerPhone ?? "",
+        status:        "CONFIRMED",
+        tableId:       input.tableId ?? null,
+      },
+      include: { table: true },
+    });
+
+    emitToRestaurant(me.restaurantId, "reservation:new", {
+      id:           reservation.id,
+      customerName: reservation.customerName,
+      partySize:    reservation.partySize,
+      startsAt:     reservation.startsAt,
+      source:       "manual",
+    });
+
+    return { reservation };
   });
 
   app.post("/reservations/:id/status", async (req, reply) => {
