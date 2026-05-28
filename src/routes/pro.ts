@@ -1522,14 +1522,21 @@ export async function proRoutes(app: FastifyInstance) {
       include: { server: true },
     });
     const revenueCents = paidOrders.reduce((s, o) => s + o.totalCents + o.tipCents, 0);
+    const tipsCents = paidOrders.reduce((s, o) => s + o.tipCents, 0);
     const ordersCount = paidOrders.length;
     const avgTicketCents = ordersCount ? Math.round(revenueCents / ordersCount) : 0;
+    const itemsSold = paidOrders.reduce((s, o) => s + (Array.isArray(o.items) ? (o.items as any[]).reduce((n, it) => n + (Number(it.quantity) || 0), 0) : 0), 0);
     const itemCounts = new Map<string, { name: string; qty: number; revenueCents: number }>();
+    const categoryCounts = new Map<string, { name: string; qty: number; revenueCents: number }>();
     for (const o of paidOrders) {
       for (const it of (o.items as any[])) {
         const prev = itemCounts.get(it.name) ?? { name: it.name, qty: 0, revenueCents: 0 };
         prev.qty += it.quantity; prev.revenueCents += it.priceCents * it.quantity;
         itemCounts.set(it.name, prev);
+        const cat = it.category ?? "Non catégorisé";
+        const catPrev = categoryCounts.get(cat) ?? { name: cat, qty: 0, revenueCents: 0 };
+        catPrev.qty += it.quantity; catPrev.revenueCents += it.priceCents * it.quantity;
+        categoryCounts.set(cat, catPrev);
       }
     }
     const topItems = Array.from(itemCounts.values()).sort((a, b) => b.qty - a.qty).slice(0, 10);
@@ -1546,8 +1553,71 @@ export async function proRoutes(app: FastifyInstance) {
       prev.revenueCents += o.totalCents + o.tipCents; prev.orders += 1;
       byServer.set(o.server.id, prev);
     }
-    return { sinceIso: since.toISOString(), revenueCents, ordersCount, avgTicketCents, topItems, revenueByDay,
-      revenueByServer: Array.from(byServer.values()).sort((a, b) => b.revenueCents - a.revenueCents) };
+    const reservations = await prisma.reservation.findMany({
+      where: { restaurantId: me.restaurantId, startsAt: { gte: since } },
+      select: { startsAt: true, partySize: true, status: true, table: { select: { zone: true } } },
+    });
+    const reservationStats = {
+      count: reservations.length,
+      covers: reservations.reduce((s, r) => s + r.partySize, 0),
+      pending: reservations.filter(r => r.status === "PENDING").length,
+      confirmed: reservations.filter(r => r.status === "CONFIRMED").length,
+      seated: reservations.filter(r => r.status === "SEATED").length,
+      honored: reservations.filter(r => r.status === "HONORED").length,
+      noShows: reservations.filter(r => r.status === "NO_SHOW").length,
+      cancelled: reservations.filter(r => r.status === "CANCELLED").length,
+    };
+    const reservationsByDay = new Map<string, { date: string; reservations: number; covers: number }>();
+    const reservationsByZone = new Map<string, { zone: string; reservations: number; covers: number }>();
+    for (const r of reservations) {
+      const day = r.startsAt.toISOString().slice(0, 10);
+      const dayPrev = reservationsByDay.get(day) ?? { date: day, reservations: 0, covers: 0 };
+      dayPrev.reservations += 1; dayPrev.covers += r.partySize;
+      reservationsByDay.set(day, dayPrev);
+      const zone = r.table?.zone ?? "Sans zone";
+      const zonePrev = reservationsByZone.get(zone) ?? { zone, reservations: 0, covers: 0 };
+      zonePrev.reservations += 1; zonePrev.covers += r.partySize;
+      reservationsByZone.set(zone, zonePrev);
+    }
+
+    const reviewAgg = await prisma.dishReview.aggregate({
+      where: { restaurantId: me.restaurantId, createdAt: { gte: since } },
+      _avg: { rating: true },
+      _count: { id: true },
+    });
+    const loyalty = await prisma.$queryRawUnsafe<Array<{ customers: bigint; points: bigint; visits: bigint; offers: bigint; redemptions: bigint }>>(
+      `SELECT
+        (SELECT COUNT(*)::bigint FROM "LoyaltyCustomer" WHERE "restaurantId" = $1) AS customers,
+        (SELECT COALESCE(SUM(points),0)::bigint FROM "LoyaltyCustomer" WHERE "restaurantId" = $1) AS points,
+        (SELECT COALESCE(SUM("visitCount"),0)::bigint FROM "LoyaltyCustomer" WHERE "restaurantId" = $1) AS visits,
+        (SELECT COUNT(*)::bigint FROM "LoyaltyOffer" WHERE "restaurantId" = $1 AND active = true) AS offers,
+        (SELECT COUNT(*)::bigint FROM "LoyaltyTransaction" t JOIN "LoyaltyCustomer" c ON c.id = t."customerId" WHERE c."restaurantId" = $1 AND t.type = 'redeem') AS redemptions`,
+      me.restaurantId
+    ).catch(() => [{ customers: 0n, points: 0n, visits: 0n, offers: 0n, redemptions: 0n }]);
+
+    return {
+      sinceIso: since.toISOString(),
+      revenueCents,
+      tipsCents,
+      ordersCount,
+      avgTicketCents,
+      itemsSold,
+      topItems,
+      topCategories: Array.from(categoryCounts.values()).sort((a, b) => b.revenueCents - a.revenueCents).slice(0, 10),
+      revenueByDay,
+      revenueByServer: Array.from(byServer.values()).sort((a, b) => b.revenueCents - a.revenueCents),
+      reservations: reservationStats,
+      reservationsByDay: Array.from(reservationsByDay.values()).sort((a, b) => a.date.localeCompare(b.date)),
+      reservationsByZone: Array.from(reservationsByZone.values()).sort((a, b) => b.reservations - a.reservations),
+      reviews: { count: reviewAgg._count.id, avgRating: reviewAgg._avg.rating ?? 0 },
+      loyalty: {
+        customers: Number(loyalty[0]?.customers ?? 0n),
+        points: Number(loyalty[0]?.points ?? 0n),
+        visits: Number(loyalty[0]?.visits ?? 0n),
+        activeOffers: Number(loyalty[0]?.offers ?? 0n),
+        redemptions: Number(loyalty[0]?.redemptions ?? 0n),
+      },
+    };
   });
 
   app.get("/stats/overview", async (req, reply) => {
