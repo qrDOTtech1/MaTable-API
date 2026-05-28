@@ -2374,6 +2374,87 @@ export async function proRoutes(app: FastifyInstance) {
     return "bronze";
   }
 
+  function normalizeNullableDate(input?: string | null): string | null {
+    if (!input) return null;
+    const d = new Date(input);
+    return Number.isNaN(d.getTime()) ? null : d.toISOString();
+  }
+
+  function normalizeText(input?: string | null): string | null {
+    const v = typeof input === "string" ? input.trim() : "";
+    return v.length > 0 ? v : null;
+  }
+
+  function normalizeEmail(input?: string | null): string | null {
+    const v = normalizeText(input)?.toLowerCase() ?? null;
+    return v;
+  }
+
+  async function ensureLoyaltySchema() {
+    await prisma.$executeRawUnsafe(`CREATE TABLE IF NOT EXISTS "LoyaltyCustomer" (
+      "id" TEXT NOT NULL,
+      "restaurantId" TEXT NOT NULL,
+      "firstName" TEXT,
+      "lastName" TEXT,
+      "email" TEXT,
+      "phone" TEXT,
+      "points" INTEGER NOT NULL DEFAULT 0,
+      "tier" TEXT NOT NULL DEFAULT 'bronze',
+      "totalSpent" DOUBLE PRECISION NOT NULL DEFAULT 0,
+      "visitCount" INTEGER NOT NULL DEFAULT 0,
+      "birthDate" TIMESTAMP(3),
+      "notes" TEXT,
+      "source" TEXT NOT NULL DEFAULT 'manual',
+      "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      "updatedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      CONSTRAINT "LoyaltyCustomer_pkey" PRIMARY KEY ("id"),
+      CONSTRAINT "LoyaltyCustomer_restaurantId_fkey" FOREIGN KEY ("restaurantId") REFERENCES "Restaurant"("id") ON DELETE CASCADE
+    )`);
+    await prisma.$executeRawUnsafe(`CREATE UNIQUE INDEX IF NOT EXISTS "LoyaltyCustomer_restaurantId_email_key" ON "LoyaltyCustomer"("restaurantId","email") WHERE "email" IS NOT NULL`);
+    await prisma.$executeRawUnsafe(`CREATE INDEX IF NOT EXISTS "LoyaltyCustomer_restaurantId_idx" ON "LoyaltyCustomer"("restaurantId")`);
+    await prisma.$executeRawUnsafe(`CREATE TABLE IF NOT EXISTS "LoyaltyOffer" (
+      "id" TEXT NOT NULL,
+      "restaurantId" TEXT NOT NULL,
+      "name" TEXT NOT NULL,
+      "description" TEXT,
+      "type" TEXT NOT NULL DEFAULT 'discount_pct',
+      "value" DOUBLE PRECISION NOT NULL DEFAULT 0,
+      "pointsCost" INTEGER NOT NULL DEFAULT 100,
+      "minTier" TEXT,
+      "active" BOOLEAN NOT NULL DEFAULT true,
+      "expiresAt" TIMESTAMP(3),
+      "usageLimit" INTEGER,
+      "usageCount" INTEGER NOT NULL DEFAULT 0,
+      "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      CONSTRAINT "LoyaltyOffer_pkey" PRIMARY KEY ("id"),
+      CONSTRAINT "LoyaltyOffer_restaurantId_fkey" FOREIGN KEY ("restaurantId") REFERENCES "Restaurant"("id") ON DELETE CASCADE
+    )`);
+    await prisma.$executeRawUnsafe(`CREATE INDEX IF NOT EXISTS "LoyaltyOffer_restaurantId_idx" ON "LoyaltyOffer"("restaurantId")`);
+    await prisma.$executeRawUnsafe(`CREATE TABLE IF NOT EXISTS "LoyaltyTransaction" (
+      "id" TEXT NOT NULL,
+      "customerId" TEXT NOT NULL,
+      "offerId" TEXT,
+      "type" TEXT NOT NULL,
+      "points" INTEGER NOT NULL,
+      "description" TEXT,
+      "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      CONSTRAINT "LoyaltyTransaction_pkey" PRIMARY KEY ("id"),
+      CONSTRAINT "LoyaltyTransaction_customerId_fkey" FOREIGN KEY ("customerId") REFERENCES "LoyaltyCustomer"("id") ON DELETE CASCADE
+    )`);
+    await prisma.$executeRawUnsafe(`CREATE INDEX IF NOT EXISTS "LoyaltyTransaction_customerId_idx" ON "LoyaltyTransaction"("customerId")`);
+    await prisma.$executeRawUnsafe(`CREATE TABLE IF NOT EXISTS "LoyaltyConfig" (
+      "id" TEXT NOT NULL,
+      "restaurantId" TEXT NOT NULL,
+      "enabled" BOOLEAN NOT NULL DEFAULT false,
+      "ptsPerEuro" INTEGER NOT NULL DEFAULT 10,
+      "minSpendCents" INTEGER NOT NULL DEFAULT 0,
+      "updatedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      CONSTRAINT "LoyaltyConfig_pkey" PRIMARY KEY ("id"),
+      CONSTRAINT "LoyaltyConfig_restaurantId_fkey" FOREIGN KEY ("restaurantId") REFERENCES "Restaurant"("id") ON DELETE CASCADE,
+      CONSTRAINT "LoyaltyConfig_restaurantId_key" UNIQUE ("restaurantId")
+    )`);
+  }
+
   // Helper : upsert client par email ou phone dans la même transaction
   async function upsertLoyaltyCustomer(
     restaurantId: string,
@@ -2424,7 +2505,7 @@ export async function proRoutes(app: FastifyInstance) {
         data.firstName ?? null, data.lastName ?? null, data.phone ?? null,
         newPoints, newTier,
         data.totalSpent ?? 0, data.visitCount ?? 0,
-        data.birthDate ? new Date(data.birthDate).toISOString() : null,
+        normalizeNullableDate(data.birthDate),
         data.notes ?? null,
         existing.id
       );
@@ -2437,10 +2518,10 @@ export async function proRoutes(app: FastifyInstance) {
         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)`,
         id, restaurantId,
         data.firstName ?? null, data.lastName ?? null,
-        data.email ?? null, data.phone ?? null,
+        normalizeEmail(data.email), normalizeText(data.phone),
         points, tier,
         data.totalSpent ?? 0, data.visitCount ?? 0,
-        data.birthDate ? new Date(data.birthDate).toISOString() : null,
+        normalizeNullableDate(data.birthDate),
         data.notes ?? null,
         data.source ?? "manual"
       );
@@ -2490,8 +2571,15 @@ export async function proRoutes(app: FastifyInstance) {
     return { customers, total, page: parseInt(page), limit: lim };
   });
 
+  // POST /loyalty/ensure-schema — fallback self-healing for admins/pro dashboard
+  app.post("/loyalty/ensure-schema", { preHandler: requirePro }, async () => {
+    await ensureLoyaltySchema();
+    return { ok: true };
+  });
+
   // POST /loyalty/customers — créer un client
   app.post("/loyalty/customers", { preHandler: requirePro }, async (req, reply) => {
+    await ensureLoyaltySchema();
     const { restaurantId } = req.user as { restaurantId: string };
     const data = z.object({
       firstName: z.string().optional(),
@@ -2505,7 +2593,18 @@ export async function proRoutes(app: FastifyInstance) {
       notes:      z.string().optional(),
     }).parse(req.body);
 
-    const id = await upsertLoyaltyCustomer(restaurantId, { ...data, source: "manual" });
+    if (!normalizeEmail(data.email) && !normalizeText(data.phone) && !normalizeText(data.firstName) && !normalizeText(data.lastName)) {
+      return reply.code(400).send({ error: "missing_customer_identity" });
+    }
+    const id = await upsertLoyaltyCustomer(restaurantId, {
+      ...data,
+      firstName: normalizeText(data.firstName) ?? undefined,
+      lastName: normalizeText(data.lastName) ?? undefined,
+      email: normalizeEmail(data.email) ?? undefined,
+      phone: normalizeText(data.phone) ?? undefined,
+      birthDate: normalizeNullableDate(data.birthDate) ?? undefined,
+      source: "manual",
+    });
     return reply.code(201).send({ id });
   });
 
@@ -2530,7 +2629,15 @@ export async function proRoutes(app: FastifyInstance) {
     for (const c of body.customers) {
       if (!c.email && !c.phone && !c.firstName && !c.lastName) { skipped++; continue; }
       try {
-        await upsertLoyaltyCustomer(restaurantId, { ...c, source: "import" });
+        await upsertLoyaltyCustomer(restaurantId, {
+          ...c,
+          firstName: normalizeText(c.firstName) ?? undefined,
+          lastName: normalizeText(c.lastName) ?? undefined,
+          email: normalizeEmail(c.email) ?? undefined,
+          phone: normalizeText(c.phone) ?? undefined,
+          birthDate: normalizeNullableDate(c.birthDate) ?? undefined,
+          source: "import",
+        });
         imported++;
       } catch { skipped++; }
     }
@@ -2588,10 +2695,10 @@ export async function proRoutes(app: FastifyInstance) {
         "birthDate" = $6::timestamp,
         "updatedAt" = CURRENT_TIMESTAMP
        WHERE id = $7 AND "restaurantId" = $8`,
-      data.firstName ?? null, data.lastName ?? null,
-      data.email ?? null, data.phone ?? null,
+      normalizeText(data.firstName), normalizeText(data.lastName),
+      normalizeEmail(data.email), normalizeText(data.phone),
       data.notes ?? null,
-      data.birthDate ? new Date(data.birthDate).toISOString() : null,
+      normalizeNullableDate(data.birthDate),
       id, restaurantId
     );
     return { ok: true };
@@ -2666,17 +2773,22 @@ export async function proRoutes(app: FastifyInstance) {
 
   // POST /loyalty/offers
   app.post("/loyalty/offers", { preHandler: requirePro }, async (req, reply) => {
+    await ensureLoyaltySchema();
     const { restaurantId } = req.user as { restaurantId: string };
     const data = z.object({
-      name:        z.string().min(1),
-      description: z.string().optional(),
+      name:        z.string().trim().min(1).max(120),
+      description: z.string().max(500).optional().nullable(),
       type:        z.enum(["discount_pct","discount_fixed","free_item","double_points","birthday"]),
-      value:       z.number().min(0),
-      pointsCost:  z.number().int().min(0),
+      value:       z.coerce.number().min(0).default(0),
+      pointsCost:  z.coerce.number().int().min(0),
       minTier:     z.enum(["bronze","silver","gold","platinum"]).optional(),
       expiresAt:   z.string().optional(),
-      usageLimit:  z.number().int().positive().optional(),
+      usageLimit:  z.coerce.number().int().positive().optional(),
     }).parse(req.body);
+
+    if (data.type === "discount_pct" && data.value > 100) {
+      return reply.code(400).send({ error: "discount_pct_too_high" });
+    }
 
     const id = crypto.randomUUID();
     await prisma.$executeRawUnsafe(
@@ -2685,10 +2797,10 @@ export async function proRoutes(app: FastifyInstance) {
           active, "expiresAt", "usageLimit", "usageCount", "createdAt")
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,true,$9::timestamp,$10,0,CURRENT_TIMESTAMP)`,
       id, restaurantId,
-      data.name, data.description ?? null,
+      data.name, normalizeText(data.description),
       data.type, data.value, data.pointsCost,
       data.minTier ?? null,
-      data.expiresAt ? new Date(data.expiresAt).toISOString() : null,
+      normalizeNullableDate(data.expiresAt),
       data.usageLimit ?? null
     );
     return reply.code(201).send({ id });
@@ -2699,15 +2811,15 @@ export async function proRoutes(app: FastifyInstance) {
     const { restaurantId } = req.user as { restaurantId: string };
     const { id } = req.params as { id: string };
     const data = z.object({
-      name:        z.string().min(1).optional(),
+      name:        z.string().trim().min(1).max(120).optional(),
       description: z.string().optional().nullable(),
       type:        z.enum(["discount_pct","discount_fixed","free_item","double_points","birthday"]).optional(),
-      value:       z.number().min(0).optional(),
-      pointsCost:  z.number().int().min(0).optional(),
+      value:       z.coerce.number().min(0).optional(),
+      pointsCost:  z.coerce.number().int().min(0).optional(),
       minTier:     z.enum(["bronze","silver","gold","platinum"]).optional().nullable(),
       active:      z.boolean().optional(),
       expiresAt:   z.string().optional().nullable(),
-      usageLimit:  z.number().int().positive().optional().nullable(),
+      usageLimit:  z.coerce.number().int().positive().optional().nullable(),
     }).parse(req.body);
 
     const sets: string[] = [];
@@ -2716,11 +2828,12 @@ export async function proRoutes(app: FastifyInstance) {
     if (data.name        !== undefined) { sets.push(`name = $${i++}`);          vals.push(data.name); }
     if (data.description !== undefined) { sets.push(`description = $${i++}`);   vals.push(data.description); }
     if (data.type        !== undefined) { sets.push(`type = $${i++}`);           vals.push(data.type); }
+    if (data.type === "discount_pct" && data.value !== undefined && data.value > 100) return reply.code(400).send({ error: "discount_pct_too_high" });
     if (data.value       !== undefined) { sets.push(`value = $${i++}`);          vals.push(data.value); }
     if (data.pointsCost  !== undefined) { sets.push(`"pointsCost" = $${i++}`);   vals.push(data.pointsCost); }
     if (data.minTier     !== undefined) { sets.push(`"minTier" = $${i++}`);      vals.push(data.minTier); }
     if (data.active      !== undefined) { sets.push(`active = $${i++}`);         vals.push(data.active); }
-    if (data.expiresAt   !== undefined) { sets.push(`"expiresAt" = $${i++}::timestamp`); vals.push(data.expiresAt ? new Date(data.expiresAt).toISOString() : null); }
+    if (data.expiresAt   !== undefined) { sets.push(`"expiresAt" = $${i++}::timestamp`); vals.push(normalizeNullableDate(data.expiresAt)); }
     if (data.usageLimit  !== undefined) { sets.push(`"usageLimit" = $${i++}`);   vals.push(data.usageLimit); }
     if (!sets.length) return { ok: true };
 
