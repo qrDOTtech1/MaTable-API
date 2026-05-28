@@ -307,3 +307,34 @@ export function contactFormHtml(opts: {
 </body>
 </html>`;
 }
+
+// Relance paiement échoué (dunning) — envoyé au restaurateur
+export function paymentFailedHtml(opts: {
+  restaurantName: string;
+  manageUrl: string;
+}): string {
+  return `<!DOCTYPE html>
+<html lang="fr">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
+<body style="margin:0;padding:0;background:#f5f5f5;font-family:sans-serif">
+  <div style="max-width:520px;margin:32px auto;background:#fff;border-radius:16px;overflow:hidden;box-shadow:0 2px 16px rgba(0,0,0,.08)">
+    <div style="background:#dc2626;padding:24px 32px;text-align:center">
+      <h1 style="color:#fff;margin:0;font-size:20px;font-weight:900">Paiement échoué ⚠️</h1>
+    </div>
+    <div style="padding:28px 32px;color:#333;font-size:14px;line-height:1.6">
+      <p>Bonjour <strong>${opts.restaurantName}</strong>,</p>
+      <p>Le règlement de votre abonnement <strong>MaTable.Pro</strong> n'a pas pu être encaissé.
+      Cela arrive souvent quand une carte expire ou que le plafond est atteint.</p>
+      <p>Pour éviter toute interruption de service, merci de mettre à jour votre moyen de paiement :</p>
+      <div style="text-align:center;margin:24px 0">
+        <a href="${opts.manageUrl}" style="display:inline-block;background:#ea580c;color:#fff;font-weight:700;font-size:14px;padding:12px 28px;border-radius:10px;text-decoration:none">Mettre à jour mon paiement →</a>
+      </div>
+      <p style="color:#888;font-size:12px">Une nouvelle tentative sera effectuée automatiquement. En cas de souci, répondez à cet email.</p>
+    </div>
+    <div style="background:#f8f8f8;padding:14px 28px;text-align:center;font-size:11px;color:#999">
+      MaTable.Pro · matable.pro
+    </div>
+  </div>
+</body>
+</html>`;
+}

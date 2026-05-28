@@ -358,3 +358,5 @@ ALTER TYPE "OrderStatus" ADD VALUE IF NOT EXISTS 'READY';
 -- Stripe Billing plateforme : lien resto ↔ abonnement Stripe MaTable
 ALTER TABLE "Restaurant" ADD COLUMN IF NOT EXISTS "platformStripeCustomerId" TEXT;
 ALTER TABLE "Restaurant" ADD COLUMN IF NOT EXISTS "platformStripeSubscriptionId" TEXT;
+-- Dunning : paiement d'abonnement en échec
+ALTER TABLE "Restaurant" ADD COLUMN IF NOT EXISTS "billingPastDue" BOOLEAN NOT NULL DEFAULT false;

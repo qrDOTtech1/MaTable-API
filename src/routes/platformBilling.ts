@@ -17,6 +17,7 @@ import Stripe from "stripe";
 import { z } from "zod";
 import { prisma } from "../db.js";
 import { requirePro } from "../auth.js";
+import { sendEmail, paymentFailedHtml } from "../email.js";
 import { randomUUID } from "crypto";
 
 const APP_BASE = "https://matable.pro";
@@ -131,9 +132,11 @@ export async function platformBillingRoutes(app: FastifyInstance) {
     const me = await requirePro(req, reply);
     const cfg = await getConfig();
     const rows = await prisma.$queryRawUnsafe<Array<{
-      subscription: string; subscriptionExpiresAt: Date | null; platformStripeSubscriptionId: string | null;
+      subscription: string; subscriptionExpiresAt: Date | null;
+      platformStripeSubscriptionId: string | null; billingPastDue: boolean | null;
     }>>(
-      `SELECT subscription::text AS subscription, "subscriptionExpiresAt", "platformStripeSubscriptionId"
+      `SELECT subscription::text AS subscription, "subscriptionExpiresAt",
+              "platformStripeSubscriptionId", "billingPastDue"
        FROM "Restaurant" WHERE id = $1`, me.restaurantId,
     );
     const r = rows[0];
@@ -142,6 +145,7 @@ export async function platformBillingRoutes(app: FastifyInstance) {
       plan: r?.subscription ?? "STARTER",
       expiresAt: r?.subscriptionExpiresAt ?? null,
       subscribed: !!r?.platformStripeSubscriptionId,
+      pastDue: !!r?.billingPastDue,
     };
   });
 
@@ -271,10 +275,36 @@ export async function platformBillingRoutes(app: FastifyInstance) {
           const periodEnd = inv.lines?.data?.[0]?.period?.end
             ? new Date(inv.lines.data[0].period.end * 1000)
             : new Date(Date.now() + 31 * 86400_000);
+          // Paiement OK → on lève l'éventuel drapeau "past due"
           await prisma.$executeRawUnsafe(
-            `UPDATE "Restaurant" SET "subscriptionExpiresAt" = $1 WHERE id = $2`,
+            `UPDATE "Restaurant" SET "subscriptionExpiresAt" = $1, "billingPastDue" = false WHERE id = $2`,
             periodEnd, restaurantId,
           );
+          break;
+        }
+
+        case "invoice.payment_failed": {
+          const inv = event.data.object as Stripe.Invoice;
+          const restaurantId = await restaurantIdFromCustomer(inv.customer);
+          if (!restaurantId) break;
+          const rows = await prisma.$queryRawUnsafe<Array<{ name: string; email: string | null }>>(
+            `SELECT name, email FROM "Restaurant" WHERE id = $1`, restaurantId,
+          );
+          const resto = rows[0];
+          await prisma.$executeRawUnsafe(
+            `UPDATE "Restaurant" SET "billingPastDue" = true WHERE id = $1`, restaurantId,
+          );
+          // Email de relance (dunning)
+          if (resto?.email) {
+            await sendEmail({
+              to: resto.email,
+              subject: "⚠️ Paiement de votre abonnement MaTable.Pro échoué",
+              html: paymentFailedHtml({
+                restaurantName: resto.name,
+                manageUrl: `${APP_BASE}/dashboard/abonnement`,
+              }),
+            }).catch(() => {});
+          }
           break;
         }
 
