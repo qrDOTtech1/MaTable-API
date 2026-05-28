@@ -1632,6 +1632,64 @@ Ne renvoie STRICTEMENT rien d'autre que ce JSON (pas de bloc Markdown \`\`\`json
     };
   });
 
+  // PATCH /session/customer — stocker email/tel + lookup fidélité
+  app.patch("/session/customer", async (req, reply) => {
+    const decoded = await requireSessionToken(req, reply);
+    const { email, phone } = z.object({
+      email: z.string().email().optional().or(z.literal("")).default(""),
+      phone: z.string().optional().default(""),
+    }).parse(req.body ?? {});
+
+    // Mettre à jour la session
+    await prisma.$executeRawUnsafe(
+      `UPDATE "TableSession"
+       SET "customerEmail" = COALESCE(NULLIF($1,''), "customerEmail"),
+           "customerPhone" = COALESCE(NULLIF($2,''), "customerPhone")
+       WHERE id = $3`,
+      email, phone, decoded.sessionId
+    );
+
+    // Chercher le client fidélité
+    const term = (email || phone || "").trim().toLowerCase();
+    if (!term) return { loyalty: null };
+
+    const customers = await prisma.$queryRawUnsafe<Array<{
+      id: string; firstName: string|null; lastName: string|null;
+      email: string|null; phone: string|null;
+      points: number; tier: string; visitCount: number;
+    }>>(
+      `SELECT id, "firstName", "lastName", email, phone, points, tier, "visitCount"
+       FROM "LoyaltyCustomer"
+       WHERE "restaurantId" = $1
+         AND (LOWER(COALESCE(email,'')) = $2
+              OR REPLACE(REPLACE(COALESCE(phone,''),' ',''),'.','') LIKE $3)
+       LIMIT 1`,
+      decoded.restaurantId, term, `%${term.replace(/[\s.+\-()]/g, "")}%`
+    );
+
+    if (customers[0]) {
+      // Lier le client fidélité à la session
+      await prisma.$executeRawUnsafe(
+        `UPDATE "TableSession" SET "loyaltyCustomerId" = $1 WHERE id = $2`,
+        customers[0].id, decoded.sessionId
+      );
+
+      // Offres actives
+      const offers = await prisma.$queryRawUnsafe<Array<{
+        id: string; name: string; pointsCost: number; type: string; minTier: string|null;
+      }>>(
+        `SELECT id, name, "pointsCost", type, "minTier"
+         FROM "LoyaltyOffer" WHERE "restaurantId" = $1 AND active = true
+         ORDER BY "pointsCost" ASC LIMIT 5`,
+        decoded.restaurantId
+      );
+
+      return { loyalty: { ...customers[0], offers } };
+    }
+
+    return { loyalty: null };
+  });
+
   app.post("/bill/request", async (req, reply) => {
     const decoded = await requireSessionToken(req, reply);
     const { mode } = z

@@ -673,7 +673,7 @@ export async function proRoutes(app: FastifyInstance) {
     });
     emitToRestaurant(me.restaurantId, "order:paid", { tableId: id });
 
-    // ── Attribution automatique de points fidélité ────────────────────────
+    // ── Attribution automatique de points fidélité + ticket email ───────────
     try {
       const loyaltyConfig = await prisma.$queryRawUnsafe<Array<{
         enabled: boolean; ptsPerEuro: number; minSpendCents: number;
@@ -682,52 +682,156 @@ export async function proRoutes(app: FastifyInstance) {
          WHERE "restaurantId" = $1 LIMIT 1`,
         me.restaurantId
       );
-      if (loyaltyConfig[0]?.enabled) {
-        const cfg = loyaltyConfig[0];
-        // Calculer le total de la session
-        const rows = await prisma.$queryRawUnsafe<Array<{ totalCents: number; customerName: string | null }>>(
-          `SELECT COALESCE(SUM(oi.quantity * oi."unitPriceCents"),0) AS "totalCents",
-                  ts."customerName"
-           FROM "TableSession" ts
-           JOIN "Order" o ON o."sessionId" = ts.id
-           JOIN "OrderItem" oi ON oi."orderId" = o.id
-           WHERE ts.id = $1
-           GROUP BY ts."customerName"`,
-          session.id
-        );
-        const totalCents = Number(rows[0]?.totalCents ?? 0);
-        if (totalCents >= cfg.minSpendCents && totalCents > 0) {
-          const ptsEarned = Math.floor((totalCents / 100) * cfg.ptsPerEuro);
-          if (ptsEarned > 0) {
-            const customerName = rows[0]?.customerName ?? null;
-            // Chercher ou créer le client fidélité anonyme lié à la session
-            const existing = customerName
-              ? await prisma.$queryRawUnsafe<Array<{ id: string; points: number }>>(
-                  `SELECT id, points FROM "LoyaltyCustomer"
-                   WHERE "restaurantId" = $1 AND LOWER("firstName") = LOWER($2) LIMIT 1`,
-                  me.restaurantId, customerName
-                )
-              : [];
-            if (existing[0]) {
-              const newPts = existing[0].points + ptsEarned;
-              const tier = newPts >= 5000 ? "platinum" : newPts >= 2000 ? "gold" : newPts >= 500 ? "silver" : "bronze";
+
+      // Données de la session (email, téléphone, client fidélité lié)
+      const sessionData = await prisma.$queryRawUnsafe<Array<{
+        customerEmail: string | null;
+        customerPhone: string | null;
+        loyaltyCustomerId: string | null;
+        customerName: string | null;
+      }>>(
+        `SELECT "customerEmail", "customerPhone", "loyaltyCustomerId", "customerName"
+         FROM "TableSession" WHERE id = $1`,
+        session.id
+      );
+      const sess = sessionData[0];
+
+      // Calculer le total + récupérer les articles
+      const orderRows = await prisma.$queryRawUnsafe<Array<{
+        totalCents: number;
+        itemName: string;
+        qty: number;
+        unitCents: number;
+      }>>(
+        `SELECT COALESCE(SUM(oi.quantity * oi."unitPriceCents"),0) AS "totalCents",
+                oi.name AS "itemName", SUM(oi.quantity)::int AS qty,
+                oi."unitPriceCents" AS "unitCents"
+         FROM "Order" o
+         JOIN "OrderItem" oi ON oi."orderId" = o.id
+         WHERE o."sessionId" = $1 AND o.status NOT IN ('CANCELLED')
+         GROUP BY oi.name, oi."unitPriceCents"`,
+        session.id
+      );
+      const totalCents = Number(orderRows[0]?.totalCents ?? 0);
+
+      // ── Fidélité ──────────────────────────────────────────────────────────
+      let earnedPoints = 0;
+      let loyaltyCustomer: { id: string; points: number; tier: string; firstName: string | null } | null = null;
+
+      if (loyaltyConfig[0]?.enabled && totalCents >= (loyaltyConfig[0].minSpendCents ?? 0)) {
+        const ptsEarned = Math.floor((totalCents / 100) * loyaltyConfig[0].ptsPerEuro);
+        if (ptsEarned > 0) {
+          // Priorité 1 : client déjà lié à la session via email/téléphone
+          let loyaltyId = sess?.loyaltyCustomerId ?? null;
+
+          // Priorité 2 : chercher par email ou téléphone de la session
+          if (!loyaltyId && (sess?.customerEmail || sess?.customerPhone)) {
+            const term = (sess.customerEmail || sess.customerPhone || "").trim().toLowerCase();
+            const found = await prisma.$queryRawUnsafe<Array<{ id: string; points: number; tier: string; firstName: string | null }>>(
+              `SELECT id, points, tier, "firstName" FROM "LoyaltyCustomer"
+               WHERE "restaurantId" = $1
+               AND (LOWER(COALESCE(email,'')) = $2
+                    OR REPLACE(REPLACE(COALESCE(phone,''),' ',''),'.','') LIKE $3)
+               LIMIT 1`,
+              me.restaurantId, term, `%${term.replace(/[\s.+\-()]/g, "")}%`
+            );
+            if (found[0]) loyaltyId = found[0].id;
+
+            // Priorité 3 : créer automatiquement si email connu mais pas encore inscrit
+            if (!loyaltyId && sess?.customerEmail) {
+              const name = (sess.customerName ?? "").split(" ");
+              const newId = `lc_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
               await prisma.$executeRawUnsafe(
-                `UPDATE "LoyaltyCustomer" SET points = $1, tier = $2, "visitCount" = "visitCount" + 1,
-                 "totalSpent" = "totalSpent" + $3, "updatedAt" = NOW() WHERE id = $4`,
-                newPts, tier, totalCents / 100, existing[0].id
+                `INSERT INTO "LoyaltyCustomer" (id, "restaurantId", "firstName", "lastName", email, phone, points, tier, "totalSpent", "visitCount", source, "createdAt", "updatedAt")
+                 VALUES ($1,$2,$3,$4,$5,$6,0,'bronze',0,0,'order',NOW(),NOW())`,
+                newId, me.restaurantId, name[0] ?? null, name[1] ?? null,
+                sess.customerEmail.toLowerCase(), sess.customerPhone ?? null
+              );
+              loyaltyId = newId;
+            }
+          }
+
+          if (loyaltyId) {
+            const current = await prisma.$queryRawUnsafe<Array<{ id: string; points: number; tier: string; firstName: string | null }>>(
+              `SELECT id, points, tier, "firstName" FROM "LoyaltyCustomer" WHERE id = $1`,
+              loyaltyId
+            );
+            if (current[0]) {
+              const newPts = current[0].points + ptsEarned;
+              const newTier = newPts >= 5000 ? "platinum" : newPts >= 2000 ? "gold" : newPts >= 500 ? "silver" : "bronze";
+              await prisma.$executeRawUnsafe(
+                `UPDATE "LoyaltyCustomer"
+                 SET points = $1, tier = $2, "visitCount" = "visitCount" + 1,
+                     "totalSpent" = "totalSpent" + $3, "updatedAt" = NOW()
+                 WHERE id = $4`,
+                newPts, newTier, totalCents / 100, loyaltyId
               );
               await prisma.$executeRawUnsafe(
                 `INSERT INTO "LoyaltyTransaction" (id, "customerId", type, points, description, "createdAt")
                  VALUES (gen_random_uuid()::text, $1, 'earn', $2, $3, NOW())`,
-                existing[0].id, ptsEarned, `Table ${table.number} — commande payée`
+                loyaltyId, ptsEarned, `Table ${table.number} — ${(totalCents / 100).toFixed(2)} €`
               );
+              earnedPoints = ptsEarned;
+              loyaltyCustomer = { ...current[0], points: newPts, tier: newTier };
             }
-            // Si pas de client trouvé, on ne crée pas automatiquement (évite les doublons fantômes)
           }
         }
       }
-    } catch (_e) {
-      // Non-bloquant — ne pas faire échouer le règlement
+
+      // ── Email ticket ─────────────────────────────────────────────────────
+      const { sendEmail, receiptWithLoyaltyHtml, canSendEmail } = await import("../email.js");
+      const toEmail = sess?.customerEmail;
+      if (toEmail && canSendEmail()) {
+        const restaurant = await prisma.restaurant.findUnique({
+          where: { id: me.restaurantId },
+          select: { name: true, slug: true },
+        });
+
+        const TIER_LABELS: Record<string, string> = { bronze: "Bronze", silver: "Argent", gold: "Or", platinum: "Platine" };
+        const TIER_ORDER = ["bronze", "silver", "gold", "platinum"];
+        const nextTierKey = loyaltyCustomer
+          ? TIER_ORDER[TIER_ORDER.indexOf(loyaltyCustomer.tier) + 1] ?? null
+          : null;
+        const ptsToNext = nextTierKey && loyaltyCustomer
+          ? ({ silver: 500, gold: 2000, platinum: 5000 }[nextTierKey] ?? 0) - loyaltyCustomer.points
+          : null;
+
+        const items = orderRows.map((r) => ({
+          name: r.itemName,
+          qty: r.qty,
+          unitEur: (r.unitCents / 100).toFixed(2),
+        }));
+
+        const cardUrl = restaurant?.slug
+          ? `https://matable.pro/order/${id}/card?cid=${loyaltyCustomer?.id ?? ""}&slug=${restaurant.slug}`
+          : "";
+
+        const html = receiptWithLoyaltyHtml({
+          restaurantName: restaurant?.name ?? "Restaurant",
+          customerName: loyaltyCustomer?.firstName ?? sess?.customerName ?? null,
+          totalEur: (totalCents / 100).toFixed(2),
+          items,
+          date: new Date().toLocaleDateString("fr-FR", { day: "numeric", month: "long", year: "numeric" }),
+          loyalty: loyaltyCustomer ? {
+            points: loyaltyCustomer.points,
+            earned: earnedPoints,
+            tier: loyaltyCustomer.tier,
+            nextTier: nextTierKey ? TIER_LABELS[nextTierKey] : null,
+            ptsToNext,
+            cardUrl,
+          } : null,
+        });
+
+        sendEmail({
+          to: toEmail,
+          from: "tickets@matable.pro",
+          subject: `🧾 Votre ticket — ${restaurant?.name ?? ""}${earnedPoints > 0 ? ` · +${earnedPoints} pts fidélité` : ""}`,
+          html,
+        }).catch((e: any) => console.error("[email] ticket failed:", e));
+      }
+    } catch (e) {
+      console.error("[settle loyalty]", e);
+      // Non-bloquant
     }
 
     return { ok: true };
@@ -3072,6 +3176,41 @@ export async function proRoutes(app: FastifyInstance) {
       },
       recentActivity,
     };
+  });
+
+  // POST /loyalty/scan-credit — crédit manuel via scan QR carte client
+  app.post("/loyalty/scan-credit", { preHandler: requirePro }, async (req) => {
+    const { restaurantId } = req.user as { restaurantId: string };
+    const { customerId, points, description } = z.object({
+      customerId:  z.string().min(1),
+      points:      z.number().int().min(1).max(10000),
+      description: z.string().optional().default("Crédit manuel — scan carte"),
+    }).parse(req.body ?? {});
+
+    // Vérifier que ce client appartient au restaurant
+    const customer = await prisma.$queryRawUnsafe<Array<{
+      id: string; points: number; tier: string; firstName: string | null; lastName: string | null;
+    }>>(
+      `SELECT id, points, tier, "firstName", "lastName" FROM "LoyaltyCustomer"
+       WHERE id = $1 AND "restaurantId" = $2 LIMIT 1`,
+      customerId, restaurantId
+    );
+    if (!customer[0]) throw Object.assign(new Error("customer_not_found"), { statusCode: 404 });
+
+    const newPts = customer[0].points + points;
+    const newTier = newPts >= 5000 ? "platinum" : newPts >= 2000 ? "gold" : newPts >= 500 ? "silver" : "bronze";
+
+    await prisma.$executeRawUnsafe(
+      `UPDATE "LoyaltyCustomer" SET points = $1, tier = $2, "visitCount" = "visitCount" + 1, "updatedAt" = NOW() WHERE id = $3`,
+      newPts, newTier, customerId
+    );
+    await prisma.$executeRawUnsafe(
+      `INSERT INTO "LoyaltyTransaction" (id, "customerId", type, points, description, "createdAt")
+       VALUES (gen_random_uuid()::text, $1, 'earn', $2, $3, NOW())`,
+      customerId, points, description
+    );
+
+    return { ok: true, newPoints: newPts, newTier, customer: customer[0] };
   });
 
   // GET /loyalty/config — lire la config points fidélité

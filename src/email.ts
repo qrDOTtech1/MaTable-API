@@ -202,6 +202,75 @@ export function invoiceHtml(opts: {
 </html>`;
 }
 
+export function receiptWithLoyaltyHtml(opts: {
+  restaurantName: string;
+  customerName: string | null;
+  totalEur: string;
+  items: Array<{ name: string; qty: number; unitEur: string }>;
+  loyalty: {
+    points: number;
+    earned: number;
+    tier: string;
+    nextTier: string | null;
+    ptsToNext: number | null;
+    cardUrl: string;
+  } | null;
+  date: string;
+}): string {
+  const TIER_ICONS: Record<string, string> = { bronze: "🥉", silver: "🥈", gold: "🥇", platinum: "💎" };
+  const tierIcon = opts.loyalty ? (TIER_ICONS[opts.loyalty.tier] ?? "⭐") : "";
+
+  const itemsHtml = opts.items.map(i => `
+    <tr>
+      <td style="padding:6px 0;font-size:14px;color:#333">${i.name}</td>
+      <td style="padding:6px 0;font-size:14px;color:#666;text-align:center">×${i.qty}</td>
+      <td style="padding:6px 0;font-size:14px;color:#333;text-align:right">${i.unitEur} €</td>
+    </tr>`).join("");
+
+  const loyaltyBlock = opts.loyalty ? `
+    <div style="margin-top:24px;background:linear-gradient(135deg,#1a0a00,#2d1500);border-radius:16px;padding:20px 24px;color:#fff">
+      <p style="margin:0 0 4px;font-size:12px;color:#f97316;font-weight:700;letter-spacing:.08em;text-transform:uppercase">Fidélité ${tierIcon} ${opts.loyalty.tier.charAt(0).toUpperCase() + opts.loyalty.tier.slice(1)}</p>
+      <p style="margin:0 0 12px;font-size:22px;font-weight:900;color:#fff">+${opts.loyalty.earned} pts gagnés !</p>
+      <p style="margin:0 0 4px;font-size:14px;color:rgba(255,255,255,.7)">Total accumulé : <strong style="color:#fff">${opts.loyalty.points.toLocaleString("fr-FR")} pts</strong></p>
+      ${opts.loyalty.ptsToNext !== null ? `<p style="margin:0 0 16px;font-size:12px;color:rgba(255,255,255,.5)">Plus que ${opts.loyalty.ptsToNext.toLocaleString("fr-FR")} pts pour atteindre ${opts.loyalty.nextTier}</p>` : `<p style="margin:0 0 16px;font-size:12px;color:#a78bfa">✨ Niveau maximum — vous bénéficiez de tous les avantages !</p>`}
+      <a href="${opts.loyalty.cardUrl}" style="display:inline-block;background:#f97316;color:#fff;font-weight:700;font-size:13px;padding:10px 20px;border-radius:10px;text-decoration:none">Voir ma carte fidélité →</a>
+    </div>` : "";
+
+  return `<!DOCTYPE html>
+<html lang="fr">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
+<body style="margin:0;padding:0;background:#f5f5f5;font-family:sans-serif">
+  <div style="max-width:520px;margin:32px auto;background:#fff;border-radius:16px;overflow:hidden;box-shadow:0 2px 16px rgba(0,0,0,.08)">
+    <div style="background:#ea580c;padding:24px 32px;text-align:center">
+      <h1 style="color:#fff;margin:0;font-size:20px;font-weight:900">${restaurantName} · Merci !</h1>
+      <p style="color:rgba(255,255,255,.8);margin:6px 0 0;font-size:13px">${opts.date}</p>
+    </div>
+    <div style="padding:24px 32px">
+      ${opts.customerName ? `<p style="color:#555;font-size:14px;margin:0 0 16px">Bonjour <strong>${opts.customerName}</strong>,</p>` : ""}
+      <table style="width:100%;border-collapse:collapse">
+        <thead>
+          <tr style="border-bottom:2px solid #f0f0f0">
+            <th style="text-align:left;padding:8px 0;font-size:11px;color:#999;text-transform:uppercase;letter-spacing:.05em">Article</th>
+            <th style="text-align:center;padding:8px 0;font-size:11px;color:#999;text-transform:uppercase;letter-spacing:.05em">Qté</th>
+            <th style="text-align:right;padding:8px 0;font-size:11px;color:#999;text-transform:uppercase;letter-spacing:.05em">Prix</th>
+          </tr>
+        </thead>
+        <tbody>${itemsHtml}</tbody>
+        <tfoot>
+          <tr style="border-top:2px solid #f0f0f0">
+            <td colspan="2" style="padding:12px 0;font-weight:900;font-size:16px;color:#111">Total</td>
+            <td style="padding:12px 0;font-weight:900;font-size:16px;color:#ea580c;text-align:right">${opts.totalEur} €</td>
+          </tr>
+        </tfoot>
+      </table>
+      ${loyaltyBlock}
+      <p style="margin:24px 0 0;font-size:11px;color:#bbb;text-align:center">Ticket généré par MaTable.pro</p>
+    </div>
+  </div>
+</body>
+</html>`.replace("${restaurantName}", opts.restaurantName);
+}
+
 export function contactFormHtml(opts: {
   restaurantName: string;
   managerName: string;
