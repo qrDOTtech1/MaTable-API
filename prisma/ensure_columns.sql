@@ -354,3 +354,7 @@ CREATE INDEX IF NOT EXISTS "ServerTip_restaurantId_idx" ON "ServerTip"("restaura
 -- OrderStatus: nouvelle étape READY (cuisine a terminé → serveur doit apporter en salle)
 -- Idempotent (PG 12+). S'exécute en autocommit via $executeRawUnsafe (hors transaction).
 ALTER TYPE "OrderStatus" ADD VALUE IF NOT EXISTS 'READY';
+
+-- Stripe Billing plateforme : lien resto ↔ abonnement Stripe MaTable
+ALTER TABLE "Restaurant" ADD COLUMN IF NOT EXISTS "platformStripeCustomerId" TEXT;
+ALTER TABLE "Restaurant" ADD COLUMN IF NOT EXISTS "platformStripeSubscriptionId" TEXT;

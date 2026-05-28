@@ -22,6 +22,7 @@ import { cuisinePortalRoutes } from "./routes/cuisinePortal.js";
 import { invoiceRoutes } from "./routes/invoice.js";
 import { socialRoutes } from "./routes/social.js";
 import { chainRoutes } from "./routes/chain.js";
+import { platformBillingRoutes } from "./routes/platformBilling.js";
 
 /**
  * Split a SQL file into individual statements.
@@ -175,6 +176,7 @@ async function build() {
   await app.register(invoiceRoutes, { prefix: "/api" });
   await app.register(socialRoutes, { prefix: "/api" });
   await app.register(chainRoutes, { prefix: "/api/chain" });
+  await app.register(platformBillingRoutes, { prefix: "/api/platform-billing" });
 
   return app;
 }
