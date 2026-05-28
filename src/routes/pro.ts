@@ -2410,6 +2410,19 @@ export async function proRoutes(app: FastifyInstance) {
       CONSTRAINT "LoyaltyCustomer_pkey" PRIMARY KEY ("id"),
       CONSTRAINT "LoyaltyCustomer_restaurantId_fkey" FOREIGN KEY ("restaurantId") REFERENCES "Restaurant"("id") ON DELETE CASCADE
     )`);
+    await prisma.$executeRawUnsafe(`ALTER TABLE "LoyaltyCustomer"
+      ADD COLUMN IF NOT EXISTS "firstName" TEXT,
+      ADD COLUMN IF NOT EXISTS "lastName" TEXT,
+      ADD COLUMN IF NOT EXISTS "email" TEXT,
+      ADD COLUMN IF NOT EXISTS "phone" TEXT,
+      ADD COLUMN IF NOT EXISTS "points" INTEGER NOT NULL DEFAULT 0,
+      ADD COLUMN IF NOT EXISTS "tier" TEXT NOT NULL DEFAULT 'bronze',
+      ADD COLUMN IF NOT EXISTS "totalSpent" DOUBLE PRECISION NOT NULL DEFAULT 0,
+      ADD COLUMN IF NOT EXISTS "visitCount" INTEGER NOT NULL DEFAULT 0,
+      ADD COLUMN IF NOT EXISTS "birthDate" TIMESTAMP(3),
+      ADD COLUMN IF NOT EXISTS "notes" TEXT,
+      ADD COLUMN IF NOT EXISTS "source" TEXT NOT NULL DEFAULT 'manual',
+      ADD COLUMN IF NOT EXISTS "updatedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP`);
     await prisma.$executeRawUnsafe(`CREATE UNIQUE INDEX IF NOT EXISTS "LoyaltyCustomer_restaurantId_email_key" ON "LoyaltyCustomer"("restaurantId","email") WHERE "email" IS NOT NULL`);
     await prisma.$executeRawUnsafe(`CREATE INDEX IF NOT EXISTS "LoyaltyCustomer_restaurantId_idx" ON "LoyaltyCustomer"("restaurantId")`);
     await prisma.$executeRawUnsafe(`CREATE TABLE IF NOT EXISTS "LoyaltyOffer" (
@@ -2429,6 +2442,17 @@ export async function proRoutes(app: FastifyInstance) {
       CONSTRAINT "LoyaltyOffer_pkey" PRIMARY KEY ("id"),
       CONSTRAINT "LoyaltyOffer_restaurantId_fkey" FOREIGN KEY ("restaurantId") REFERENCES "Restaurant"("id") ON DELETE CASCADE
     )`);
+    await prisma.$executeRawUnsafe(`ALTER TABLE "LoyaltyOffer"
+      ADD COLUMN IF NOT EXISTS "description" TEXT,
+      ADD COLUMN IF NOT EXISTS "type" TEXT NOT NULL DEFAULT 'discount_pct',
+      ADD COLUMN IF NOT EXISTS "value" DOUBLE PRECISION NOT NULL DEFAULT 0,
+      ADD COLUMN IF NOT EXISTS "pointsCost" INTEGER NOT NULL DEFAULT 100,
+      ADD COLUMN IF NOT EXISTS "minTier" TEXT,
+      ADD COLUMN IF NOT EXISTS "active" BOOLEAN NOT NULL DEFAULT true,
+      ADD COLUMN IF NOT EXISTS "expiresAt" TIMESTAMP(3),
+      ADD COLUMN IF NOT EXISTS "usageLimit" INTEGER,
+      ADD COLUMN IF NOT EXISTS "usageCount" INTEGER NOT NULL DEFAULT 0,
+      ADD COLUMN IF NOT EXISTS "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP`);
     await prisma.$executeRawUnsafe(`CREATE INDEX IF NOT EXISTS "LoyaltyOffer_restaurantId_idx" ON "LoyaltyOffer"("restaurantId")`);
     await prisma.$executeRawUnsafe(`CREATE TABLE IF NOT EXISTS "LoyaltyTransaction" (
       "id" TEXT NOT NULL,
@@ -2441,6 +2465,10 @@ export async function proRoutes(app: FastifyInstance) {
       CONSTRAINT "LoyaltyTransaction_pkey" PRIMARY KEY ("id"),
       CONSTRAINT "LoyaltyTransaction_customerId_fkey" FOREIGN KEY ("customerId") REFERENCES "LoyaltyCustomer"("id") ON DELETE CASCADE
     )`);
+    await prisma.$executeRawUnsafe(`ALTER TABLE "LoyaltyTransaction"
+      ADD COLUMN IF NOT EXISTS "offerId" TEXT,
+      ADD COLUMN IF NOT EXISTS "description" TEXT,
+      ADD COLUMN IF NOT EXISTS "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP`);
     await prisma.$executeRawUnsafe(`CREATE INDEX IF NOT EXISTS "LoyaltyTransaction_customerId_idx" ON "LoyaltyTransaction"("customerId")`);
     await prisma.$executeRawUnsafe(`CREATE TABLE IF NOT EXISTS "LoyaltyConfig" (
       "id" TEXT NOT NULL,
@@ -2453,6 +2481,11 @@ export async function proRoutes(app: FastifyInstance) {
       CONSTRAINT "LoyaltyConfig_restaurantId_fkey" FOREIGN KEY ("restaurantId") REFERENCES "Restaurant"("id") ON DELETE CASCADE,
       CONSTRAINT "LoyaltyConfig_restaurantId_key" UNIQUE ("restaurantId")
     )`);
+    await prisma.$executeRawUnsafe(`ALTER TABLE "LoyaltyConfig"
+      ADD COLUMN IF NOT EXISTS "enabled" BOOLEAN NOT NULL DEFAULT false,
+      ADD COLUMN IF NOT EXISTS "ptsPerEuro" INTEGER NOT NULL DEFAULT 10,
+      ADD COLUMN IF NOT EXISTS "minSpendCents" INTEGER NOT NULL DEFAULT 0,
+      ADD COLUMN IF NOT EXISTS "updatedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP`);
   }
 
   // Helper : upsert client par email ou phone dans la même transaction
@@ -2530,8 +2563,10 @@ export async function proRoutes(app: FastifyInstance) {
   }
 
   // GET /loyalty/customers — liste paginée avec filtres
-  app.get("/loyalty/customers", { preHandler: requirePro }, async (req) => {
-    const { restaurantId } = req.user as { restaurantId: string };
+  app.get("/loyalty/customers", async (req, reply) => {
+    const me = await requirePro(req, reply);
+    await ensureLoyaltySchema();
+    const restaurantId = me.restaurantId;
     const { search = "", tier = "", page = "1", limit = "50" } = req.query as Record<string, string>;
     const offset = (Math.max(1, parseInt(page)) - 1) * Math.min(100, parseInt(limit));
     const lim    = Math.min(100, parseInt(limit));
@@ -2572,15 +2607,17 @@ export async function proRoutes(app: FastifyInstance) {
   });
 
   // POST /loyalty/ensure-schema — fallback self-healing for admins/pro dashboard
-  app.post("/loyalty/ensure-schema", { preHandler: requirePro }, async () => {
+  app.post("/loyalty/ensure-schema", async (req, reply) => {
+    await requirePro(req, reply);
     await ensureLoyaltySchema();
     return { ok: true };
   });
 
   // POST /loyalty/customers — créer un client
-  app.post("/loyalty/customers", { preHandler: requirePro }, async (req, reply) => {
+  app.post("/loyalty/customers", async (req, reply) => {
+    const me = await requirePro(req, reply);
     await ensureLoyaltySchema();
-    const { restaurantId } = req.user as { restaurantId: string };
+    const restaurantId = me.restaurantId;
     const data = z.object({
       firstName: z.string().optional(),
       lastName:  z.string().optional(),
@@ -2609,8 +2646,10 @@ export async function proRoutes(app: FastifyInstance) {
   });
 
   // POST /loyalty/customers/import — import CSV/JSON bulk
-  app.post("/loyalty/customers/import", { preHandler: requirePro }, async (req, reply) => {
-    const { restaurantId } = req.user as { restaurantId: string };
+  app.post("/loyalty/customers/import", async (req, reply) => {
+    const me = await requirePro(req, reply);
+    await ensureLoyaltySchema();
+    const restaurantId = me.restaurantId;
     const body = z.object({
       customers: z.array(z.object({
         firstName: z.string().optional(),
@@ -2645,8 +2684,10 @@ export async function proRoutes(app: FastifyInstance) {
   });
 
   // GET /loyalty/customers/:id — détail + transactions
-  app.get("/loyalty/customers/:id", { preHandler: requirePro }, async (req, reply) => {
-    const { restaurantId } = req.user as { restaurantId: string };
+  app.get("/loyalty/customers/:id", async (req, reply) => {
+    const me = await requirePro(req, reply);
+    await ensureLoyaltySchema();
+    const restaurantId = me.restaurantId;
     const { id } = req.params as { id: string };
 
     const rows = await prisma.$queryRawUnsafe<Array<{
@@ -2673,8 +2714,10 @@ export async function proRoutes(app: FastifyInstance) {
   });
 
   // PATCH /loyalty/customers/:id — modifier
-  app.patch("/loyalty/customers/:id", { preHandler: requirePro }, async (req, reply) => {
-    const { restaurantId } = req.user as { restaurantId: string };
+  app.patch("/loyalty/customers/:id", async (req, reply) => {
+    const me = await requirePro(req, reply);
+    await ensureLoyaltySchema();
+    const restaurantId = me.restaurantId;
     const { id } = req.params as { id: string };
     const data = z.object({
       firstName: z.string().optional(),
@@ -2705,8 +2748,10 @@ export async function proRoutes(app: FastifyInstance) {
   });
 
   // POST /loyalty/customers/:id/points — ajouter/retirer des points
-  app.post("/loyalty/customers/:id/points", { preHandler: requirePro }, async (req, reply) => {
-    const { restaurantId } = req.user as { restaurantId: string };
+  app.post("/loyalty/customers/:id/points", async (req, reply) => {
+    const me = await requirePro(req, reply);
+    await ensureLoyaltySchema();
+    const restaurantId = me.restaurantId;
     const { id } = req.params as { id: string };
     const { delta, description } = z.object({
       delta:       z.number().int(),
@@ -2742,8 +2787,10 @@ export async function proRoutes(app: FastifyInstance) {
   });
 
   // DELETE /loyalty/customers/:id
-  app.delete("/loyalty/customers/:id", { preHandler: requirePro }, async (req, reply) => {
-    const { restaurantId } = req.user as { restaurantId: string };
+  app.delete("/loyalty/customers/:id", async (req, reply) => {
+    const me = await requirePro(req, reply);
+    await ensureLoyaltySchema();
+    const restaurantId = me.restaurantId;
     const { id } = req.params as { id: string };
     await prisma.$executeRawUnsafe(
       `DELETE FROM "LoyaltyCustomer" WHERE id = $1 AND "restaurantId" = $2`,
@@ -2755,8 +2802,10 @@ export async function proRoutes(app: FastifyInstance) {
   // ── Offres ──────────────────────────────────────────────────────────────────
 
   // GET /loyalty/offers
-  app.get("/loyalty/offers", { preHandler: requirePro }, async (req) => {
-    const { restaurantId } = req.user as { restaurantId: string };
+  app.get("/loyalty/offers", async (req, reply) => {
+    const me = await requirePro(req, reply);
+    await ensureLoyaltySchema();
+    const restaurantId = me.restaurantId;
     const offers = await prisma.$queryRawUnsafe<Array<{
       id: string; name: string; description: string|null; type: string;
       value: number; pointsCost: number; minTier: string|null;
@@ -2772,9 +2821,10 @@ export async function proRoutes(app: FastifyInstance) {
   });
 
   // POST /loyalty/offers
-  app.post("/loyalty/offers", { preHandler: requirePro }, async (req, reply) => {
+  app.post("/loyalty/offers", async (req, reply) => {
+    const me = await requirePro(req, reply);
     await ensureLoyaltySchema();
-    const { restaurantId } = req.user as { restaurantId: string };
+    const restaurantId = me.restaurantId;
     const data = z.object({
       name:        z.string().trim().min(1).max(120),
       description: z.string().max(500).optional().nullable(),
@@ -2807,8 +2857,10 @@ export async function proRoutes(app: FastifyInstance) {
   });
 
   // PATCH /loyalty/offers/:id
-  app.patch("/loyalty/offers/:id", { preHandler: requirePro }, async (req, reply) => {
-    const { restaurantId } = req.user as { restaurantId: string };
+  app.patch("/loyalty/offers/:id", async (req, reply) => {
+    const me = await requirePro(req, reply);
+    await ensureLoyaltySchema();
+    const restaurantId = me.restaurantId;
     const { id } = req.params as { id: string };
     const data = z.object({
       name:        z.string().trim().min(1).max(120).optional(),
@@ -2846,8 +2898,10 @@ export async function proRoutes(app: FastifyInstance) {
   });
 
   // DELETE /loyalty/offers/:id
-  app.delete("/loyalty/offers/:id", { preHandler: requirePro }, async (req) => {
-    const { restaurantId } = req.user as { restaurantId: string };
+  app.delete("/loyalty/offers/:id", async (req, reply) => {
+    const me = await requirePro(req, reply);
+    await ensureLoyaltySchema();
+    const restaurantId = me.restaurantId;
     const { id } = req.params as { id: string };
     await prisma.$executeRawUnsafe(
       `DELETE FROM "LoyaltyOffer" WHERE id = $1 AND "restaurantId" = $2`, id, restaurantId
@@ -2856,8 +2910,10 @@ export async function proRoutes(app: FastifyInstance) {
   });
 
   // POST /loyalty/redeem — utiliser une offre pour un client
-  app.post("/loyalty/redeem", { preHandler: requirePro }, async (req, reply) => {
-    const { restaurantId } = req.user as { restaurantId: string };
+  app.post("/loyalty/redeem", async (req, reply) => {
+    const me = await requirePro(req, reply);
+    await ensureLoyaltySchema();
+    const restaurantId = me.restaurantId;
     const { customerId, offerId } = z.object({
       customerId: z.string(),
       offerId:    z.string(),
@@ -2912,8 +2968,10 @@ export async function proRoutes(app: FastifyInstance) {
   });
 
   // GET /loyalty/stats
-  app.get("/loyalty/stats", { preHandler: requirePro }, async (req) => {
-    const { restaurantId } = req.user as { restaurantId: string };
+  app.get("/loyalty/stats", async (req, reply) => {
+    const me = await requirePro(req, reply);
+    await ensureLoyaltySchema();
+    const restaurantId = me.restaurantId;
 
     const totals = await prisma.$queryRawUnsafe<Array<{
       total: bigint; totalPoints: bigint; totalSpent: number;
@@ -2970,8 +3028,10 @@ export async function proRoutes(app: FastifyInstance) {
   });
 
   // GET /loyalty/config — lire la config points fidélité
-  app.get("/loyalty/config", { preHandler: requirePro }, async (req) => {
-    const { restaurantId } = req.user as { restaurantId: string };
+  app.get("/loyalty/config", async (req, reply) => {
+    const me = await requirePro(req, reply);
+    await ensureLoyaltySchema();
+    const restaurantId = me.restaurantId;
     const rows = await prisma.$queryRawUnsafe<Array<{
       enabled: boolean; ptsPerEuro: number; minSpendCents: number;
     }>>(
@@ -2983,8 +3043,10 @@ export async function proRoutes(app: FastifyInstance) {
   });
 
   // PATCH /loyalty/config — mettre à jour la config points fidélité
-  app.patch("/loyalty/config", { preHandler: requirePro }, async (req) => {
-    const { restaurantId } = req.user as { restaurantId: string };
+  app.patch("/loyalty/config", async (req, reply) => {
+    const me = await requirePro(req, reply);
+    await ensureLoyaltySchema();
+    const restaurantId = me.restaurantId;
     const { enabled, ptsPerEuro, minSpendCents } = z.object({
       enabled:       z.boolean().optional(),
       ptsPerEuro:    z.number().int().min(1).max(1000).optional(),
