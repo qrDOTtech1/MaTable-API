@@ -802,8 +802,8 @@ export async function proRoutes(app: FastifyInstance) {
           unitEur: (r.unitCents / 100).toFixed(2),
         }));
 
-        const cardUrl = restaurant?.slug
-          ? `https://matable.pro/order/${id}/card?cid=${loyaltyCustomer?.id ?? ""}&slug=${restaurant.slug}`
+        const cardUrl = (restaurant?.slug && loyaltyCustomer?.id)
+          ? `https://matable.pro/${restaurant.slug}/carte/${loyaltyCustomer.id}`
           : "";
 
         const html = receiptWithLoyaltyHtml({

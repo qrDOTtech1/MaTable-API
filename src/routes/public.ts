@@ -643,6 +643,54 @@ export async function publicRoutes(app: FastifyInstance) {
     return { customer: { ...customer, transactions, offers } };
   });
 
+  // GET /api/public/r/:slug/loyalty/customer/:id — carte permanente par ID
+  app.get("/r/:slug/loyalty/customer/:id", async (req, reply) => {
+    const { slug, id } = req.params as { slug: string; id: string };
+
+    const restaurant = await prisma.restaurant.findUnique({
+      where: { slug },
+      select: { id: true, name: true, slug: true },
+    });
+    if (!restaurant) return reply.code(404).send({ error: "restaurant_not_found" });
+
+    const customers = await prisma.$queryRawUnsafe<Array<{
+      id: string; firstName: string|null; lastName: string|null;
+      points: number; tier: string; totalSpent: number; visitCount: number;
+    }>>(
+      `SELECT id, "firstName", "lastName", points, tier, "totalSpent", "visitCount"
+       FROM "LoyaltyCustomer"
+       WHERE id = $1 AND "restaurantId" = $2
+       LIMIT 1`,
+      id, restaurant.id
+    );
+
+    if (!customers[0]) return reply.code(404).send({ error: "not_found" });
+    const customer = customers[0];
+
+    const transactions = await prisma.$queryRawUnsafe<Array<{
+      id: string; type: string; points: number; description: string|null; createdAt: string;
+    }>>(
+      `SELECT id, type, points, description, "createdAt"::text FROM "LoyaltyTransaction"
+       WHERE "customerId" = $1 ORDER BY "createdAt" DESC LIMIT 30`,
+      customer.id
+    );
+
+    const offers = await prisma.$queryRawUnsafe<Array<{
+      id: string; name: string; description: string|null; type: string;
+      pointsCost: number; minTier: string|null;
+    }>>(
+      `SELECT id, name, description, type, "pointsCost", "minTier"
+       FROM "LoyaltyOffer" WHERE "restaurantId" = $1 AND active = true
+       ORDER BY "pointsCost" ASC`,
+      restaurant.id
+    );
+
+    return {
+      customer: { ...customer, transactions, offers },
+      restaurant: { name: restaurant.name, slug: restaurant.slug },
+    };
+  });
+
   // ---------------------------------------------------------------------------
   // GET /api/public/r/:slug/review-campaign
   // Returns configuration for the interactive review flow (servers, link, voucher)
