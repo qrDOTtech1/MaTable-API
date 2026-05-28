@@ -395,14 +395,34 @@ export async function serverPortalRoutes(app: FastifyInstance) {
   app.post("/tables/:sessionId/close", async (req, reply) => {
     const me = await requireServer(req, reply);
     const { sessionId } = req.params as { sessionId: string };
-    const { paymentMode } = z.object({
+    const { paymentMode, force } = z.object({
       paymentMode: z.enum(["CARD", "CASH", "COUNTER"]).default("CARD"),
+      force: z.boolean().optional().default(false),
     }).parse(req.body ?? {});
 
     const session = await prisma.tableSession.findFirst({
       where: { id: sessionId, table: { restaurantId: me.restaurantId }, active: true },
     });
     if (!session) return reply.code(404).send({ error: "SESSION_NOT_FOUND" });
+
+    // Garde-fou : ne pas clôturer si des plats sont encore en attente/cuisson/à apporter
+    const unserved = await prisma.order.findMany({
+      where: { sessionId, status: { in: ["PENDING", "COOKING", "READY"] } },
+      select: { id: true },
+    });
+    if (!force && unserved.length > 0) {
+      return reply.code(409).send({
+        error: "orders_not_served",
+        message: `${unserved.length} plat(s) pas encore servi(s). Confirmez pour encaisser quand même.`,
+        unservedCount: unserved.length,
+      });
+    }
+
+    // Récupère les commandes à passer en PAID (pour émettre par commande)
+    const toPay = await prisma.order.findMany({
+      where: { sessionId, status: { in: ["PENDING", "COOKING", "READY", "SERVED"] } },
+      select: { id: true },
+    });
 
     await prisma.$transaction([
       prisma.order.updateMany({
@@ -415,6 +435,11 @@ export async function serverPortalRoutes(app: FastifyInstance) {
       }),
     ]);
 
+    // 2.3 — événement par commande (sync cuisine + client) + event session
+    for (const o of toPay) {
+      emitToRestaurant(me.restaurantId, "order:updated", { id: o.id, status: "PAID" });
+      emitToSession(sessionId, "order:updated", { id: o.id, status: "PAID" });
+    }
     emitToRestaurant(me.restaurantId, "order:paid", { sessionId });
     return { ok: true };
   });

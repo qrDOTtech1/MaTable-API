@@ -1740,8 +1740,11 @@ Ne renvoie STRICTEMENT rien d'autre que ce JSON (pas de bloc Markdown \`\`\`json
 
   app.post("/bill/request", async (req, reply) => {
     const decoded = await requireSessionToken(req, reply);
-    const { mode } = z
-      .object({ mode: z.enum(["CARD", "CASH", "COUNTER"]).default("CARD") })
+    const { mode, force } = z
+      .object({
+        mode: z.enum(["CARD", "CASH", "COUNTER"]).default("CARD"),
+        force: z.boolean().optional().default(false),
+      })
       .parse(req.body ?? {});
 
     const session = await prisma.tableSession.findUnique({
@@ -1749,6 +1752,23 @@ Ne renvoie STRICTEMENT rien d'autre que ce JSON (pas de bloc Markdown \`\`\`json
       include: { table: true },
     });
     if (!session || !session.active) return reply.code(401).send({ error: "session_closed" });
+
+    // Garde-fou : ne pas demander l'addition si aucun plat n'a encore été servi
+    const orderStatuses = await prisma.order.groupBy({
+      by: ["status"],
+      where: { sessionId: decoded.sessionId },
+      _count: { _all: true },
+    });
+    const countOf = (s: string) => orderStatuses.find((o) => o.status === (s as any))?._count._all ?? 0;
+    const servedCount = countOf("SERVED");
+    const unservedCount = countOf("PENDING") + countOf("COOKING") + countOf("READY");
+    if (!force && servedCount === 0 && unservedCount > 0) {
+      return reply.code(409).send({
+        error: "no_order_served",
+        message: "Vos plats ne sont pas encore servis. Patientez ou confirmez pour demander l'addition.",
+        unservedCount,
+      });
+    }
 
     await prisma.tableSession.update({
       where: { id: decoded.sessionId },

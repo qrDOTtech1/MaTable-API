@@ -11,6 +11,7 @@ import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { prisma } from "../db.js";
 import { registerSseClient, unregisterSseClient } from "../sseHub.js";
+import { emitToRestaurant, emitToSession } from "../realtime.js";
 import { env } from "../env.js";
 import jwt from "jsonwebtoken";
 
@@ -196,8 +197,9 @@ export async function caissePortalRoutes(app: FastifyInstance) {
   app.post("/sessions/:id/close", async (req, reply) => {
     const me = await requireCaisse(req, reply);
     const { id } = req.params as { id: string };
-    const { paymentMode } = z.object({
+    const { paymentMode, force } = z.object({
       paymentMode: z.enum(["CARD", "CASH", "COUNTER"]).default("CARD"),
+      force: z.boolean().optional().default(false),
     }).parse(req.body);
 
     const session = await prisma.tableSession.findFirst({
@@ -205,6 +207,18 @@ export async function caissePortalRoutes(app: FastifyInstance) {
       include: { orders: { where: { status: { in: ["PENDING", "COOKING", "READY", "SERVED"] } } } },
     });
     if (!session) return reply.code(404).send({ error: "SESSION_NOT_FOUND" });
+
+    // Garde-fou : ne pas clôturer si des plats sont encore en attente/cuisson/à apporter
+    const unserved = session.orders.filter((o) => ["PENDING", "COOKING", "READY"].includes(o.status as string));
+    if (!force && unserved.length > 0) {
+      return reply.code(409).send({
+        error: "orders_not_served",
+        message: `${unserved.length} plat(s) pas encore servi(s). Confirmez pour encaisser quand même.`,
+        unservedCount: unserved.length,
+      });
+    }
+
+    const toPay = session.orders.map((o) => o.id);
 
     await prisma.$transaction([
       // Mark all active orders as PAID
@@ -218,6 +232,13 @@ export async function caissePortalRoutes(app: FastifyInstance) {
         data: { active: false, closedAt: new Date(), billPaymentMode: paymentMode },
       }),
     ]);
+
+    // Événement par commande (sync cuisine + client) + event session
+    for (const oid of toPay) {
+      emitToRestaurant(me.restaurantId, "order:updated", { id: oid, status: "PAID" });
+      emitToSession(id, "order:updated", { id: oid, status: "PAID" });
+    }
+    emitToRestaurant(me.restaurantId, "order:paid", { sessionId: id });
 
     return { ok: true };
   });
