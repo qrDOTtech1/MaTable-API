@@ -888,7 +888,7 @@ export async function proRoutes(app: FastifyInstance) {
   app.post("/orders/:id/status", async (req, reply) => {
     const me = await requirePro(req, reply);
     const { id } = req.params as { id: string };
-    const { status } = z.object({ status: z.enum(["PENDING", "COOKING", "SERVED", "PAID", "CANCELLED"]) }).parse(req.body);
+    const { status } = z.object({ status: z.enum(["PENDING", "COOKING", "READY", "SERVED", "PAID", "CANCELLED"]) }).parse(req.body);
     const order = await prisma.order.findFirst({ where: { id, table: { restaurantId: me.restaurantId } } });
     if (!order) return reply.code(404).send({ error: "not_found" });
     const updated = await prisma.order.update({ where: { id }, data: { status } });

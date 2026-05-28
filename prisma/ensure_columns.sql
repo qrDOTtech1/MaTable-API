@@ -350,3 +350,7 @@ CREATE TABLE IF NOT EXISTS "ServerTip" (
   CONSTRAINT "ServerTip_pkey" PRIMARY KEY (id)
 );
 CREATE INDEX IF NOT EXISTS "ServerTip_restaurantId_idx" ON "ServerTip"("restaurantId", "createdAt" DESC);
+
+-- OrderStatus: nouvelle étape READY (cuisine a terminé → serveur doit apporter en salle)
+-- Idempotent (PG 12+). S'exécute en autocommit via $executeRawUnsafe (hors transaction).
+ALTER TYPE "OrderStatus" ADD VALUE IF NOT EXISTS 'READY';

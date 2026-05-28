@@ -79,7 +79,7 @@ export async function caissePortalRoutes(app: FastifyInstance) {
         table: { select: { number: true, seats: true, zone: true } },
         server: { select: { id: true, name: true } },
         orders: {
-          where: { status: { in: ["PENDING", "COOKING", "SERVED"] } },
+          where: { status: { in: ["PENDING", "COOKING", "READY", "SERVED"] } },
           orderBy: { createdAt: "desc" },
         },
       },
@@ -202,14 +202,14 @@ export async function caissePortalRoutes(app: FastifyInstance) {
 
     const session = await prisma.tableSession.findFirst({
       where: { id, table: { restaurantId: me.restaurantId }, active: true },
-      include: { orders: { where: { status: { in: ["PENDING", "COOKING", "SERVED"] } } } },
+      include: { orders: { where: { status: { in: ["PENDING", "COOKING", "READY", "SERVED"] } } } },
     });
     if (!session) return reply.code(404).send({ error: "SESSION_NOT_FOUND" });
 
     await prisma.$transaction([
       // Mark all active orders as PAID
       prisma.order.updateMany({
-        where: { sessionId: id, status: { in: ["PENDING", "COOKING", "SERVED"] } },
+        where: { sessionId: id, status: { in: ["PENDING", "COOKING", "READY", "SERVED"] } },
         data: { status: "PAID" },
       }),
       // Close the session

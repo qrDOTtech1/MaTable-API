@@ -129,7 +129,40 @@ export async function cuisinePortalRoutes(app: FastifyInstance) {
     return { ok: true };
   });
 
+  // ── POST /api/cuisine/orders/:id/ready ────────────────────────────────────
+  // Cuisine a terminé : la commande est PRÊTE, le serveur doit l'apporter en salle.
+  app.post("/orders/:id/ready", async (req, reply) => {
+    const me = await requireCuisine(req, reply);
+    const { id } = req.params as { id: string };
+
+    const order = await prisma.order.findFirst({
+      where: { id, table: { restaurantId: me.restaurantId }, status: "COOKING" },
+      include: {
+        table: { select: { number: true, zone: true } },
+        session: { select: { server: { select: { name: true } } } },
+      },
+    });
+    if (!order) return reply.code(404).send({ error: "ORDER_NOT_FOUND" });
+
+    await prisma.order.update({ where: { id }, data: { status: "READY" } });
+
+    // Alerte dédiée au serveur : "à apporter table X"
+    emitToRestaurant(me.restaurantId, "order:ready", {
+      id,
+      tableNumber: order.table.number,
+      zone: order.table.zone ?? null,
+      serverName: order.session?.server?.name ?? null,
+    });
+    // Sync de statut pour les boards + le client
+    const payload = { id, status: "READY", tableNumber: order.table.number };
+    emitToRestaurant(me.restaurantId, "order:updated", payload);
+    if (order.sessionId) emitToSession(order.sessionId, "order:updated", payload);
+
+    return { ok: true };
+  });
+
   // ── POST /api/cuisine/orders/:id/served ───────────────────────────────────
+  // (Conservé pour compat : permet à la cuisine de marquer directement servi.)
   app.post("/orders/:id/served", async (req, reply) => {
     const me = await requireCuisine(req, reply);
     const { id } = req.params as { id: string };

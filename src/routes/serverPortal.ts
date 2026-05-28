@@ -10,7 +10,7 @@ import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { prisma } from "../db.js";
 import { env } from "../env.js";
-import { emitToRestaurant } from "../realtime.js";
+import { emitToRestaurant, emitToSession } from "../realtime.js";
 import { registerSseClient, unregisterSseClient } from "../sseHub.js";
 import { getGlobalIaConfig, callCloudAI } from "../globalIaConfig.js";
 import { hasApp, getEnabledApps } from "../appGating.js";
@@ -215,7 +215,7 @@ export async function serverPortalRoutes(app: FastifyInstance) {
       include: {
         table: { select: { id: true, number: true, seats: true } },
         orders: {
-          where: { status: { in: ["PENDING", "COOKING", "SERVED"] } },
+          where: { status: { in: ["PENDING", "COOKING", "READY", "SERVED"] } },
           orderBy: { createdAt: "desc" },
         },
         server: { select: { id: true, name: true } },
@@ -317,6 +317,27 @@ export async function serverPortalRoutes(app: FastifyInstance) {
     return { ok: true };
   });
 
+  // ── POST /api/server/orders/:id/served ─────────────────────────────────────
+  // Le serveur confirme avoir apporté la commande à la table : READY → SERVED.
+  app.post("/orders/:id/served", async (req, reply) => {
+    const me = await requireServer(req, reply);
+    const { id } = req.params as { id: string };
+
+    const order = await prisma.order.findFirst({
+      where: { id, table: { restaurantId: me.restaurantId }, status: { in: ["READY", "COOKING"] } },
+      include: { table: { select: { number: true } } },
+    });
+    if (!order) return reply.code(404).send({ error: "ORDER_NOT_FOUND" });
+
+    await prisma.order.update({ where: { id }, data: { status: "SERVED" } });
+
+    const payload = { id, status: "SERVED", tableNumber: order.table.number };
+    emitToRestaurant(me.restaurantId, "order:updated", payload);
+    if (order.sessionId) emitToSession(order.sessionId, "order:updated", payload);
+
+    return { ok: true };
+  });
+
   // ── POST /api/server/tables/:sessionId/claim ──────────────────────────────
   // Server claims an unassigned (or reassignable) session
   app.post("/tables/:sessionId/claim", async (req, reply) => {
@@ -385,7 +406,7 @@ export async function serverPortalRoutes(app: FastifyInstance) {
 
     await prisma.$transaction([
       prisma.order.updateMany({
-        where: { sessionId, status: { in: ["PENDING", "COOKING", "SERVED"] } },
+        where: { sessionId, status: { in: ["PENDING", "COOKING", "READY", "SERVED"] } },
         data: { status: "PAID" },
       }),
       prisma.tableSession.update({
