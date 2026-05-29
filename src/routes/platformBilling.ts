@@ -144,12 +144,34 @@ export async function platformBillingRoutes(app: FastifyInstance) {
        FROM "Restaurant" WHERE id = $1`, me.restaurantId,
     );
     const r = rows[0];
+
+    // Une facture encaissée = fin de la version d'essai (table peut ne pas exister)
+    let hasInvoice = false;
+    try {
+      const inv = await prisma.$queryRawUnsafe<Array<{ c: bigint }>>(
+        `SELECT COUNT(*)::bigint AS c FROM "SubscriptionEvent" WHERE "restaurantId" = $1 AND "amountCents" > 0`,
+        me.restaurantId,
+      );
+      hasInvoice = Number(inv[0]?.c ?? 0n) > 0;
+    } catch { /* table absente → on reste en essai */ }
+
+    const subscribed = !!r?.platformStripeSubscriptionId;
+    const expiresAt = r?.subscriptionExpiresAt ?? null;
+    const daysRemaining = expiresAt
+      ? Math.max(0, Math.ceil((new Date(expiresAt).getTime() - Date.now()) / (24 * 3600 * 1000)))
+      : null;
+    // Version d'essai tant qu'aucun paiement Stripe ni facture manuelle
+    const isTrial = !subscribed && !hasInvoice;
+
     return {
       billingEnabled: !!(cfg?.enabled),
       plan: r?.subscription ?? "STARTER",
-      expiresAt: r?.subscriptionExpiresAt ?? null,
-      subscribed: !!r?.platformStripeSubscriptionId,
+      expiresAt,
+      subscribed,
       pastDue: !!r?.billingPastDue,
+      isTrial,
+      hasInvoice,
+      daysRemaining,
     };
   });
 

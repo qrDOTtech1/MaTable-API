@@ -56,10 +56,28 @@ export async function proRoutes(app: FastifyInstance) {
     while (await prisma.restaurant.findUnique({ where: { slug } })) slug = `${base}-${++i}`;
 
     const passwordHash = await bcrypt.hash(password, 10);
-    const { restaurant, user } = await prisma.$transaction(async (tx) => {
-      const restaurant = await tx.restaurant.create({ data: { name: restaurantName, slug } });
-      const user = await tx.user.create({ data: { email, passwordHash, restaurantId: restaurant.id } });
-      return { restaurant, user };
+    // Nouveau compte = forfait PRO en version d'essai (14 j) — apps PRO activées.
+    // L'essai reste affiché tant qu'aucune facture n'est encaissée (cf. /status).
+    const TRIAL_DAYS = 14;
+    const now = new Date();
+    const trialEnds = new Date(now.getTime() + TRIAL_DAYS * 24 * 3600 * 1000);
+    const { restaurant } = await prisma.$transaction(async (tx) => {
+      const restaurant = await tx.restaurant.create({
+        data: {
+          name: restaurantName,
+          slug,
+          subscription: "PRO",
+          subscriptionStartedAt: now,
+          subscriptionExpiresAt: trialEnds,
+        },
+      });
+      await tx.user.create({ data: { email, passwordHash, restaurantId: restaurant.id } });
+      // enabledApps (hors schéma Prisma) — plan PRO : avis + réservations + commandes
+      await tx.$executeRawUnsafe(
+        `UPDATE "Restaurant" SET "enabledApps" = $1::jsonb WHERE id = $2`,
+        JSON.stringify(["reviews", "reservations", "orders"]), restaurant.id,
+      );
+      return { restaurant };
     });
     return { ok: true, restaurantId: restaurant.id, slug };
   });
