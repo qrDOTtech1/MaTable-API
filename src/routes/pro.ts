@@ -299,16 +299,18 @@ export async function proRoutes(app: FastifyInstance) {
         ? configRaw[0].reservationAlertEmails
         : (configRaw[0]?.reservationAlertEmail ? [configRaw[0].reservationAlertEmail] : []);
 
-      // dashboardQuickActions — requête isolée (colonne ajoutée par migration, peut ne pas exister)
+      // dashboardQuickActions + onboardingCompleted — requête isolée (colonnes ajoutées par migration, peuvent ne pas exister)
       try {
         const qaRaw = await prisma.$queryRawUnsafe<any[]>(
-          `SELECT "dashboardQuickActions" FROM "Restaurant" WHERE id = $1`, me.restaurantId
+          `SELECT "dashboardQuickActions", "onboardingCompleted" FROM "Restaurant" WHERE id = $1`, me.restaurantId
         );
         (restaurant as any).dashboardQuickActions = Array.isArray(qaRaw[0]?.dashboardQuickActions)
           ? qaRaw[0].dashboardQuickActions
           : [];
+        (restaurant as any).onboardingCompleted = qaRaw[0]?.onboardingCompleted ?? false;
       } catch {
         (restaurant as any).dashboardQuickActions = [];
+        (restaurant as any).onboardingCompleted = true; // si colonne absente, ne pas re-trigger l'onboarding
       }
     }
 
@@ -343,6 +345,7 @@ export async function proRoutes(app: FastifyInstance) {
       reservationAlertEmails: z.array(z.string().email()).max(10).optional(),
       maxCoversPerSlot: z.number().int().min(0).nullable().optional(),
       dashboardQuickActions: z.array(z.string().min(1).max(120)).max(8).optional(),
+      onboardingCompleted: z.boolean().optional(),
       reservationSlotMinutes: z.number().int().min(10).max(120).optional(),
       tipsEnabled: z.boolean().optional(),
       serviceCallEnabled: z.boolean().optional(),
@@ -366,7 +369,7 @@ export async function proRoutes(app: FastifyInstance) {
       })).optional(),
     }).parse(req.body);
 
-    const { openingHours, googleReviewLink, reviewVoucherConfig, businessType, reviewCustomQuestions, reviewRatingCategories, reservationAlertEmail, reservationAlertEmails, maxCoversPerSlot, dashboardQuickActions, ...restData } = body;
+    const { openingHours, googleReviewLink, reviewVoucherConfig, businessType, reviewCustomQuestions, reviewRatingCategories, reservationAlertEmail, reservationAlertEmails, maxCoversPerSlot, dashboardQuickActions, onboardingCompleted, ...restData } = body;
 
     if (restData.slug) {
       const taken = await prisma.restaurant.findFirst({
@@ -400,6 +403,12 @@ export async function proRoutes(app: FastifyInstance) {
       ops.push(prisma.$executeRawUnsafe(
         `UPDATE "Restaurant" SET "dashboardQuickActions" = $1::jsonb WHERE id = $2`,
         JSON.stringify(cleaned), me.restaurantId
+      ));
+    }
+    if (onboardingCompleted !== undefined) {
+      ops.push(prisma.$executeRawUnsafe(
+        `UPDATE "Restaurant" SET "onboardingCompleted" = $1 WHERE id = $2`,
+        onboardingCompleted, me.restaurantId
       ));
     }
     if (reservationAlertEmails !== undefined) {
