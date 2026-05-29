@@ -79,15 +79,19 @@ function priceToplan(cfg: PlatformBilling, priceId: string): { enumPlan: string 
 async function logSubEvent(opts: {
   restaurantId: string; restaurantName?: string | null;
   type: string; plan: string; mrrCents: number; mrrDeltaCents: number;
+  amountCents?: number; interval?: string | null;
+  invoiceNumber?: string | null; stripeInvoiceUrl?: string | null;
 }) {
   try {
     await prisma.$executeRawUnsafe(
       `INSERT INTO "SubscriptionEvent"
-        ("id","restaurantId","restaurantName","type","plan","mrrCents","mrrDeltaCents","method")
-       VALUES ($1,$2,$3,$4,$5,$6,$7,'stripe')`,
+        ("id","restaurantId","restaurantName","type","plan","mrrCents","mrrDeltaCents","method","amountCents","interval","invoiceNumber","stripeInvoiceUrl")
+       VALUES ($1,$2,$3,$4,$5,$6,$7,'stripe',$8,$9,$10,$11)`,
       `se_${randomUUID().replace(/-/g, "").slice(0, 20)}`,
       opts.restaurantId, opts.restaurantName ?? null, opts.type, opts.plan,
       opts.mrrCents, opts.mrrDeltaCents,
+      opts.amountCents ?? 0, opts.interval ?? null,
+      opts.invoiceNumber ?? null, opts.stripeInvoiceUrl ?? null,
     );
   } catch (e) {
     console.warn("[platformBilling] logSubEvent skipped:", (e as Error).message?.split("\n")[0]);
@@ -280,6 +284,25 @@ export async function platformBillingRoutes(app: FastifyInstance) {
             `UPDATE "Restaurant" SET "subscriptionExpiresAt" = $1, "billingPastDue" = false WHERE id = $2`,
             periodEnd, restaurantId,
           );
+          // Journalise la FACTURE (montant réellement encaissé)
+          if ((inv.amount_paid ?? 0) > 0) {
+            const nameRows = await prisma.$queryRawUnsafe<Array<{ name: string; subscription: string }>>(
+              `SELECT name, subscription::text AS subscription FROM "Restaurant" WHERE id = $1`, restaurantId,
+            );
+            const price = inv.lines?.data?.[0]?.price;
+            const interval = price?.recurring?.interval === "year" ? "yearly" : "monthly";
+            await logSubEvent({
+              restaurantId,
+              restaurantName: nameRows[0]?.name,
+              type: "renewed",
+              plan: nameRows[0]?.subscription ?? "STARTER",
+              mrrCents: 0, mrrDeltaCents: 0,            // pas un mouvement de plan
+              amountCents: inv.amount_paid ?? 0,
+              interval,
+              invoiceNumber: inv.number ?? null,
+              stripeInvoiceUrl: inv.hosted_invoice_url ?? inv.invoice_pdf ?? null,
+            });
+          }
           break;
         }
 
