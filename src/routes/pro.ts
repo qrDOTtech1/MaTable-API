@@ -38,11 +38,15 @@ export async function proRoutes(app: FastifyInstance) {
   const authRateLimit = { config: { rateLimit: { max: 10, timeWindow: "1 minute" } } };
 
   app.post("/register", authRateLimit, async (req, reply) => {
-    const { email, password, restaurantName } = z.object({
+    const parsed = z.object({
       email: z.string().email(),
       password: z.string().min(6),
       restaurantName: z.string().min(1),
     }).parse(req.body);
+    // Normalise l'email (casse/espaces) — sinon une inscription "John@X.com"
+    // ne matche pas le login qui cherche en lowercase → impossible de se connecter.
+    const email = parsed.email.trim().toLowerCase();
+    const { password, restaurantName } = parsed;
 
     const existing = await prisma.user.findUnique({ where: { email } });
     if (existing) return reply.code(409).send({ error: "email_exists" });
