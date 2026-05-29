@@ -90,7 +90,68 @@ export async function cuisinePortalRoutes(app: FastifyInstance) {
       orderBy: { createdAt: "asc" },
     });
 
+    // Attache expectedReadyAt (colonne ajoutée via ensure_columns.sql, hors schéma Prisma)
+    if (orders.length > 0) {
+      const ids = orders.map((o) => o.id);
+      type EtaRow = { id: string; expectedReadyAt: Date | null };
+      const etaRows = await prisma.$queryRawUnsafe<EtaRow[]>(
+        `SELECT id, "expectedReadyAt" FROM "Order" WHERE id = ANY($1::text[])`,
+        ids,
+      );
+      const etaMap = new Map(etaRows.map((r) => [r.id, r.expectedReadyAt]));
+      for (const o of orders) {
+        (o as any).expectedReadyAt = etaMap.get(o.id) ?? null;
+      }
+    }
+
     return { orders };
+  });
+
+  // ── POST /api/cuisine/orders/:id/eta ───────────────────────────────────────
+  // Le cuisto ajuste le temps restant affiché au client.
+  // body: { deltaMin } (ex. -5, +5, +10) OU { setMin } (valeur absolue depuis maintenant)
+  app.post("/orders/:id/eta", async (req, reply) => {
+    const me = await requireCuisine(req, reply);
+    const { id } = req.params as { id: string };
+    const { deltaMin, setMin } = z.object({
+      deltaMin: z.number().int().min(-120).max(120).optional(),
+      setMin: z.number().int().min(0).max(180).optional(),
+    }).parse(req.body ?? {});
+
+    const order = await prisma.order.findFirst({
+      where: { id, table: { restaurantId: me.restaurantId }, status: { in: ["PENDING", "COOKING"] } },
+      include: { table: { select: { number: true } } },
+    });
+    if (!order) return reply.code(404).send({ error: "ORDER_NOT_FOUND" });
+
+    const now = Date.now();
+    const MIN_FUTURE = now + 60_000; // jamais dans le passé : plancher à +1 min
+
+    let target: number;
+    if (typeof setMin === "number") {
+      target = now + setMin * 60_000;
+    } else {
+      // delta relatif à l'ETA courante (ou maintenant si non définie)
+      const rows = await prisma.$queryRawUnsafe<Array<{ expectedReadyAt: Date | null }>>(
+        `SELECT "expectedReadyAt" FROM "Order" WHERE id = $1`, id,
+      );
+      const current = rows[0]?.expectedReadyAt ? new Date(rows[0].expectedReadyAt).getTime() : now;
+      const base = Math.max(current, now);
+      target = base + (deltaMin ?? 0) * 60_000;
+    }
+    const expectedReadyAt = new Date(Math.max(target, MIN_FUTURE));
+
+    await prisma.$executeRawUnsafe(
+      `UPDATE "Order" SET "expectedReadyAt" = $1 WHERE id = $2`,
+      expectedReadyAt, id,
+    );
+
+    // Propage l'ETA au board cuisine ET au client (countdown live)
+    const payload = { id, status: order.status, tableNumber: order.table.number, expectedReadyAt };
+    emitToRestaurant(me.restaurantId, "order:updated", payload);
+    if (order.sessionId) emitToSession(order.sessionId, "order:updated", payload);
+
+    return { ok: true, expectedReadyAt };
   });
 
   // ── GET /api/cuisine/stats ─────────────────────────────────────────────────
