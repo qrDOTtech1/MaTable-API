@@ -243,6 +243,82 @@ export async function caissePortalRoutes(app: FastifyInstance) {
     return { ok: true };
   });
 
+  // ── GET /api/caisse/menu — liste des plats dispos (vente comptoir) ──────
+  app.get("/menu", async (req, reply) => {
+    const me = await requireCaisse(req, reply);
+    const items = await prisma.menuItem.findMany({
+      where: { restaurantId: me.restaurantId, available: true },
+      select: { id: true, name: true, priceCents: true, category: true },
+      orderBy: [{ category: "asc" }, { name: "asc" }],
+    });
+    return { menu: items };
+  });
+
+  // ── POST /api/caisse/sales/counter — vente au comptoir (sans table) ──────
+  // Crée une table "Comptoir" lazy + session + commande PAID + ferme la session.
+  // Permet d'encaisser une cannette, un café, etc. sans passer par le QR.
+  app.post("/sales/counter", async (req, reply) => {
+    const me = await requireCaisse(req, reply);
+    const body = z.object({
+      items: z.array(z.object({
+        menuItemId: z.string().optional(),
+        name: z.string().min(1).max(120),
+        priceCents: z.number().int().min(0),
+        quantity: z.number().int().min(1).max(99),
+      })).min(1).max(20),
+      paymentMode: z.enum(["CARD", "CASH", "COUNTER"]),
+      tipCents: z.number().int().min(0).max(50000).optional(),
+    }).parse(req.body);
+
+    const totalCents = body.items.reduce((s, i) => s + i.priceCents * i.quantity, 0);
+    if (totalCents <= 0) return reply.code(400).send({ error: "EMPTY_SALE" });
+
+    // Table "Comptoir" — créée à la demande, une seule par resto
+    let comptoir = await prisma.table.findFirst({
+      where: { restaurantId: me.restaurantId, zone: "Comptoir" },
+    });
+    if (!comptoir) {
+      const maxRows = await prisma.$queryRawUnsafe<Array<{ max: number | null }>>(
+        `SELECT MAX(number) AS max FROM "Table" WHERE "restaurantId" = $1`, me.restaurantId,
+      );
+      const candidateNumber = (Number(maxRows[0]?.max ?? 0)) >= 999 ? 1000 : 999;
+      comptoir = await prisma.table.create({
+        data: {
+          restaurantId: me.restaurantId,
+          number: candidateNumber,
+          seats: 1,
+          zone: "Comptoir",
+          reservable: false,
+        } as any,
+      });
+    }
+
+    const now = new Date();
+    const session = await prisma.tableSession.create({
+      data: {
+        tableId: comptoir.id,
+        active: false,
+        closedAt: now,
+        billRequestedAt: now,
+        billPaymentMode: body.paymentMode,
+        tipCents: body.tipCents ?? 0,
+      } as any,
+    });
+    const order = await prisma.order.create({
+      data: {
+        tableId: comptoir.id,
+        sessionId: session.id,
+        status: "PAID",
+        items: body.items as any,
+        totalCents,
+        tipCents: body.tipCents ?? 0,
+      },
+    });
+
+    emitToRestaurant(me.restaurantId, "order:updated", { id: order.id, status: "PAID", tableNumber: comptoir.number });
+    return { ok: true, orderId: order.id, sessionId: session.id, totalCents };
+  });
+
   // ──────────────────────────────────────────────────────────────────────
   // GET /api/caisse/stream — Server-Sent Events (temps réel)
   // Évènements pertinents : bill:requested, tip:received, order:paid,
