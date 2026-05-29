@@ -42,11 +42,24 @@ export async function proRoutes(app: FastifyInstance) {
       email: z.string().email(),
       password: z.string().min(6),
       restaurantName: z.string().min(1),
+      referralCode: z.string().trim().min(3).max(40).optional(),
     }).parse(req.body);
     // Normalise l'email (casse/espaces) — sinon une inscription "John@X.com"
     // ne matche pas le login qui cherche en lowercase → impossible de se connecter.
     const email = parsed.email.trim().toLowerCase();
-    const { password, restaurantName } = parsed;
+    const { password, restaurantName, referralCode: refCodeRaw } = parsed;
+    const referredByCode = refCodeRaw?.toUpperCase().trim() || null;
+
+    // Vérifie que le code de parrainage existe vraiment (sinon on l'ignore en silence)
+    let validReferrer = false;
+    if (referredByCode) {
+      try {
+        const rows = await prisma.$queryRawUnsafe<Array<{ id: string }>>(
+          `SELECT id FROM "Restaurant" WHERE "referralCode" = $1 LIMIT 1`, referredByCode,
+        );
+        validReferrer = rows.length > 0;
+      } catch { /* colonne absente → on ignore */ }
+    }
 
     const existing = await prisma.user.findUnique({ where: { email } });
     if (existing) return reply.code(409).send({ error: "email_exists" });
@@ -77,6 +90,28 @@ export async function proRoutes(app: FastifyInstance) {
         `UPDATE "Restaurant" SET "enabledApps" = $1::jsonb WHERE id = $2`,
         JSON.stringify(["reviews", "reservations", "orders"]), restaurant.id,
       );
+
+      // Code parrainage unique pour ce resto (tente plusieurs fois en cas de collision)
+      const baseSlug = (slugify(restaurantName) || "RESTO").toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 4) || "RESTO";
+      const randPart = () => Math.random().toString(36).toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 4).padEnd(4, "X");
+      let myRefCode: string | null = null;
+      for (let attempt = 0; attempt < 5 && !myRefCode; attempt++) {
+        const candidate = `${baseSlug}-${randPart()}`;
+        try {
+          await tx.$executeRawUnsafe(
+            `UPDATE "Restaurant" SET "referralCode" = $1 WHERE id = $2`, candidate, restaurant.id,
+          );
+          myRefCode = candidate;
+        } catch { /* collision unique → on retente */ }
+      }
+      // Si parrainage valide, l'enregistrer sur le resto
+      if (validReferrer && referredByCode) {
+        try {
+          await tx.$executeRawUnsafe(
+            `UPDATE "Restaurant" SET "referredByCode" = $1 WHERE id = $2`, referredByCode, restaurant.id,
+          );
+        } catch { /* colonne absente → on ignore */ }
+      }
       return { restaurant };
     });
     return { ok: true, restaurantId: restaurant.id, slug };
@@ -165,6 +200,51 @@ export async function proRoutes(app: FastifyInstance) {
     });
 
     return { ok: true };
+  });
+
+  // GET /referrals/me — code de parrainage + liste des filleuls
+  app.get("/referrals/me", async (req, reply) => {
+    const me = await requirePro(req, reply);
+    try {
+      const meRows = await prisma.$queryRawUnsafe<Array<{ referralCode: string | null }>>(
+        `SELECT "referralCode" FROM "Restaurant" WHERE id = $1`, me.restaurantId,
+      );
+      const code = meRows[0]?.referralCode ?? null;
+
+      type Referee = { id: string; name: string; createdAt: Date; referralRewardGranted: boolean; subscriptionStartedAt: Date | null };
+      const referees = code ? await prisma.$queryRawUnsafe<Referee[]>(
+        `SELECT id, name, "createdAt", "referralRewardGranted", "subscriptionStartedAt"
+           FROM "Restaurant"
+          WHERE "referredByCode" = $1
+          ORDER BY "createdAt" DESC`, code,
+      ) : [];
+
+      // "Converti" si une facture payante existe pour ce filleul
+      const ids = referees.map((r) => r.id);
+      let paidSet = new Set<string>();
+      if (ids.length > 0) {
+        try {
+          const rows = await prisma.$queryRawUnsafe<Array<{ restaurantId: string }>>(
+            `SELECT DISTINCT "restaurantId" FROM "SubscriptionEvent" WHERE "restaurantId" = ANY($1::text[]) AND "amountCents" > 0`,
+            ids,
+          );
+          paidSet = new Set(rows.map((r) => r.restaurantId));
+        } catch { /* table absente */ }
+      }
+
+      const referrals = referees.map((r) => ({
+        name: r.name,
+        createdAt: r.createdAt,
+        converted: paidSet.has(r.id),
+        rewardGranted: r.referralRewardGranted,
+      }));
+      const totalConverted = referrals.filter((r) => r.converted).length;
+      const totalRewardMonths = referrals.filter((r) => r.rewardGranted).length; // 1 mois par récompense
+
+      return { code, referrals, totalConverted, totalRewardMonths };
+    } catch {
+      return { code: null, referrals: [], totalConverted: 0, totalRewardMonths: 0 };
+    }
   });
 
   // PATCH /account/password — change own password (client logged in)

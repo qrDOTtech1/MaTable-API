@@ -98,6 +98,37 @@ async function logSubEvent(opts: {
   }
 }
 
+/**
+ * Récompense parrainage : à la 1re facture payée du filleul, on ajoute 30 jours
+ * à l'abonnement du parrain et on marque le filleul pour ne pas re-récompenser.
+ */
+async function grantReferralRewardIfNeeded(refereeId: string) {
+  try {
+    const rows = await prisma.$queryRawUnsafe<Array<{ referredByCode: string | null; referralRewardGranted: boolean }>>(
+      `SELECT "referredByCode", "referralRewardGranted" FROM "Restaurant" WHERE id = $1`, refereeId,
+    );
+    const row = rows[0];
+    if (!row?.referredByCode || row.referralRewardGranted) return;
+    const refRows = await prisma.$queryRawUnsafe<Array<{ id: string; subscriptionExpiresAt: Date | null }>>(
+      `SELECT id, "subscriptionExpiresAt" FROM "Restaurant" WHERE "referralCode" = $1 LIMIT 1`, row.referredByCode,
+    );
+    const referrer = refRows[0];
+    if (!referrer) return;
+    const now = Date.now();
+    const base = referrer.subscriptionExpiresAt ? Math.max(new Date(referrer.subscriptionExpiresAt).getTime(), now) : now;
+    const newExpires = new Date(base + 30 * 24 * 3600 * 1000);
+    await prisma.$executeRawUnsafe(
+      `UPDATE "Restaurant" SET "subscriptionExpiresAt" = $1 WHERE id = $2`, newExpires, referrer.id,
+    );
+    await prisma.$executeRawUnsafe(
+      `UPDATE "Restaurant" SET "referralRewardGranted" = true WHERE id = $1`, refereeId,
+    );
+    console.log(`[referral] +30 jours offerts à ${referrer.id} (filleul ${refereeId})`);
+  } catch (e) {
+    console.warn("[referral] grantReferralReward skipped:", (e as Error).message?.split("\n")[0]);
+  }
+}
+
 /** Applique un plan à un resto (subscription + dates + enabledApps) + journalise. */
 async function applyPlanToRestaurant(restaurantId: string, enumPlan: string, periodEnd: Date | null) {
   const before = await prisma.$queryRawUnsafe<Array<{ subscription: string; name: string; subscriptionStartedAt: Date | null }>>(
@@ -324,6 +355,9 @@ export async function platformBillingRoutes(app: FastifyInstance) {
               invoiceNumber: inv.number ?? null,
               stripeInvoiceUrl: inv.hosted_invoice_url ?? inv.invoice_pdf ?? null,
             });
+            // Récompense parrainage : à la 1re facture payée du filleul, on
+            // ajoute 1 mois à son parrain (idempotent via referralRewardGranted).
+            await grantReferralRewardIfNeeded(restaurantId);
           }
           break;
         }
