@@ -1736,6 +1736,56 @@ export async function proRoutes(app: FastifyInstance) {
       me.restaurantId
     ).catch(() => [{ customers: 0n, points: 0n, visits: 0n, offers: 0n, redemptions: 0n }]);
 
+    // ── Heatmap affluence : ventes par jour de semaine × heure (fuseau Paris) ──
+    const parisParts = (d: Date) => {
+      const parts = new Intl.DateTimeFormat("en-GB", {
+        timeZone: "Europe/Paris", hour: "2-digit", hour12: false, weekday: "short",
+      }).formatToParts(d);
+      const hour = parseInt(parts.find((p) => p.type === "hour")?.value ?? "0", 10) % 24;
+      const wdMap: Record<string, number> = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
+      const dow = wdMap[parts.find((p) => p.type === "weekday")?.value ?? "Mon"] ?? 1;
+      return { hour, dow };
+    };
+    const heatCells = new Map<string, { dow: number; hour: number; orders: number; revenueCents: number }>();
+    for (const o of paidOrders) {
+      const { hour, dow } = parisParts(o.createdAt);
+      const key = `${dow}-${hour}`;
+      const cell = heatCells.get(key) ?? { dow, hour, orders: 0, revenueCents: 0 };
+      cell.orders += 1; cell.revenueCents += o.totalCents + o.tipCents;
+      heatCells.set(key, cell);
+    }
+    const salesHeatmap = Array.from(heatCells.values());
+
+    // ── Poids morts : plats disponibles jamais vendus sur la période ──────────
+    const menuForDead = await prisma.menuItem.findMany({
+      where: { restaurantId: me.restaurantId },
+      select: { name: true, priceCents: true, available: true, category: true },
+    });
+    const deadItems = menuForDead
+      .filter((m) => m.available && !(itemCounts.get(m.name)?.qty))
+      .map((m) => ({ name: m.name, priceCents: m.priceCents, category: m.category ?? "Non catégorisé" }))
+      .slice(0, 30);
+
+    // ── Période précédente (même durée) pour les tendances ↑↓ ─────────────────
+    const prevSince = new Date(since.getTime() - q.days * 24 * 3600 * 1000);
+    const [prevOrders, prevReservationsCount] = await Promise.all([
+      prisma.order.findMany({
+        where: { table: { restaurantId: me.restaurantId }, status: "PAID", createdAt: { gte: prevSince, lt: since } },
+        select: { totalCents: true, tipCents: true },
+      }),
+      prisma.reservation.count({
+        where: { restaurantId: me.restaurantId, startsAt: { gte: prevSince, lt: since } },
+      }),
+    ]);
+    const prevRevenueCents = prevOrders.reduce((s, o) => s + o.totalCents + o.tipCents, 0);
+    const prevOrdersCount = prevOrders.length;
+    const previous = {
+      revenueCents: prevRevenueCents,
+      ordersCount: prevOrdersCount,
+      avgTicketCents: prevOrdersCount ? Math.round(prevRevenueCents / prevOrdersCount) : 0,
+      reservationsCount: prevReservationsCount,
+    };
+
     return {
       sinceIso: since.toISOString(),
       revenueCents,
@@ -1744,6 +1794,9 @@ export async function proRoutes(app: FastifyInstance) {
       avgTicketCents,
       itemsSold,
       topItems,
+      salesHeatmap,
+      deadItems,
+      previous,
       topCategories: Array.from(categoryCounts.values()).sort((a, b) => b.revenueCents - a.revenueCents).slice(0, 10),
       revenueByDay,
       revenueByServer: Array.from(byServer.values()).sort((a, b) => b.revenueCents - a.revenueCents),
