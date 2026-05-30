@@ -37,6 +37,40 @@ export async function proRoutes(app: FastifyInstance) {
   // ---------------------------------------------------------------------------
   const authRateLimit = { config: { rateLimit: { max: 10, timeWindow: "1 minute" } } };
 
+  // ── Parrainage mensuel ────────────────────────────────────────────────────
+  // Chaque resto a 1 code par mois calendaire (→ 12/an), réutilisable par UN
+  // seul nouveau resto. La récompense (+30 j) est versée au parrain UNIQUEMENT
+  // à la 1re facture payée du filleul (cf. grantReferralRewardIfNeeded).
+  function periodNow(): string {
+    const d = new Date();
+    return `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, "0")}`;
+  }
+  async function ensureCurrentMonthCode(restaurantId: string, restoName: string | null): Promise<string | null> {
+    const period = periodNow();
+    try {
+      const rows = await prisma.$queryRawUnsafe<Array<{ code: string }>>(
+        `SELECT code FROM "ReferralCode" WHERE "restaurantId" = $1 AND "periodYearMonth" = $2 LIMIT 1`,
+        restaurantId, period,
+      );
+      if (rows[0]?.code) return rows[0].code;
+      const base = (slugify(restoName ?? "RESTO").toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 4)) || "REST";
+      const ymShort = period.slice(2); // YYMM
+      for (let attempt = 0; attempt < 6; attempt++) {
+        const rand = Math.random().toString(36).toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 3).padEnd(3, "X");
+        const code = `${base}-${ymShort}${rand}`;
+        const id = `rc_${crypto.randomBytes(8).toString("hex")}`;
+        try {
+          await prisma.$executeRawUnsafe(
+            `INSERT INTO "ReferralCode" ("id","restaurantId","code","periodYearMonth") VALUES ($1,$2,$3,$4)`,
+            id, restaurantId, code, period,
+          );
+          return code;
+        } catch { /* collision unique → on retente */ }
+      }
+    } catch { /* table absente → on retombera sur le legacy */ }
+    return null;
+  }
+
   app.post("/register", authRateLimit, async (req, reply) => {
     const parsed = z.object({
       email: z.string().email(),
@@ -50,15 +84,28 @@ export async function proRoutes(app: FastifyInstance) {
     const { password, restaurantName, referralCode: refCodeRaw } = parsed;
     const referredByCode = refCodeRaw?.toUpperCase().trim() || null;
 
-    // Vérifie que le code de parrainage existe vraiment (sinon on l'ignore en silence)
-    let validReferrer = false;
+    // Résolution du code parrain : table mensuelle prioritaire, sinon legacy.
+    // - monthlyCodeId rempli si le code est un code mensuel non encore utilisé.
+    // - legacyReferrer rempli si le code est un ancien code permanent (Restaurant.referralCode).
+    let monthlyCodeId: string | null = null;
+    let legacyReferrer = false;
     if (referredByCode) {
       try {
-        const rows = await prisma.$queryRawUnsafe<Array<{ id: string }>>(
-          `SELECT id FROM "Restaurant" WHERE "referralCode" = $1 LIMIT 1`, referredByCode,
+        const rcRows = await prisma.$queryRawUnsafe<Array<{ id: string; usedByRefereeId: string | null }>>(
+          `SELECT id, "usedByRefereeId" FROM "ReferralCode" WHERE code = $1 LIMIT 1`, referredByCode,
         );
-        validReferrer = rows.length > 0;
-      } catch { /* colonne absente → on ignore */ }
+        if (rcRows[0] && !rcRows[0].usedByRefereeId) {
+          monthlyCodeId = rcRows[0].id;
+        }
+      } catch { /* table absente → tentera legacy */ }
+      if (!monthlyCodeId) {
+        try {
+          const rows = await prisma.$queryRawUnsafe<Array<{ id: string }>>(
+            `SELECT id FROM "Restaurant" WHERE "referralCode" = $1 LIMIT 1`, referredByCode,
+          );
+          legacyReferrer = rows.length > 0;
+        } catch { /* colonne absente → on ignore */ }
+      }
     }
 
     const existing = await prisma.user.findUnique({ where: { email } });
@@ -104,8 +151,19 @@ export async function proRoutes(app: FastifyInstance) {
           myRefCode = candidate;
         } catch { /* collision unique → on retente */ }
       }
-      // Si parrainage valide, l'enregistrer sur le resto
-      if (validReferrer && referredByCode) {
+      // Parrainage : verrouille le code mensuel s'il a été identifié,
+      // sinon stocke le code legacy sur le resto pour la rétro-compat.
+      if (monthlyCodeId) {
+        try {
+          // Atomique : on ne marque que si toujours libre (évite la course)
+          await tx.$executeRawUnsafe(
+            `UPDATE "ReferralCode"
+                SET "usedByRefereeId" = $1, "refereeRegisteredAt" = NOW()
+              WHERE id = $2 AND "usedByRefereeId" IS NULL`,
+            restaurant.id, monthlyCodeId,
+          );
+        } catch { /* on ne bloque pas l'inscription */ }
+      } else if (legacyReferrer && referredByCode) {
         try {
           await tx.$executeRawUnsafe(
             `UPDATE "Restaurant" SET "referredByCode" = $1 WHERE id = $2`, referredByCode, restaurant.id,
@@ -202,25 +260,42 @@ export async function proRoutes(app: FastifyInstance) {
     return { ok: true };
   });
 
-  // GET /referrals/me — code de parrainage + liste des filleuls
+  // GET /referrals/me — code mensuel courant + historique + filleuls
   app.get("/referrals/me", async (req, reply) => {
     const me = await requirePro(req, reply);
     try {
-      const meRows = await prisma.$queryRawUnsafe<Array<{ referralCode: string | null }>>(
-        `SELECT "referralCode" FROM "Restaurant" WHERE id = $1`, me.restaurantId,
+      const meRows = await prisma.$queryRawUnsafe<Array<{ name: string; referralCode: string | null }>>(
+        `SELECT name, "referralCode" FROM "Restaurant" WHERE id = $1`, me.restaurantId,
       );
-      const code = meRows[0]?.referralCode ?? null;
+      const restoName = meRows[0]?.name ?? null;
+      const legacyCode = meRows[0]?.referralCode ?? null;
 
-      type Referee = { id: string; name: string; createdAt: Date; referralRewardGranted: boolean; subscriptionStartedAt: Date | null };
-      const referees = code ? await prisma.$queryRawUnsafe<Referee[]>(
-        `SELECT id, name, "createdAt", "referralRewardGranted", "subscriptionStartedAt"
-           FROM "Restaurant"
-          WHERE "referredByCode" = $1
-          ORDER BY "createdAt" DESC`, code,
-      ) : [];
+      // Génère/récupère le code du mois courant (1/mois, 12/an au total)
+      const currentCode = await ensureCurrentMonthCode(me.restaurantId, restoName);
+      const currentPeriod = periodNow();
 
-      // "Converti" si une facture payante existe pour ce filleul
-      const ids = referees.map((r) => r.id);
+      // Historique des codes mensuels avec statut + nom du filleul si utilisé
+      type CodeRow = {
+        code: string; periodYearMonth: string; createdAt: Date;
+        usedByRefereeId: string | null; refereeRegisteredAt: Date | null;
+        rewardedAt: Date | null; refereeName: string | null;
+      };
+      let myCodes: CodeRow[] = [];
+      try {
+        myCodes = await prisma.$queryRawUnsafe<CodeRow[]>(
+          `SELECT rc.code, rc."periodYearMonth", rc."createdAt",
+                  rc."usedByRefereeId", rc."refereeRegisteredAt", rc."rewardedAt",
+                  r.name AS "refereeName"
+             FROM "ReferralCode" rc
+             LEFT JOIN "Restaurant" r ON r.id = rc."usedByRefereeId"
+            WHERE rc."restaurantId" = $1
+            ORDER BY rc."periodYearMonth" DESC`,
+          me.restaurantId,
+        );
+      } catch { /* table absente */ }
+
+      // Filleuls "convertis" (1re facture payée)
+      const ids = myCodes.map((c) => c.usedByRefereeId).filter((x): x is string => !!x);
       let paidSet = new Set<string>();
       if (ids.length > 0) {
         try {
@@ -232,18 +307,71 @@ export async function proRoutes(app: FastifyInstance) {
         } catch { /* table absente */ }
       }
 
-      const referrals = referees.map((r) => ({
-        name: r.name,
-        createdAt: r.createdAt,
-        converted: paidSet.has(r.id),
-        rewardGranted: r.referralRewardGranted,
+      // Codes mensuels enrichis pour l'UI
+      const codes = myCodes.map((c) => ({
+        code: c.code,
+        periodYearMonth: c.periodYearMonth,
+        used: !!c.usedByRefereeId,
+        refereeName: c.refereeName,
+        registeredAt: c.refereeRegisteredAt,
+        converted: c.usedByRefereeId ? paidSet.has(c.usedByRefereeId) : false,
+        rewarded: !!c.rewardedAt,
+        isCurrent: c.periodYearMonth === currentPeriod,
       }));
-      const totalConverted = referrals.filter((r) => r.converted).length;
-      const totalRewardMonths = referrals.filter((r) => r.rewardGranted).length; // 1 mois par récompense
 
-      return { code, referrals, totalConverted, totalRewardMonths };
+      // Pour rétrocompat : on ramène aussi les anciens filleuls legacy (référencés par Restaurant.referredByCode)
+      type LegacyReferee = { id: string; name: string; createdAt: Date; referralRewardGranted: boolean };
+      let legacyReferees: LegacyReferee[] = [];
+      if (legacyCode) {
+        try {
+          legacyReferees = await prisma.$queryRawUnsafe<LegacyReferee[]>(
+            `SELECT id, name, "createdAt", "referralRewardGranted"
+               FROM "Restaurant"
+              WHERE "referredByCode" = $1
+              ORDER BY "createdAt" DESC`, legacyCode,
+          );
+        } catch {}
+      }
+      // Convertis legacy
+      let legacyPaidSet = new Set<string>();
+      if (legacyReferees.length > 0) {
+        try {
+          const rows = await prisma.$queryRawUnsafe<Array<{ restaurantId: string }>>(
+            `SELECT DISTINCT "restaurantId" FROM "SubscriptionEvent" WHERE "restaurantId" = ANY($1::text[]) AND "amountCents" > 0`,
+            legacyReferees.map((r) => r.id),
+          );
+          legacyPaidSet = new Set(rows.map((r) => r.restaurantId));
+        } catch {}
+      }
+
+      const totalConverted = codes.filter((c) => c.converted).length
+                           + legacyReferees.filter((r) => legacyPaidSet.has(r.id)).length;
+      const totalRewardMonths = codes.filter((c) => c.rewarded).length
+                              + legacyReferees.filter((r) => r.referralRewardGranted).length;
+
+      // Crédit annuel restant = codes du mois encore non utilisés sur les 12 derniers mois
+      const usedThisYear = codes.filter((c) => c.used).length;
+      const remainingYearly = Math.max(0, 12 - usedThisYear);
+
+      return {
+        currentCode,
+        currentPeriod,
+        codes,
+        legacyCode,
+        legacyReferees: legacyReferees.map((r) => ({
+          name: r.name, createdAt: r.createdAt,
+          converted: legacyPaidSet.has(r.id), rewardGranted: r.referralRewardGranted,
+        })),
+        totalConverted,
+        totalRewardMonths,
+        remainingYearly,
+      };
     } catch {
-      return { code: null, referrals: [], totalConverted: 0, totalRewardMonths: 0 };
+      return {
+        currentCode: null, currentPeriod: periodNow(),
+        codes: [], legacyCode: null, legacyReferees: [],
+        totalConverted: 0, totalRewardMonths: 0, remainingYearly: 12,
+      };
     }
   });
 
