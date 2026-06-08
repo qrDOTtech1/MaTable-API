@@ -77,7 +77,22 @@ export async function proRoutes(app: FastifyInstance) {
       password: z.string().min(6),
       restaurantName: z.string().min(1),
       referralCode: z.string().trim().min(3).max(40).optional(),
+      // Souscription directe (sans essai) : exige acceptation CGV + nom signataire
+      skipTrial: z.boolean().optional(),
+      cgvAccepted: z.boolean().optional(),
+      cgvSignatureName: z.string().trim().min(2).max(120).optional(),
+      contractData: z.object({
+        plan: z.enum(["starter", "pro", "business"]),
+        billing: z.enum(["monthly", "yearly"]),
+      }).optional(),
     }).parse(req.body);
+
+    // Garde-fou : si souscription directe demandée, on exige CGV + nom signataire
+    if (parsed.skipTrial) {
+      if (!parsed.cgvAccepted || !parsed.cgvSignatureName) {
+        return reply.code(400).send({ error: "cgv_required" });
+      }
+    }
     // Normalise l'email (casse/espaces) — sinon une inscription "John@X.com"
     // ne matche pas le login qui cherche en lowercase → impossible de se connecter.
     const email = parsed.email.trim().toLowerCase();
@@ -116,27 +131,58 @@ export async function proRoutes(app: FastifyInstance) {
     while (await prisma.restaurant.findUnique({ where: { slug } })) slug = `${base}-${++i}`;
 
     const passwordHash = await bcrypt.hash(password, 10);
-    // Nouveau compte = forfait PRO en version d'essai (14 j) — apps PRO activées.
-    // L'essai reste affiché tant qu'aucune facture n'est encaissée (cf. /status).
     const TRIAL_DAYS = 14;
     const now = new Date();
-    const trialEnds = new Date(now.getTime() + TRIAL_DAYS * 24 * 3600 * 1000);
-    const { restaurant } = await prisma.$transaction(async (tx) => {
+    // Mode normal : 14 j d'essai PRO. Mode souscription directe : aucun essai
+    // (subscriptionExpiresAt = maintenant, le client doit payer pour activer).
+    const skipTrial = parsed.skipTrial === true;
+    const trialEnds = skipTrial ? now : new Date(now.getTime() + TRIAL_DAYS * 24 * 3600 * 1000);
+
+    // Apps activées dépendent du forfait choisi pour la souscription directe ; sinon PRO par défaut
+    const PLAN_APPS: Record<string, string[]> = {
+      starter: ["reviews", "reservations", "orders"],
+      pro: ["reviews", "reservations", "orders"],
+      business: ["reviews", "reservations", "orders", "nova_ia", "nova_stock", "nova_contab", "nova_finance"],
+    };
+    const chosenPlanKey = parsed.contractData?.plan ?? "pro";
+    const subscriptionEnum = chosenPlanKey === "business" ? "PRO_IA" : chosenPlanKey === "starter" ? "STARTER" : "PRO";
+    const enabledApps = PLAN_APPS[chosenPlanKey] ?? PLAN_APPS.pro;
+
+    const { restaurant, user } = await prisma.$transaction(async (tx) => {
       const restaurant = await tx.restaurant.create({
         data: {
           name: restaurantName,
           slug,
-          subscription: "PRO",
+          subscription: subscriptionEnum as any,
           subscriptionStartedAt: now,
           subscriptionExpiresAt: trialEnds,
         },
       });
-      await tx.user.create({ data: { email, passwordHash, restaurantId: restaurant.id } });
-      // enabledApps (hors schéma Prisma) — plan PRO : avis + réservations + commandes
+      const user = await tx.user.create({ data: { email, passwordHash, restaurantId: restaurant.id } });
       await tx.$executeRawUnsafe(
         `UPDATE "Restaurant" SET "enabledApps" = $1::jsonb WHERE id = $2`,
-        JSON.stringify(["reviews", "reservations", "orders"]), restaurant.id,
+        JSON.stringify(enabledApps), restaurant.id,
       );
+
+      // Souscription directe : stocke la signature CGV (preuve d'acceptation)
+      if (skipTrial) {
+        const ip = (req.headers["x-forwarded-for"] as string)?.split(",")[0]?.trim() || (req as any).ip || "unknown";
+        const userAgent = (req.headers["user-agent"] as string) || "unknown";
+        try {
+          await tx.$executeRawUnsafe(
+            `UPDATE "Restaurant"
+                SET "cgvAcceptedAt" = NOW(),
+                    "cgvSignatureName" = $1,
+                    "cgvIp" = $2,
+                    "cgvUserAgent" = $3,
+                    "cgvContractData" = $4::jsonb
+              WHERE id = $5`,
+            parsed.cgvSignatureName, ip.slice(0, 64), userAgent.slice(0, 500),
+            JSON.stringify({ plan: chosenPlanKey, billing: parsed.contractData?.billing ?? "monthly", signedAt: now.toISOString() }),
+            restaurant.id,
+          );
+        } catch { /* colonnes absentes → on ignore proprement */ }
+      }
 
       // Code parrainage unique pour ce resto (tente plusieurs fois en cas de collision)
       const baseSlug = (slugify(restaurantName) || "RESTO").toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 4) || "RESTO";
@@ -170,9 +216,19 @@ export async function proRoutes(app: FastifyInstance) {
           );
         } catch { /* colonne absente → on ignore */ }
       }
-      return { restaurant };
+      return { restaurant, user };
     });
-    return { ok: true, restaurantId: restaurant.id, slug };
+
+    // Souscription directe : on retourne un JWT pour que le client puisse
+    // appeler /api/platform-billing/checkout immédiatement sans /login.
+    let token: string | undefined;
+    if (skipTrial) {
+      token = app.jwt.sign(
+        { kind: "pro", userId: user.id, restaurantId: restaurant.id },
+        { expiresIn: "1h" },
+      );
+    }
+    return { ok: true, restaurantId: restaurant.id, slug, token };
   });
 
    app.post("/login", authRateLimit, async (req, reply) => {
@@ -529,10 +585,12 @@ export async function proRoutes(app: FastifyInstance) {
         ? configRaw[0].reservationAlertEmails
         : (configRaw[0]?.reservationAlertEmail ? [configRaw[0].reservationAlertEmail] : []);
 
-      // dashboardQuickActions + dashboardBottomNav + onboardingCompleted — requête isolée (colonnes ajoutées par migration, peuvent ne pas exister)
+      // Colonnes hors schéma Prisma : raccourcis dashboard + onboarding + signature CGV
       try {
         const qaRaw = await prisma.$queryRawUnsafe<any[]>(
-          `SELECT "dashboardQuickActions", "dashboardBottomNav", "onboardingCompleted" FROM "Restaurant" WHERE id = $1`, me.restaurantId
+          `SELECT "dashboardQuickActions", "dashboardBottomNav", "onboardingCompleted",
+                  "cgvAcceptedAt", "cgvSignatureName", "cgvContractData"
+             FROM "Restaurant" WHERE id = $1`, me.restaurantId
         );
         (restaurant as any).dashboardQuickActions = Array.isArray(qaRaw[0]?.dashboardQuickActions)
           ? qaRaw[0].dashboardQuickActions
@@ -541,10 +599,16 @@ export async function proRoutes(app: FastifyInstance) {
           ? qaRaw[0].dashboardBottomNav
           : [];
         (restaurant as any).onboardingCompleted = qaRaw[0]?.onboardingCompleted ?? false;
+        (restaurant as any).cgvAcceptedAt = qaRaw[0]?.cgvAcceptedAt ?? null;
+        (restaurant as any).cgvSignatureName = qaRaw[0]?.cgvSignatureName ?? null;
+        (restaurant as any).cgvContractData = qaRaw[0]?.cgvContractData ?? null;
       } catch {
         (restaurant as any).dashboardQuickActions = [];
         (restaurant as any).dashboardBottomNav = [];
-        (restaurant as any).onboardingCompleted = true; // si colonne absente, ne pas re-trigger l'onboarding
+        (restaurant as any).onboardingCompleted = true;
+        (restaurant as any).cgvAcceptedAt = null;
+        (restaurant as any).cgvSignatureName = null;
+        (restaurant as any).cgvContractData = null;
       }
     }
 
