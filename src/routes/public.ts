@@ -185,6 +185,11 @@ export async function publicRoutes(app: FastifyInstance) {
 
   /* ── List all restaurants (for sitemap, public discovery) ── */
   app.get("/restaurants", async (req) => {
+    // Hard cap to avoid an unbounded query as the table grows; existing
+    // consumers (sitemap, discovery) keep receiving the array shape.
+    const { limit } = z
+      .object({ limit: z.coerce.number().int().min(1).max(5000).default(2000) })
+      .parse(req.query ?? {});
     const restaurants = await prisma.restaurant.findMany({
       where: { slug: { not: null } },
       select: {
@@ -196,6 +201,7 @@ export async function publicRoutes(app: FastifyInstance) {
         updatedAt: true,
       },
       orderBy: { name: "asc" },
+      take: limit,
     });
     return restaurants;
   });
@@ -387,29 +393,32 @@ export async function publicRoutes(app: FastifyInstance) {
 
   app.get("/r/:slug", async (req, reply) => {
     const { slug } = req.params as { slug: string };
-    const restaurant = await prisma.restaurant.findUnique({
-      where: { slug },
-      include: {
-        menuItems: { where: { available: true }, orderBy: { category: "asc" } },
-        openingHours: { orderBy: { dayOfWeek: "asc" } },
-        photos: { orderBy: { position: "asc" } },
-        servers: {
-          include: { schedules: { orderBy: { dayOfWeek: "asc" } } },
+    // Parallelize the restaurant fetch with the extension columns lookup —
+    // both keyed on the same slug, so they're independent.
+    const [restaurant, tiersRows] = await Promise.all([
+      prisma.restaurant.findUnique({
+        where: { slug },
+        include: {
+          menuItems: { where: { available: true }, orderBy: { category: "asc" } },
+          openingHours: { orderBy: { dayOfWeek: "asc" } },
+          photos: { orderBy: { position: "asc" } },
+          servers: {
+            include: { schedules: { orderBy: { dayOfWeek: "asc" } } },
+          },
         },
-      },
-    });
+      }),
+      prisma.$queryRaw<Array<{ id: string; quantityTiers: any }>>`
+        SELECT mi.id, mi."quantityTiers"
+        FROM "MenuItem" mi
+        JOIN "Restaurant" r ON r.id = mi."restaurantId"
+        WHERE r.slug = ${slug} AND mi.available = true
+      `,
+    ]);
 
     if (!restaurant) {
       return reply.code(404).send({ error: "restaurant_not_found" });
     }
 
-    // Charge les paliers quantite/prix pour chaque plat (colonne extension)
-    const menuIds = restaurant.menuItems.map(m => m.id);
-    const tiersRows = menuIds.length > 0
-      ? await prisma.$queryRaw<Array<{ id: string; quantityTiers: any }>>`
-          SELECT id, "quantityTiers" FROM "MenuItem" WHERE id = ANY(${menuIds}::text[])
-        `
-      : [];
     const tiersById = new Map(tiersRows.map(r => [r.id, parseQuantityTiers(r.quantityTiers)]));
 
     return {
@@ -707,32 +716,31 @@ export async function publicRoutes(app: FastifyInstance) {
     if (!r) return reply.code(404).send({ error: "NOT_FOUND" });
     if (!r.reviewsEnabled) return reply.code(403).send({ error: "REVIEWS_DISABLED" });
 
-    // Get specific configuration fields via raw query because they are not in prisma schema yet
-    const configRaw = await prisma.$queryRawUnsafe<any[]>(
-      `SELECT "googleReviewLink", "reviewVoucherConfig", "businessType", "reviewCustomQuestions", "reviewRatingCategories" FROM "Restaurant" WHERE id = $1`, r.id
-    );
+    // Run the three independent reads in parallel.
+    const [configRaw, servers, photos] = await Promise.all([
+      prisma.$queryRawUnsafe<any[]>(
+        `SELECT "googleReviewLink", "reviewVoucherConfig", "businessType", "reviewCustomQuestions", "reviewRatingCategories" FROM "Restaurant" WHERE id = $1`,
+        r.id
+      ),
+      prisma.server.findMany({
+        where: { restaurantId: r.id, active: true },
+        select: { id: true, name: true, photoUrl: true },
+      }),
+      (prisma as any).photo.findMany({
+        where: {
+          restaurantId: r.id,
+          menuItemId: null,
+          kind: { not: "STAFF" },
+        },
+        orderBy: { position: "asc" },
+        select: { id: true },
+      }),
+    ]);
     const googleReviewLink = configRaw[0]?.googleReviewLink || null;
     const reviewVoucherConfig = configRaw[0]?.reviewVoucherConfig || null;
     const businessType: string = configRaw[0]?.businessType || "RESTAURANT";
     const reviewCustomQuestions: string | null = configRaw[0]?.reviewCustomQuestions || null;
     const reviewRatingCategories = Array.isArray(configRaw[0]?.reviewRatingCategories) ? configRaw[0].reviewRatingCategories : [];
-
-    // Get list of active servers with their photos
-    const servers = await prisma.server.findMany({
-      where: { restaurantId: r.id, active: true },
-      select: { id: true, name: true, photoUrl: true }
-    });
-
-    // Get restaurant photos (uploaded in config) — exclude staff portraits
-    const photos = await (prisma as any).photo.findMany({
-      where: {
-        restaurantId: r.id,
-        menuItemId: null,
-        kind: { not: "STAFF" },
-      },
-      orderBy: { position: "asc" },
-      select: { id: true },
-    });
 
     return {
       restaurant: {

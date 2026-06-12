@@ -190,16 +190,24 @@ export async function invoiceRoutes(app: FastifyInstance) {
       `;
     }
 
-    // Compute total for each session
-    const enriched = await Promise.all(rows.map(async (r) => {
-      const agg = await prisma.order.aggregate({
-        where: { sessionId: r.id, status: "PAID" },
+    // Compute total for each session — single groupBy avoids N+1.
+    const sessionIds = rows.map((r) => r.id);
+    const totalsBySession = new Map<string, number>();
+    if (sessionIds.length > 0) {
+      const grouped = await prisma.order.groupBy({
+        by: ["sessionId"],
+        where: { sessionId: { in: sessionIds }, status: "PAID" },
         _sum: { totalCents: true },
       });
-      const subtotal = agg._sum.totalCents ?? 0;
+      for (const g of grouped) {
+        if (g.sessionId) totalsBySession.set(g.sessionId, g._sum.totalCents ?? 0);
+      }
+    }
+    const enriched = rows.map((r) => {
+      const subtotal = totalsBySession.get(r.id) ?? 0;
       const tip = r.tipCents ?? 0;
       return { ...r, subtotalCents: subtotal, totalCents: subtotal + tip };
-    }));
+    });
 
     return { invoices: enriched };
   });

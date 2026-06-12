@@ -1228,19 +1228,21 @@ export async function proRoutes(app: FastifyInstance) {
     });
     if (!order) return reply.code(404).send({ error: "not_found_or_not_editable" });
 
-    // Resolve menu items
+    // Resolve menu items + their quantity-discount tiers in parallel.
     const menuItemIds = body.add.map((i) => i.menuItemId);
-    const menuItems = await prisma.menuItem.findMany({
-      where: { id: { in: menuItemIds }, restaurantId: me.restaurantId, available: true },
-      select: { id: true, name: true, priceCents: true },
-    });
-    const menuMap = new Map(menuItems.map((m) => [m.id, m]));
-
-    // Read quantity discount tiers for these items (column managed via ensure_columns.sql)
     type DiscRow = { id: string; quantityDiscounts: any };
-    const discRows = menuItemIds.length === 0 ? [] : await prisma.$queryRaw<DiscRow[]>`
-      SELECT id, "quantityDiscounts" FROM "MenuItem" WHERE id = ANY(${menuItemIds}::text[])
-    `;
+    const [menuItems, discRows] = await Promise.all([
+      prisma.menuItem.findMany({
+        where: { id: { in: menuItemIds }, restaurantId: me.restaurantId, available: true },
+        select: { id: true, name: true, priceCents: true },
+      }),
+      menuItemIds.length === 0
+        ? Promise.resolve<DiscRow[]>([])
+        : prisma.$queryRaw<DiscRow[]>`
+            SELECT id, "quantityDiscounts" FROM "MenuItem" WHERE id = ANY(${menuItemIds}::text[])
+          `,
+    ]);
+    const menuMap = new Map(menuItems.map((m) => [m.id, m]));
     const tiersById = new Map(discRows.map((r) => [r.id, parseQuantityDiscounts(r.quantityDiscounts)]));
 
     // Merge into existing items array
