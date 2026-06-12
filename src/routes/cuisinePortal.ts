@@ -50,16 +50,13 @@ export async function cuisinePortalRoutes(app: FastifyInstance) {
       pin: z.string().min(4).max(8),
     }).parse(req.body);
 
-    const restaurant = await prisma.restaurant.findUnique({
-      where: { slug },
-      select: { id: true, name: true },
-    });
-    if (!restaurant) return reply.code(404).send({ error: "RESTAURANT_NOT_FOUND" });
-
-    const rows = await prisma.$queryRaw<Array<{ cuisinePin: string | null }>>`
-      SELECT "cuisinePin" FROM "Restaurant" WHERE id = ${restaurant.id}
+    // Single query — restaurant identity + cuisinePin in one round-trip.
+    const rows = await prisma.$queryRaw<Array<{ id: string; name: string; cuisinePin: string | null }>>`
+      SELECT id, name, "cuisinePin" FROM "Restaurant" WHERE slug = ${slug}
     `;
-    const storedPin = rows[0]?.cuisinePin ?? null;
+    const restaurant = rows[0] ? { id: rows[0].id, name: rows[0].name } : null;
+    if (!restaurant) return reply.code(404).send({ error: "RESTAURANT_NOT_FOUND" });
+    const storedPin = rows[0].cuisinePin ?? null;
 
     if (!storedPin) return reply.code(503).send({ error: "CUISINE_NOT_CONFIGURED", message: "PIN cuisine non configuré. Contactez le gérant." });
     if (storedPin !== pin) return reply.code(401).send({ error: "INVALID_PIN" });
