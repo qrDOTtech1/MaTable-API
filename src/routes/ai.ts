@@ -1443,10 +1443,12 @@ Réponds UNIQUEMENT en JSON valide avec ce format EXACT:
         result = JSON.parse(raw);
         // Force the missing properties if the AI missed them so they exist for the frontend
         if (result.improvements && Array.isArray(result.improvements)) {
+          // Build O(1) lookup map once to avoid O(n*m) .find() per improvement
+          const menuItemNameById = new Map(menuItems.map(m => [m.id, m.name]));
           result.improvements = result.improvements.map((imp: any) => {
              // Retrouver le nom du plat si manquant
              if (!imp.dishName && imp.menuItemId) {
-                imp.dishName = menuItems.find(m => m.id === imp.menuItemId)?.name || `Plat #${imp.menuItemId}`;
+                imp.dishName = menuItemNameById.get(imp.menuItemId) || `Plat #${imp.menuItemId}`;
              }
              if (!imp.newBeverageSuggestions) imp.newBeverageSuggestions = [];
              return imp;
@@ -1570,17 +1572,19 @@ Réponds UNIQUEMENT en JSON valide avec ce format EXACT:
     const totalRealPurchaseCost = shoppingRows.reduce((s, r) => s + (r.realCost ?? 0), 0);
     const totalEstimatedPurchase = shoppingRows.reduce((s, r) => s + r.estimatedBudget, 0);
 
-    const menuItems = await prisma.menuItem.findMany({
-      where: { restaurantId: me.restaurantId },
-      select: { name: true, priceCents: true, category: true, available: true },
-    });
-
-    const orders = await prisma.order.findMany({
-      where: { table: { restaurantId: me.restaurantId }, createdAt: { gte: since }, status: { not: "CANCELLED" } },
-      select: { items: true, totalCents: true, createdAt: true },
-      orderBy: { createdAt: "asc" },
-      take: 1000,
-    });
+    // Parallelize independent reads to roughly halve wall-time before AI call
+    const [menuItems, orders] = await Promise.all([
+      prisma.menuItem.findMany({
+        where: { restaurantId: me.restaurantId },
+        select: { name: true, priceCents: true, category: true, available: true },
+      }),
+      prisma.order.findMany({
+        where: { table: { restaurantId: me.restaurantId }, createdAt: { gte: since }, status: { not: "CANCELLED" } },
+        select: { items: true, totalCents: true, createdAt: true },
+        orderBy: { createdAt: "asc" },
+        take: 1000,
+      }),
+    ]);
 
     // Aggregate revenue by day
     const revenueByDay: Record<string, number> = {};
