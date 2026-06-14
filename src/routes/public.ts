@@ -302,34 +302,37 @@ export async function publicRoutes(app: FastifyInstance) {
 
   app.get("/tables/:tableId", async (req, reply) => {
     const { tableId } = req.params as { tableId: string };
-    const table = await prisma.table.findUnique({
-      where: { id: tableId },
-      include: {
-        assignedServer: { select: { id: true, name: true, photoUrl: true } },
-        restaurant: {
-          select: {
-            id: true,
-            name: true,
-            slug: true,
-            tipsEnabled: true,
-            reviewsEnabled: true,
-            serviceCallEnabled: true,
-            openingHours: { orderBy: { dayOfWeek: "asc" } },
-            menuItems: { where: { available: true }, orderBy: { category: "asc" } },
+    // Table + restaurant tree and the active session lookup are both keyed on
+    // tableId from the URL — fetch them in parallel.
+    const [table, activeSession] = await Promise.all([
+      prisma.table.findUnique({
+        where: { id: tableId },
+        include: {
+          assignedServer: { select: { id: true, name: true, photoUrl: true } },
+          restaurant: {
+            select: {
+              id: true,
+              name: true,
+              slug: true,
+              tipsEnabled: true,
+              reviewsEnabled: true,
+              serviceCallEnabled: true,
+              openingHours: { orderBy: { dayOfWeek: "asc" } },
+              menuItems: { where: { available: true }, orderBy: { category: "asc" } },
+            },
           },
         },
-      },
-    });
+      }),
+      prisma.tableSession.findFirst({
+        where: { tableId, active: true },
+        include: { server: { select: { id: true, name: true, photoUrl: true } } },
+        orderBy: { createdAt: "desc" },
+      }),
+    ]);
     if (!table) return reply.code(404).send({ error: "table_not_found" });
 
-    // Also check for an active session's server (may differ from default)
-    let sessionServer = null;
-    const activeSession = await prisma.tableSession.findFirst({
-      where: { tableId, active: true },
-      include: { server: { select: { id: true, name: true, photoUrl: true } } },
-      orderBy: { createdAt: "desc" },
-    });
-    if (activeSession?.server) sessionServer = activeSession.server;
+    // Active session's server may differ from the table's default assignment.
+    const sessionServer = activeSession?.server ?? null;
 
     const server = sessionServer ?? table.assignedServer ?? null;
 
@@ -1865,19 +1868,17 @@ Ne renvoie STRICTEMENT rien d'autre que ce JSON (pas de bloc Markdown \`\`\`json
       });
     }
 
-    // Dish reviews
+    // Dish reviews — batched in a single INSERT (was N round-trips).
     if (body.dishReviews && body.dishReviews.length > 0) {
-      for (const dr of body.dishReviews) {
-        await prisma.dishReview.create({
-          data: {
-            restaurantId: decoded.restaurantId,
-            menuItemId: dr.menuItemId,
-            orderId: latestOrder?.id,
-            rating: dr.rating,
-            comment: dr.comment ?? null,
-          },
-        });
-      }
+      await prisma.dishReview.createMany({
+        data: body.dishReviews.map((dr) => ({
+          restaurantId: decoded.restaurantId,
+          menuItemId: dr.menuItemId,
+          orderId: latestOrder?.id,
+          rating: dr.rating,
+          comment: dr.comment ?? null,
+        })),
+      });
     }
 
     return { ok: true };
