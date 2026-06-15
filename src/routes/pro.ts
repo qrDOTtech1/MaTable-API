@@ -565,15 +565,28 @@ export async function proRoutes(app: FastifyInstance) {
 
   app.get("/me", async (req, reply) => {
     const me = await requirePro(req, reply);
-    const restaurant = await prisma.restaurant.findUnique({
-      where: { id: me.restaurantId },
-      include: { openingHours: { orderBy: [{ dayOfWeek: "asc" }, { openMin: "asc" }] } },
-    });
-    
+
+    // Fan out the four independent reads in parallel — they all key off restaurantId
+    // and previously executed sequentially on every dashboard load.
+    const [restaurant, configRaw, qaRawResult, enabledApps] = await Promise.all([
+      prisma.restaurant.findUnique({
+        where: { id: me.restaurantId },
+        include: { openingHours: { orderBy: [{ dayOfWeek: "asc" }, { openMin: "asc" }] } },
+      }),
+      prisma.$queryRawUnsafe<any[]>(
+        `SELECT "googleReviewLink", "reviewVoucherConfig", "businessType", "reviewCustomQuestions", "serverUniqueReviewQr", "reviewRatingCategories", "reservationAlertEmail", "reservationAlertEmails" FROM "Restaurant" WHERE id = $1`,
+        me.restaurantId,
+      ),
+      prisma.$queryRawUnsafe<any[]>(
+        `SELECT "dashboardQuickActions", "dashboardBottomNav", "onboardingCompleted",
+                "cgvAcceptedAt", "cgvSignatureName", "cgvContractData"
+           FROM "Restaurant" WHERE id = $1`,
+        me.restaurantId,
+      ).catch(() => null),
+      getEnabledApps(me.restaurantId),
+    ]);
+
     if (restaurant) {
-      const configRaw = await prisma.$queryRawUnsafe<any[]>(
-        `SELECT "googleReviewLink", "reviewVoucherConfig", "businessType", "reviewCustomQuestions", "serverUniqueReviewQr", "reviewRatingCategories", "reservationAlertEmail", "reservationAlertEmails" FROM "Restaurant" WHERE id = $1`, me.restaurantId
-      );
       (restaurant as any).googleReviewLink = configRaw[0]?.googleReviewLink || null;
       (restaurant as any).reviewVoucherConfig = configRaw[0]?.reviewVoucherConfig || null;
       (restaurant as any).businessType = configRaw[0]?.businessType || "RESTAURANT";
@@ -586,12 +599,8 @@ export async function proRoutes(app: FastifyInstance) {
         : (configRaw[0]?.reservationAlertEmail ? [configRaw[0].reservationAlertEmail] : []);
 
       // Colonnes hors schéma Prisma : raccourcis dashboard + onboarding + signature CGV
-      try {
-        const qaRaw = await prisma.$queryRawUnsafe<any[]>(
-          `SELECT "dashboardQuickActions", "dashboardBottomNav", "onboardingCompleted",
-                  "cgvAcceptedAt", "cgvSignatureName", "cgvContractData"
-             FROM "Restaurant" WHERE id = $1`, me.restaurantId
-        );
+      if (qaRawResult) {
+        const qaRaw = qaRawResult;
         (restaurant as any).dashboardQuickActions = Array.isArray(qaRaw[0]?.dashboardQuickActions)
           ? qaRaw[0].dashboardQuickActions
           : [];
@@ -602,7 +611,7 @@ export async function proRoutes(app: FastifyInstance) {
         (restaurant as any).cgvAcceptedAt = qaRaw[0]?.cgvAcceptedAt ?? null;
         (restaurant as any).cgvSignatureName = qaRaw[0]?.cgvSignatureName ?? null;
         (restaurant as any).cgvContractData = qaRaw[0]?.cgvContractData ?? null;
-      } catch {
+      } else {
         (restaurant as any).dashboardQuickActions = [];
         (restaurant as any).dashboardBottomNav = [];
         (restaurant as any).onboardingCompleted = true;
@@ -612,8 +621,6 @@ export async function proRoutes(app: FastifyInstance) {
       }
     }
 
-    const enabledApps = await getEnabledApps(me.restaurantId);
-    
     return { userId: me.userId, restaurant, enabledApps: [...enabledApps] };
   });
 
@@ -2645,18 +2652,28 @@ export async function proRoutes(app: FastifyInstance) {
       })).min(1).max(100),
     }).parse(req.body);
 
-    const created: StockProductRow[] = [];
-    for (const p of body.products) {
-      const id = crypto.randomUUID();
-      await prisma.$executeRawUnsafe(
-        `INSERT INTO "StockProduct" (id, "restaurantId", name, unit, category, "isFresh",
-           "currentQty", "lowThreshold", "weeklyEstimate", notes, "linkedDishes", "updatedAt", "createdAt")
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, NOW(), NOW())`,
-        id, me.restaurantId, p.name, p.unit, p.category, p.isFresh,
-        p.currentQty, p.lowThreshold, p.weeklyEstimate,
-        p.notes ?? null, JSON.stringify(p.linkedDishes)
+    // Batch all inserts into one transaction round-trip instead of N sequential queries.
+    const created: StockProductRow[] = body.products.map((p) => ({
+      id: crypto.randomUUID(),
+      restaurantId: me.restaurantId,
+      ...p,
+      notes: p.notes ?? null,
+      updatedAt: new Date(),
+      createdAt: new Date(),
+    }));
+    if (created.length > 0) {
+      await prisma.$transaction(
+        created.map((row) =>
+          prisma.$executeRawUnsafe(
+            `INSERT INTO "StockProduct" (id, "restaurantId", name, unit, category, "isFresh",
+               "currentQty", "lowThreshold", "weeklyEstimate", notes, "linkedDishes", "updatedAt", "createdAt")
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, NOW(), NOW())`,
+            row.id, row.restaurantId, row.name, row.unit, row.category, row.isFresh,
+            row.currentQty, row.lowThreshold, row.weeklyEstimate,
+            row.notes, JSON.stringify(row.linkedDishes),
+          ),
+        ),
       );
-      created.push({ id, restaurantId: me.restaurantId, ...p, notes: p.notes ?? null, updatedAt: new Date(), createdAt: new Date() });
     }
     return { created: created.length };
   });
