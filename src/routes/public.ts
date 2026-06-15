@@ -885,26 +885,40 @@ export async function publicRoutes(app: FastifyInstance) {
         : [];
       const validPhotoSet = new Set<string>(validPhotos.map((p: any) => p.id));
 
-      for (const dr of body.dishReviews) {
-        const item = validById.get(dr.menuItemId);
-        if (!item) continue;
+      const preparedReviews = body.dishReviews
+        .map((dr) => {
+          const item = validById.get(dr.menuItemId);
+          if (!item) return null;
+          const cleanPhotoIds = (dr.photoIds ?? []).filter(id => validPhotoSet.has(id));
+          const flags = detectFlagsWithRating(dr.rating, dr.comment);
+          return { dr, item, cleanPhotoIds, flags };
+        })
+        .filter((x): x is NonNullable<typeof x> => x !== null);
 
-        const cleanPhotoIds = (dr.photoIds ?? []).filter(id => validPhotoSet.has(id));
-        const flags = detectFlagsWithRating(dr.rating, dr.comment);
+      // Batch all dish-review writes into a single DB round-trip instead of N sequential creates.
+      const createdReviews = preparedReviews.length
+        ? await prisma.$transaction(
+            preparedReviews.map(({ dr, cleanPhotoIds, flags }) =>
+              prisma.dishReview.create({
+                data: {
+                  restaurantId: r.id,
+                  menuItemId: dr.menuItemId,
+                  rating: dr.rating,
+                  comment: dr.comment ?? null,
+                  photoIds: cleanPhotoIds,
+                  flagged: flags.flagged,
+                  flagReasons: flags.reasons,
+                  verified: false,
+                },
+                select: { id: true, rating: true, comment: true, photoIds: true, flagged: true, flagReasons: true, createdAt: true },
+              })
+            )
+          )
+        : [];
 
-        const created = await prisma.dishReview.create({
-          data: {
-            restaurantId: r.id,
-            menuItemId: dr.menuItemId,
-            rating: dr.rating,
-            comment: dr.comment ?? null,
-            photoIds: cleanPhotoIds,
-            flagged: flags.flagged,
-            flagReasons: flags.reasons,
-            verified: false,
-          },
-          select: { id: true, rating: true, comment: true, photoIds: true, flagged: true, flagReasons: true, createdAt: true },
-        });
+      for (let i = 0; i < createdReviews.length; i++) {
+        const created = createdReviews[i];
+        const { item } = preparedReviews[i];
         dishReviewIds.push(created.id);
 
         emitToRestaurant(r.id, "review:new", {
