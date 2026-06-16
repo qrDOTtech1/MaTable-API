@@ -629,25 +629,25 @@ export async function publicRoutes(app: FastifyInstance) {
     if (!customers[0]) return reply.code(404).send({ error: "not_found" });
     const customer = customers[0];
 
-    // Transactions récentes
-    const transactions = await prisma.$queryRawUnsafe<Array<{
-      id: string; type: string; points: number; description: string|null; createdAt: string;
-    }>>(
-      `SELECT id, type, points, description, "createdAt"::text FROM "LoyaltyTransaction"
-       WHERE "customerId" = $1 ORDER BY "createdAt" DESC LIMIT 20`,
-      customer.id
-    );
-
-    // Offres actives du restaurant
-    const offers = await prisma.$queryRawUnsafe<Array<{
-      id: string; name: string; description: string|null; type: string;
-      pointsCost: number; minTier: string|null; active: boolean;
-    }>>(
-      `SELECT id, name, description, type, "pointsCost", "minTier", active
-       FROM "LoyaltyOffer" WHERE "restaurantId" = $1 AND active = true
-       ORDER BY "pointsCost" ASC`,
-      restaurant.id
-    );
+    // Transactions et offres sont indépendantes → un seul aller-retour DB
+    const [transactions, offers] = await Promise.all([
+      prisma.$queryRawUnsafe<Array<{
+        id: string; type: string; points: number; description: string|null; createdAt: string;
+      }>>(
+        `SELECT id, type, points, description, "createdAt"::text FROM "LoyaltyTransaction"
+         WHERE "customerId" = $1 ORDER BY "createdAt" DESC LIMIT 20`,
+        customer.id
+      ),
+      prisma.$queryRawUnsafe<Array<{
+        id: string; name: string; description: string|null; type: string;
+        pointsCost: number; minTier: string|null; active: boolean;
+      }>>(
+        `SELECT id, name, description, type, "pointsCost", "minTier", active
+         FROM "LoyaltyOffer" WHERE "restaurantId" = $1 AND active = true
+         ORDER BY "pointsCost" ASC`,
+        restaurant.id
+      ),
+    ]);
 
     return { customer: { ...customer, transactions, offers } };
   });
@@ -676,23 +676,25 @@ export async function publicRoutes(app: FastifyInstance) {
     if (!customers[0]) return reply.code(404).send({ error: "not_found" });
     const customer = customers[0];
 
-    const transactions = await prisma.$queryRawUnsafe<Array<{
-      id: string; type: string; points: number; description: string|null; createdAt: string;
-    }>>(
-      `SELECT id, type, points, description, "createdAt"::text FROM "LoyaltyTransaction"
-       WHERE "customerId" = $1 ORDER BY "createdAt" DESC LIMIT 30`,
-      customer.id
-    );
-
-    const offers = await prisma.$queryRawUnsafe<Array<{
-      id: string; name: string; description: string|null; type: string;
-      pointsCost: number; minTier: string|null;
-    }>>(
-      `SELECT id, name, description, type, "pointsCost", "minTier"
-       FROM "LoyaltyOffer" WHERE "restaurantId" = $1 AND active = true
-       ORDER BY "pointsCost" ASC`,
-      restaurant.id
-    );
+    // Transactions et offres sont indépendantes → un seul aller-retour DB
+    const [transactions, offers] = await Promise.all([
+      prisma.$queryRawUnsafe<Array<{
+        id: string; type: string; points: number; description: string|null; createdAt: string;
+      }>>(
+        `SELECT id, type, points, description, "createdAt"::text FROM "LoyaltyTransaction"
+         WHERE "customerId" = $1 ORDER BY "createdAt" DESC LIMIT 30`,
+        customer.id
+      ),
+      prisma.$queryRawUnsafe<Array<{
+        id: string; name: string; description: string|null; type: string;
+        pointsCost: number; minTier: string|null;
+      }>>(
+        `SELECT id, name, description, type, "pointsCost", "minTier"
+         FROM "LoyaltyOffer" WHERE "restaurantId" = $1 AND active = true
+         ORDER BY "pointsCost" ASC`,
+        restaurant.id
+      ),
+    ]);
 
     return {
       customer: { ...customer, transactions, offers },
