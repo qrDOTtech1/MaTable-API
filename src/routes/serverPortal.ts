@@ -167,7 +167,7 @@ export async function serverPortalRoutes(app: FastifyInstance) {
     today.setHours(0, 0, 0, 0);
     const tomorrow = new Date(today); tomorrow.setDate(tomorrow.getDate() + 1);
 
-    const [server, restaurant, globalChallenges] = await Promise.all([
+    const [server, restaurant, globalChallenges, enabledApps] = await Promise.all([
       prisma.server.findUnique({
         where: { id: me.serverId },
         include: {
@@ -192,10 +192,10 @@ export async function serverPortalRoutes(app: FastifyInstance) {
         },
         orderBy: { createdAt: "asc" },
       }),
+      getEnabledApps(me.restaurantId),
     ]);
 
     if (!server) return reply.code(404).send({ error: "NOT_FOUND" });
-    const enabledApps = await getEnabledApps(me.restaurantId);
     return { server: { ...server, globalChallenges }, restaurant: { ...restaurant, enabledApps: [...enabledApps] } };
   });
 
