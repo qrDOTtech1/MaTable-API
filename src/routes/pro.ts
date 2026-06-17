@@ -2645,19 +2645,25 @@ export async function proRoutes(app: FastifyInstance) {
       })).min(1).max(100),
     }).parse(req.body);
 
-    const created: StockProductRow[] = [];
-    for (const p of body.products) {
-      const id = crypto.randomUUID();
-      await prisma.$executeRawUnsafe(
+    // Bulk insert in parallel — body.products is capped at 100 by the zod schema.
+    const created: StockProductRow[] = body.products.map((p) => ({
+      id: crypto.randomUUID(),
+      restaurantId: me.restaurantId,
+      ...p,
+      notes: p.notes ?? null,
+      updatedAt: new Date(),
+      createdAt: new Date(),
+    }));
+    await Promise.all(created.map((p) =>
+      prisma.$executeRawUnsafe(
         `INSERT INTO "StockProduct" (id, "restaurantId", name, unit, category, "isFresh",
            "currentQty", "lowThreshold", "weeklyEstimate", notes, "linkedDishes", "updatedAt", "createdAt")
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, NOW(), NOW())`,
-        id, me.restaurantId, p.name, p.unit, p.category, p.isFresh,
+        p.id, me.restaurantId, p.name, p.unit, p.category, p.isFresh,
         p.currentQty, p.lowThreshold, p.weeklyEstimate,
-        p.notes ?? null, JSON.stringify(p.linkedDishes)
-      );
-      created.push({ id, restaurantId: me.restaurantId, ...p, notes: p.notes ?? null, updatedAt: new Date(), createdAt: new Date() });
-    }
+        p.notes, JSON.stringify(p.linkedDishes),
+      ),
+    ));
     return { created: created.length };
   });
 
@@ -2741,30 +2747,39 @@ export async function proRoutes(app: FastifyInstance) {
       body.realCost, body.notes ?? null, id, me.restaurantId,
     );
 
-    // Mettre à jour currentQty dans StockProduct pour chaque article acheté, ou le créer
+    // Mettre à jour currentQty dans StockProduct pour chaque article acheté, ou le créer.
+    // Avant : 1 UPDATE + parfois 1 INSERT par article, séquentiel — N+1 sur la liste.
+    // Après : 1 SELECT pour identifier les noms existants, puis UPDATE/INSERT en parallèle.
     const shoppingList: Array<{ ingredient: string; toBuy: number; unit: string; category?: string }> = rows[0].shoppingList ?? [];
+    const items = shoppingList.filter((i) => i.ingredient && i.toBuy && i.toBuy > 0);
     let stockUpdated = 0;
-    for (const item of shoppingList) {
-      if (!item.ingredient || !item.toBuy || item.toBuy <= 0) continue;
-      // Chercher par nom (case-insensitive)
-      const updated = await prisma.$executeRawUnsafe(
-        `UPDATE "StockProduct"
-         SET "currentQty" = "currentQty" + $1, "updatedAt" = NOW()
-         WHERE "restaurantId" = $2 AND LOWER(name) = LOWER($3)`,
-        item.toBuy, me.restaurantId, item.ingredient,
-      );
-      if (Number(updated) > 0) {
-        stockUpdated++;
-      } else {
-        // Si le produit n'existe pas, on le crée
+    if (items.length > 0) {
+      const lowerNames = items.map((i) => i.ingredient.toLowerCase());
+      const existing = await prisma.$queryRaw<{ name_lower: string }[]>`
+        SELECT LOWER(name) AS name_lower
+        FROM "StockProduct"
+        WHERE "restaurantId" = ${me.restaurantId}
+          AND LOWER(name) = ANY(${lowerNames}::text[])
+      `;
+      const existingSet = new Set(existing.map((r) => r.name_lower));
+
+      await Promise.all(items.map((item) => {
+        if (existingSet.has(item.ingredient.toLowerCase())) {
+          return prisma.$executeRawUnsafe(
+            `UPDATE "StockProduct"
+             SET "currentQty" = "currentQty" + $1, "updatedAt" = NOW()
+             WHERE "restaurantId" = $2 AND LOWER(name) = LOWER($3)`,
+            item.toBuy, me.restaurantId, item.ingredient,
+          );
+        }
         const newId = crypto.randomUUID();
-        await prisma.$executeRawUnsafe(
+        return prisma.$executeRawUnsafe(
           `INSERT INTO "StockProduct" (id, "restaurantId", name, unit, category, "currentQty", "updatedAt", "createdAt")
            VALUES ($1, $2, $3, $4, $5, $6, NOW(), NOW())`,
-          newId, me.restaurantId, item.ingredient, item.unit || "unité(s)", item.category || "Autre", item.toBuy
+          newId, me.restaurantId, item.ingredient, item.unit || "unité(s)", item.category || "Autre", item.toBuy,
         );
-        stockUpdated++;
-      }
+      }));
+      stockUpdated = items.length;
     }
 
     return { ok: true, stockUpdated };
