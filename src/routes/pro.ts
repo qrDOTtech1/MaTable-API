@@ -2645,18 +2645,35 @@ export async function proRoutes(app: FastifyInstance) {
       })).min(1).max(100),
     }).parse(req.body);
 
-    const created: StockProductRow[] = [];
-    for (const p of body.products) {
-      const id = crypto.randomUUID();
+    const created: StockProductRow[] = body.products.map((p) => ({
+      id: crypto.randomUUID(),
+      restaurantId: me.restaurantId,
+      ...p,
+      notes: p.notes ?? null,
+      updatedAt: new Date(),
+      createdAt: new Date(),
+    }));
+
+    if (created.length > 0) {
+      // Batched multi-row INSERT — avoids N round-trips and ships a single statement.
+      const cols = 11; // matches the column list below
+      const placeholders = created
+        .map((_, i) => {
+          const o = i * cols;
+          return `($${o + 1}, $${o + 2}, $${o + 3}, $${o + 4}, $${o + 5}, $${o + 6}, $${o + 7}, $${o + 8}, $${o + 9}, $${o + 10}, $${o + 11}::jsonb, NOW(), NOW())`;
+        })
+        .join(", ");
+      const params: any[] = [];
+      for (const r of created) {
+        params.push(r.id, r.restaurantId, r.name, r.unit, r.category, r.isFresh,
+          r.currentQty, r.lowThreshold, r.weeklyEstimate, r.notes, JSON.stringify(r.linkedDishes));
+      }
       await prisma.$executeRawUnsafe(
         `INSERT INTO "StockProduct" (id, "restaurantId", name, unit, category, "isFresh",
            "currentQty", "lowThreshold", "weeklyEstimate", notes, "linkedDishes", "updatedAt", "createdAt")
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, NOW(), NOW())`,
-        id, me.restaurantId, p.name, p.unit, p.category, p.isFresh,
-        p.currentQty, p.lowThreshold, p.weeklyEstimate,
-        p.notes ?? null, JSON.stringify(p.linkedDishes)
+         VALUES ${placeholders}`,
+        ...params,
       );
-      created.push({ id, restaurantId: me.restaurantId, ...p, notes: p.notes ?? null, updatedAt: new Date(), createdAt: new Date() });
     }
     return { created: created.length };
   });
