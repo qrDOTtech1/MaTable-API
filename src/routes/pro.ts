@@ -2645,18 +2645,46 @@ export async function proRoutes(app: FastifyInstance) {
       })).min(1).max(100),
     }).parse(req.body);
 
-    const created: StockProductRow[] = [];
-    for (const p of body.products) {
-      const id = crypto.randomUUID();
+    // Bulk insert in a single round trip via unnest — replaces N×INSERT.
+    const created: StockProductRow[] = body.products.map((p) => ({
+      id: crypto.randomUUID(),
+      restaurantId: me.restaurantId,
+      ...p,
+      notes: p.notes ?? null,
+      updatedAt: new Date(),
+      createdAt: new Date(),
+    }));
+
+    if (created.length > 0) {
       await prisma.$executeRawUnsafe(
         `INSERT INTO "StockProduct" (id, "restaurantId", name, unit, category, "isFresh",
            "currentQty", "lowThreshold", "weeklyEstimate", notes, "linkedDishes", "updatedAt", "createdAt")
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, NOW(), NOW())`,
-        id, me.restaurantId, p.name, p.unit, p.category, p.isFresh,
-        p.currentQty, p.lowThreshold, p.weeklyEstimate,
-        p.notes ?? null, JSON.stringify(p.linkedDishes)
+         SELECT id, $2, name, unit, category, "isFresh",
+                "currentQty", "lowThreshold", "weeklyEstimate", notes, "linkedDishes"::jsonb, NOW(), NOW()
+         FROM (
+           SELECT unnest($1::text[])    AS id,
+                  unnest($3::text[])    AS name,
+                  unnest($4::text[])    AS unit,
+                  unnest($5::text[])    AS category,
+                  unnest($6::bool[])    AS "isFresh",
+                  unnest($7::numeric[]) AS "currentQty",
+                  unnest($8::numeric[]) AS "lowThreshold",
+                  unnest($9::numeric[]) AS "weeklyEstimate",
+                  unnest($10::text[])   AS notes,
+                  unnest($11::text[])   AS "linkedDishes"
+         ) AS t`,
+        created.map((c) => c.id),
+        me.restaurantId,
+        created.map((c) => c.name),
+        created.map((c) => c.unit),
+        created.map((c) => c.category),
+        created.map((c) => c.isFresh),
+        created.map((c) => c.currentQty),
+        created.map((c) => c.lowThreshold),
+        created.map((c) => c.weeklyEstimate),
+        created.map((c) => c.notes),
+        created.map((c) => JSON.stringify(c.linkedDishes)),
       );
-      created.push({ id, restaurantId: me.restaurantId, ...p, notes: p.notes ?? null, updatedAt: new Date(), createdAt: new Date() });
     }
     return { created: created.length };
   });

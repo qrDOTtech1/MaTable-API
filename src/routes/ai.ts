@@ -1508,21 +1508,31 @@ Réponds UNIQUEMENT en JSON valide avec ce format EXACT:
       })).min(1).max(50),
     }).parse(req.body);
 
-    const created = [];
-    for (const item of items) {
-      const { waitMinutes, ...prismaData } = item;
-      const mi = await prisma.menuItem.create({
-        data: {
-          ...prismaData,
-          allergens: (prismaData.allergens ?? []) as any,
-          diets: (prismaData.diets ?? []) as any,
-          restaurantId: me.restaurantId,
-        } as any,
-      });
-      if (waitMinutes && waitMinutes > 0) {
-        await prisma.$executeRaw`UPDATE "MenuItem" SET "waitMinutes" = ${waitMinutes} WHERE id = ${mi.id}`;
-      }
-      created.push(mi);
+    // Batch-create all items in a single round trip, then a single bulk-UPDATE
+    // for any waitMinutes overrides. Replaces N×INSERT (+ N×UPDATE) pattern.
+    const created = await prisma.menuItem.createManyAndReturn({
+      data: items.map(({ waitMinutes: _w, ...rest }) => ({
+        ...rest,
+        allergens: (rest.allergens ?? []) as any,
+        diets: (rest.diets ?? []) as any,
+        restaurantId: me.restaurantId,
+      })) as any,
+    });
+
+    const waitOverrides = created
+      .map((mi, idx) => ({ id: mi.id, waitMinutes: items[idx]?.waitMinutes }))
+      .filter((x): x is { id: string; waitMinutes: number } => !!x.waitMinutes && x.waitMinutes > 0);
+
+    if (waitOverrides.length > 0) {
+      // Single bulk UPDATE via FROM unnest — one round trip regardless of N.
+      const ids = waitOverrides.map((w) => w.id);
+      const mins = waitOverrides.map((w) => w.waitMinutes);
+      await prisma.$executeRawUnsafe(
+        `UPDATE "MenuItem" AS m SET "waitMinutes" = v.minutes
+         FROM (SELECT unnest($1::text[]) AS id, unnest($2::int[]) AS minutes) AS v
+         WHERE m.id = v.id`,
+        ids, mins,
+      );
     }
 
     return { ok: true, count: created.length, items: created };

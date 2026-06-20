@@ -885,52 +885,61 @@ export async function publicRoutes(app: FastifyInstance) {
         : [];
       const validPhotoSet = new Set<string>(validPhotos.map((p: any) => p.id));
 
-      for (const dr of body.dishReviews) {
-        const item = validById.get(dr.menuItemId);
-        if (!item) continue;
-
-        const cleanPhotoIds = (dr.photoIds ?? []).filter(id => validPhotoSet.has(id));
-        const flags = detectFlagsWithRating(dr.rating, dr.comment);
-
-        const created = await prisma.dishReview.create({
-          data: {
+      // Batch-insert all dish reviews in a single round trip, then iterate
+      // the returned rows for realtime emits. createManyAndReturn (Prisma 5.14+,
+      // PostgreSQL only) replaces the previous N×INSERT pattern.
+      const reviewsData = body.dishReviews
+        .filter((dr) => validById.has(dr.menuItemId))
+        .map((dr) => {
+          const flags = detectFlagsWithRating(dr.rating, dr.comment);
+          return {
             restaurantId: r.id,
             menuItemId: dr.menuItemId,
             rating: dr.rating,
             comment: dr.comment ?? null,
-            photoIds: cleanPhotoIds,
+            photoIds: (dr.photoIds ?? []).filter((id) => validPhotoSet.has(id)),
             flagged: flags.flagged,
             flagReasons: flags.reasons,
             verified: false,
-          },
-          select: { id: true, rating: true, comment: true, photoIds: true, flagged: true, flagReasons: true, createdAt: true },
-        });
-        dishReviewIds.push(created.id);
-
-        emitToRestaurant(r.id, "review:new", {
-          kind: "dish",
-          review: {
-            id: created.id,
-            rating: created.rating,
-            comment: created.comment,
-            photoIds: created.photoIds,
-            flagged: created.flagged,
-            flagReasons: created.flagReasons,
-            createdAt: created.createdAt,
-            menuItem: { id: item.id, name: item.name },
-          },
+          };
         });
 
-        if (created.flagged) {
-          emitToRestaurant(r.id, "review:flagged", {
+      if (reviewsData.length > 0) {
+        const createdReviews = await prisma.dishReview.createManyAndReturn({
+          data: reviewsData,
+          select: { id: true, menuItemId: true, rating: true, comment: true, photoIds: true, flagged: true, flagReasons: true, createdAt: true },
+        });
+
+        for (const created of createdReviews) {
+          const item = validById.get(created.menuItemId);
+          if (!item) continue;
+          dishReviewIds.push(created.id);
+
+          emitToRestaurant(r.id, "review:new", {
             kind: "dish",
-            id: created.id,
-            reasons: created.flagReasons,
-            label: item.name,
-            rating: created.rating,
-            comment: created.comment,
-            createdAt: created.createdAt,
+            review: {
+              id: created.id,
+              rating: created.rating,
+              comment: created.comment,
+              photoIds: created.photoIds,
+              flagged: created.flagged,
+              flagReasons: created.flagReasons,
+              createdAt: created.createdAt,
+              menuItem: { id: item.id, name: item.name },
+            },
           });
+
+          if (created.flagged) {
+            emitToRestaurant(r.id, "review:flagged", {
+              kind: "dish",
+              id: created.id,
+              reasons: created.flagReasons,
+              label: item.name,
+              rating: created.rating,
+              comment: created.comment,
+              createdAt: created.createdAt,
+            });
+          }
         }
       }
     }
@@ -1867,17 +1876,15 @@ Ne renvoie STRICTEMENT rien d'autre que ce JSON (pas de bloc Markdown \`\`\`json
 
     // Dish reviews
     if (body.dishReviews && body.dishReviews.length > 0) {
-      for (const dr of body.dishReviews) {
-        await prisma.dishReview.create({
-          data: {
-            restaurantId: decoded.restaurantId,
-            menuItemId: dr.menuItemId,
-            orderId: latestOrder?.id,
-            rating: dr.rating,
-            comment: dr.comment ?? null,
-          },
-        });
-      }
+      await prisma.dishReview.createMany({
+        data: body.dishReviews.map((dr) => ({
+          restaurantId: decoded.restaurantId,
+          menuItemId: dr.menuItemId,
+          orderId: latestOrder?.id,
+          rating: dr.rating,
+          comment: dr.comment ?? null,
+        })),
+      });
     }
 
     return { ok: true };
