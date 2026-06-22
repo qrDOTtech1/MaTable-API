@@ -1460,23 +1460,24 @@ Réponds UNIQUEMENT en JSON valide avec ce format EXACT:
 
       // Application des modifications directement via ensure_columns.sql logic
       const improvements = Array.isArray(result.improvements) ? result.improvements : [];
-      let updatedCount = 0;
       const allNewBeverages = new Set<string>();
-      
-      for (const imp of improvements) {
-        if (!imp.menuItemId) continue;
-        const pairings = Array.isArray(imp.suggestedPairings) ? imp.suggestedPairings : [];
-        const upsells = Array.isArray(imp.upsellItemIds) ? imp.upsellItemIds : [];
-        const newBevs = Array.isArray(imp.newBeverageSuggestions) ? imp.newBeverageSuggestions : [];
-        
-        newBevs.forEach((b: string) => allNewBeverages.add(b));
 
-        await prisma.$executeRawUnsafe(
-          `UPDATE "MenuItem" SET "suggestedPairings" = $1::jsonb, "upsellItems" = $2::jsonb WHERE id = $3 AND "restaurantId" = $4`,
-          JSON.stringify(pairings), JSON.stringify(upsells), imp.menuItemId, me.restaurantId
-        );
-        updatedCount++;
-      }
+      const updates = improvements
+        .filter((imp: any) => imp.menuItemId)
+        .map((imp: any) => {
+          const pairings = Array.isArray(imp.suggestedPairings) ? imp.suggestedPairings : [];
+          const upsells = Array.isArray(imp.upsellItemIds) ? imp.upsellItemIds : [];
+          const newBevs = Array.isArray(imp.newBeverageSuggestions) ? imp.newBeverageSuggestions : [];
+
+          newBevs.forEach((b: string) => allNewBeverages.add(b));
+
+          return prisma.$executeRawUnsafe(
+            `UPDATE "MenuItem" SET "suggestedPairings" = $1::jsonb, "upsellItems" = $2::jsonb WHERE id = $3 AND "restaurantId" = $4`,
+            JSON.stringify(pairings), JSON.stringify(upsells), imp.menuItemId, me.restaurantId
+          );
+        });
+      await Promise.all(updates);
+      const updatedCount = updates.length;
 
       send({ 
         type: "result", 
@@ -1508,22 +1509,23 @@ Réponds UNIQUEMENT en JSON valide avec ce format EXACT:
       })).min(1).max(50),
     }).parse(req.body);
 
-    const created = [];
-    for (const item of items) {
-      const { waitMinutes, ...prismaData } = item;
-      const mi = await prisma.menuItem.create({
-        data: {
-          ...prismaData,
-          allergens: (prismaData.allergens ?? []) as any,
-          diets: (prismaData.diets ?? []) as any,
-          restaurantId: me.restaurantId,
-        } as any,
-      });
-      if (waitMinutes && waitMinutes > 0) {
-        await prisma.$executeRaw`UPDATE "MenuItem" SET "waitMinutes" = ${waitMinutes} WHERE id = ${mi.id}`;
-      }
-      created.push(mi);
-    }
+    const created = await Promise.all(
+      items.map(async (item) => {
+        const { waitMinutes, ...prismaData } = item;
+        const mi = await prisma.menuItem.create({
+          data: {
+            ...prismaData,
+            allergens: (prismaData.allergens ?? []) as any,
+            diets: (prismaData.diets ?? []) as any,
+            restaurantId: me.restaurantId,
+          } as any,
+        });
+        if (waitMinutes && waitMinutes > 0) {
+          await prisma.$executeRaw`UPDATE "MenuItem" SET "waitMinutes" = ${waitMinutes} WHERE id = ${mi.id}`;
+        }
+        return mi;
+      })
+    );
 
     return { ok: true, count: created.length, items: created };
   });
