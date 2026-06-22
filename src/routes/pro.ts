@@ -2645,19 +2645,36 @@ export async function proRoutes(app: FastifyInstance) {
       })).min(1).max(100),
     }).parse(req.body);
 
-    const created: StockProductRow[] = [];
-    for (const p of body.products) {
-      const id = crypto.randomUUID();
+    const now = new Date();
+    const created: StockProductRow[] = body.products.map((p) => ({
+      id: crypto.randomUUID(),
+      restaurantId: me.restaurantId,
+      ...p,
+      notes: p.notes ?? null,
+      updatedAt: now,
+      createdAt: now,
+    }));
+
+    if (created.length > 0) {
+      const cols = 11;
+      const params: any[] = [];
+      const valueGroups = created.map((row, i) => {
+        const offset = i * cols;
+        params.push(
+          row.id, row.restaurantId, row.name, row.unit, row.category, row.isFresh,
+          row.currentQty, row.lowThreshold, row.weeklyEstimate,
+          row.notes, JSON.stringify(row.linkedDishes),
+        );
+        return `($${offset + 1}, $${offset + 2}, $${offset + 3}, $${offset + 4}, $${offset + 5}, $${offset + 6}, $${offset + 7}, $${offset + 8}, $${offset + 9}, $${offset + 10}, $${offset + 11}::jsonb, NOW(), NOW())`;
+      });
       await prisma.$executeRawUnsafe(
         `INSERT INTO "StockProduct" (id, "restaurantId", name, unit, category, "isFresh",
            "currentQty", "lowThreshold", "weeklyEstimate", notes, "linkedDishes", "updatedAt", "createdAt")
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, NOW(), NOW())`,
-        id, me.restaurantId, p.name, p.unit, p.category, p.isFresh,
-        p.currentQty, p.lowThreshold, p.weeklyEstimate,
-        p.notes ?? null, JSON.stringify(p.linkedDishes)
+         VALUES ${valueGroups.join(", ")}`,
+        ...params,
       );
-      created.push({ id, restaurantId: me.restaurantId, ...p, notes: p.notes ?? null, updatedAt: new Date(), createdAt: new Date() });
     }
+
     return { created: created.length };
   });
 
@@ -2743,30 +2760,43 @@ export async function proRoutes(app: FastifyInstance) {
 
     // Mettre à jour currentQty dans StockProduct pour chaque article acheté, ou le créer
     const shoppingList: Array<{ ingredient: string; toBuy: number; unit: string; category?: string }> = rows[0].shoppingList ?? [];
-    let stockUpdated = 0;
-    for (const item of shoppingList) {
-      if (!item.ingredient || !item.toBuy || item.toBuy <= 0) continue;
-      // Chercher par nom (case-insensitive)
-      const updated = await prisma.$executeRawUnsafe(
-        `UPDATE "StockProduct"
-         SET "currentQty" = "currentQty" + $1, "updatedAt" = NOW()
-         WHERE "restaurantId" = $2 AND LOWER(name) = LOWER($3)`,
-        item.toBuy, me.restaurantId, item.ingredient,
-      );
-      if (Number(updated) > 0) {
-        stockUpdated++;
-      } else {
-        // Si le produit n'existe pas, on le crée
-        const newId = crypto.randomUUID();
-        await prisma.$executeRawUnsafe(
-          `INSERT INTO "StockProduct" (id, "restaurantId", name, unit, category, "currentQty", "updatedAt", "createdAt")
-           VALUES ($1, $2, $3, $4, $5, $6, NOW(), NOW())`,
-          newId, me.restaurantId, item.ingredient, item.unit || "unité(s)", item.category || "Autre", item.toBuy
+    const validItems = shoppingList.filter((item) => item.ingredient && item.toBuy && item.toBuy > 0);
+
+    const updateResults = await Promise.all(
+      validItems.map((item) =>
+        prisma.$executeRawUnsafe(
+          `UPDATE "StockProduct"
+           SET "currentQty" = "currentQty" + $1, "updatedAt" = NOW()
+           WHERE "restaurantId" = $2 AND LOWER(name) = LOWER($3)`,
+          item.toBuy, me.restaurantId, item.ingredient,
+        )
+      )
+    );
+
+    const toCreate = validItems.filter((_, i) => Number(updateResults[i]) === 0);
+    if (toCreate.length > 0) {
+      const cols = 6;
+      const params: any[] = [];
+      const valueGroups = toCreate.map((item, i) => {
+        const offset = i * cols;
+        params.push(
+          crypto.randomUUID(),
+          me.restaurantId,
+          item.ingredient,
+          item.unit || "unité(s)",
+          item.category || "Autre",
+          item.toBuy,
         );
-        stockUpdated++;
-      }
+        return `($${offset + 1}, $${offset + 2}, $${offset + 3}, $${offset + 4}, $${offset + 5}, $${offset + 6}, NOW(), NOW())`;
+      });
+      await prisma.$executeRawUnsafe(
+        `INSERT INTO "StockProduct" (id, "restaurantId", name, unit, category, "currentQty", "updatedAt", "createdAt")
+         VALUES ${valueGroups.join(", ")}`,
+        ...params,
+      );
     }
 
+    const stockUpdated = validItems.length;
     return { ok: true, stockUpdated };
   });
 
