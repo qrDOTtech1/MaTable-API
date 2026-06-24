@@ -1413,13 +1413,16 @@ Ne renvoie STRICTEMENT rien d'autre que ce JSON (pas de bloc Markdown \`\`\`json
       orderBy: { seats: "asc" }, // préférer la table la plus petite qui convient
     });
 
-    // Tables déjà occupées sur ce créneau
+    // Tables déjà occupées sur ce créneau.
+    // Lower bound: a reservation cannot overlap our slot if it started more
+    // than 1 day before — caps the scan, which would otherwise grow forever.
+    const lookbackStart = new Date(startsAt.getTime() - 24 * 60 * 60_000);
     const overlapping = await prisma.reservation.findMany({
       where: {
         restaurantId: restaurant.id,
         status: { notIn: ["CANCELLED"] },
         tableId: { not: null },
-        startsAt: { lt: slotEnd },
+        startsAt: { gte: lookbackStart, lt: slotEnd },
       },
       select: { tableId: true, startsAt: true, durationMin: true },
     });
@@ -1664,20 +1667,19 @@ Ne renvoie STRICTEMENT rien d'autre que ce JSON (pas de bloc Markdown \`\`\`json
 
   app.get("/orders/mine", async (req, reply) => {
     const decoded = await requireSessionToken(req, reply);
-    const orders = await prisma.order.findMany({
-      where: { sessionId: decoded.sessionId },
-      orderBy: { createdAt: "desc" },
-    });
-
-    // Attach expectedReadyAt from raw (column added by ensure_columns.sql)
-    const ids = orders.map((o) => o.id);
     type EtaRow = { id: string; expectedReadyAt: Date | null };
-    let etaRows: EtaRow[] = [];
-    if (ids.length > 0) {
-      etaRows = await prisma.$queryRaw<EtaRow[]>`
-        SELECT id, "expectedReadyAt" FROM "Order" WHERE id = ANY(${ids}::text[])
-      `;
-    }
+    // Run both queries in parallel; ETA query is keyed by sessionId so it
+    // doesn't need the order IDs from the first query.
+    const [orders, etaRows] = await Promise.all([
+      prisma.order.findMany({
+        where: { sessionId: decoded.sessionId },
+        orderBy: { createdAt: "desc" },
+        take: 200,
+      }),
+      prisma.$queryRaw<EtaRow[]>`
+        SELECT id, "expectedReadyAt" FROM "Order" WHERE "sessionId" = ${decoded.sessionId}
+      `,
+    ]);
     const etaMap = new Map(etaRows.map((r) => [r.id, r.expectedReadyAt]));
 
     return {
