@@ -146,13 +146,16 @@ export async function stripeRoutes(app: FastifyInstance) {
       let event: Stripe.Event | null = null;
 
       // Try global env webhook secret first
+      let lastSigErr: unknown = null;
       if (env.STRIPE_SECRET && env.STRIPE_WEBHOOK_SECRET) {
         try {
           const globalStripe = getStripeInstance(env.STRIPE_SECRET);
           event = globalStripe.webhooks.constructEvent(
             (req as any).rawBody, sig, env.STRIPE_WEBHOOK_SECRET,
           );
-        } catch {}
+        } catch (e) {
+          lastSigErr = e;
+        }
       }
 
       // If global didn't work, try per-restaurant webhook secrets
@@ -169,8 +172,16 @@ export async function stripeRoutes(app: FastifyInstance) {
             const s = getStripeInstance(r.stripeSecretKey);
             event = s.webhooks.constructEvent((req as any).rawBody, sig, r.stripeWebhookSecret);
             break; // Found the right one
-          } catch {}
+          } catch (e) {
+            lastSigErr = e;
+          }
         }
+      }
+
+      if (!event && lastSigErr) {
+        // Surface the last verification failure so we can distinguish a real
+        // bad-signature from a misconfigured webhook secret.
+        req.log.warn({ err: lastSigErr }, "stripe webhook signature verification failed");
       }
 
       if (!event) {
@@ -190,8 +201,12 @@ export async function stripeRoutes(app: FastifyInstance) {
           const serverName = s.metadata?.serverName || "L'équipe";
           
           try {
+            // Idempotent: relies on the partial unique index on stripeSessionId
+            // (see prisma/ensure_columns.sql) so webhook retries are no-ops.
             await prisma.$executeRawUnsafe(
-              `INSERT INTO "ServerTip" (id, "restaurantId", "serverId", "serverName", "amountCents", "stripeSessionId", "createdAt") VALUES ($1, $2, $3, $4, $5, $6, NOW())`,
+              `INSERT INTO "ServerTip" (id, "restaurantId", "serverId", "serverName", "amountCents", "stripeSessionId", "createdAt")
+               VALUES ($1, $2, $3, $4, $5, $6, NOW())
+               ON CONFLICT ("stripeSessionId") WHERE "stripeSessionId" IS NOT NULL DO NOTHING`,
               randomUUID(), restaurantId, serverId, serverName, amountCents, s.id
             );
           } catch (dbErr) {
@@ -202,8 +217,10 @@ export async function stripeRoutes(app: FastifyInstance) {
             where: { sessionId, status: { notIn: ["PAID", "CANCELLED"] } },
             data: { status: "PAID" },
           });
-          await prisma.tableSession.update({
-            where: { id: sessionId },
+          // Idempotent close: only update sessions that aren't already closed,
+          // so webhook retries don't bump closedAt forward.
+          await prisma.tableSession.updateMany({
+            where: { id: sessionId, closedAt: null },
             data: { active: false, closedAt: new Date() },
           });
 

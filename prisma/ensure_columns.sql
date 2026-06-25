@@ -350,6 +350,13 @@ CREATE TABLE IF NOT EXISTS "ServerTip" (
   CONSTRAINT "ServerTip_pkey" PRIMARY KEY (id)
 );
 CREATE INDEX IF NOT EXISTS "ServerTip_restaurantId_idx" ON "ServerTip"("restaurantId", "createdAt" DESC);
+-- Idempotency guard: Stripe webhook may deliver checkout.session.completed
+-- more than once. Partial unique index ensures we never insert the same
+-- session twice, regardless of replay timing. NULL session ids (legacy rows)
+-- are excluded by the WHERE clause and remain unconstrained.
+CREATE UNIQUE INDEX IF NOT EXISTS "ServerTip_stripeSessionId_unique"
+  ON "ServerTip"("stripeSessionId")
+  WHERE "stripeSessionId" IS NOT NULL;
 
 -- OrderStatus: nouvelle étape READY (cuisine a terminé → serveur doit apporter en salle)
 -- Idempotent (PG 12+). S'exécute en autocommit via $executeRawUnsafe (hors transaction).
