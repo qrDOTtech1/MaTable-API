@@ -518,6 +518,14 @@ export async function publicRoutes(app: FastifyInstance) {
 
     const maxCoversPerSlot: number | null = (restaurant as any).maxCoversPerSlot ?? null;
 
+    // Précalculer le regroupement des tables par zone (stable sur tous les créneaux)
+    const tablesByZone = new Map<string | null, string[]>();
+    for (const t of reservableTables) {
+      const key = t.zone ?? null;
+      if (!tablesByZone.has(key)) tablesByZone.set(key, []);
+      tablesByZone.get(key)!.push(t.id);
+    }
+
     /**
      * Vérifie si au moins une table réservable peut accueillir une nouvelle
      * réservation sur le créneau [slotStart, slotStart + mealMin], en respectant
@@ -540,15 +548,7 @@ export async function publicRoutes(app: FastifyInstance) {
 
       const occupiedTableIds = new Set<string>(overlapping.map((r) => r.tableId as string));
 
-      // Compter par zone : tables libres VS quota walk-in
-      const byZone = new Map<string | null, string[]>();
-      for (const t of reservableTables) {
-        const key = t.zone ?? null;
-        if (!byZone.has(key)) byZone.set(key, []);
-        byZone.get(key)!.push(t.id);
-      }
-
-      for (const [zone, tableIds] of byZone.entries()) {
+      for (const [zone, tableIds] of tablesByZone.entries()) {
         const quota = zone !== null ? (quotaByZone.get(zone) ?? 0) : 0;
         const freeTables = tableIds.filter((id) => !occupiedTableIds.has(id));
         const bookable = freeTables.length - quota;
@@ -885,26 +885,37 @@ export async function publicRoutes(app: FastifyInstance) {
         : [];
       const validPhotoSet = new Set<string>(validPhotos.map((p: any) => p.id));
 
-      for (const dr of body.dishReviews) {
-        const item = validById.get(dr.menuItemId);
-        if (!item) continue;
+      // Préparer en parallèle toutes les créations indépendantes
+      const drJobs = body.dishReviews
+        .map((dr) => {
+          const item = validById.get(dr.menuItemId);
+          if (!item) return null;
+          const cleanPhotoIds = (dr.photoIds ?? []).filter(id => validPhotoSet.has(id));
+          const flags = detectFlagsWithRating(dr.rating, dr.comment);
+          return {
+            dr,
+            item,
+            create: prisma.dishReview.create({
+              data: {
+                restaurantId: r.id,
+                menuItemId: dr.menuItemId,
+                rating: dr.rating,
+                comment: dr.comment ?? null,
+                photoIds: cleanPhotoIds,
+                flagged: flags.flagged,
+                flagReasons: flags.reasons,
+                verified: false,
+              },
+              select: { id: true, rating: true, comment: true, photoIds: true, flagged: true, flagReasons: true, createdAt: true },
+            }),
+          };
+        })
+        .filter((j): j is NonNullable<typeof j> => j !== null);
 
-        const cleanPhotoIds = (dr.photoIds ?? []).filter(id => validPhotoSet.has(id));
-        const flags = detectFlagsWithRating(dr.rating, dr.comment);
+      const createdList = await Promise.all(drJobs.map((j) => j.create));
 
-        const created = await prisma.dishReview.create({
-          data: {
-            restaurantId: r.id,
-            menuItemId: dr.menuItemId,
-            rating: dr.rating,
-            comment: dr.comment ?? null,
-            photoIds: cleanPhotoIds,
-            flagged: flags.flagged,
-            flagReasons: flags.reasons,
-            verified: false,
-          },
-          select: { id: true, rating: true, comment: true, photoIds: true, flagged: true, flagReasons: true, createdAt: true },
-        });
+      createdList.forEach((created: any, idx: number) => {
+        const item = drJobs[idx].item;
         dishReviewIds.push(created.id);
 
         emitToRestaurant(r.id, "review:new", {
@@ -932,7 +943,7 @@ export async function publicRoutes(app: FastifyInstance) {
             createdAt: created.createdAt,
           });
         }
-      }
+      });
     }
 
     return {
@@ -1865,19 +1876,17 @@ Ne renvoie STRICTEMENT rien d'autre que ce JSON (pas de bloc Markdown \`\`\`json
       });
     }
 
-    // Dish reviews
+    // Dish reviews (un seul aller-retour via createMany)
     if (body.dishReviews && body.dishReviews.length > 0) {
-      for (const dr of body.dishReviews) {
-        await prisma.dishReview.create({
-          data: {
-            restaurantId: decoded.restaurantId,
-            menuItemId: dr.menuItemId,
-            orderId: latestOrder?.id,
-            rating: dr.rating,
-            comment: dr.comment ?? null,
-          },
-        });
-      }
+      await prisma.dishReview.createMany({
+        data: body.dishReviews.map((dr) => ({
+          restaurantId: decoded.restaurantId,
+          menuItemId: dr.menuItemId,
+          orderId: latestOrder?.id,
+          rating: dr.rating,
+          comment: dr.comment ?? null,
+        })),
+      });
     }
 
     return { ok: true };
