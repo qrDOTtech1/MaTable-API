@@ -1314,15 +1314,17 @@ export async function proRoutes(app: FastifyInstance) {
     // Re-apply quantity discounts on lines whose qty changed (base price from current MenuItem)
     const remainingIds = existing.map((l) => l.menuItemId).filter((x): x is string => !!x);
     if (remainingIds.length > 0) {
-      const menuItems = await prisma.menuItem.findMany({
-        where: { id: { in: remainingIds }, restaurantId: me.restaurantId },
-        select: { id: true, priceCents: true },
-      });
-      const baseById = new Map(menuItems.map((m) => [m.id, m.priceCents]));
       type DiscRow = { id: string; quantityDiscounts: any };
-      const discRows = await prisma.$queryRaw<DiscRow[]>`
-        SELECT id, "quantityDiscounts" FROM "MenuItem" WHERE id = ANY(${remainingIds}::text[])
-      `;
+      const [menuItems, discRows] = await Promise.all([
+        prisma.menuItem.findMany({
+          where: { id: { in: remainingIds }, restaurantId: me.restaurantId },
+          select: { id: true, priceCents: true },
+        }),
+        prisma.$queryRaw<DiscRow[]>`
+          SELECT id, "quantityDiscounts" FROM "MenuItem" WHERE id = ANY(${remainingIds}::text[])
+        `,
+      ]);
+      const baseById = new Map(menuItems.map((m) => [m.id, m.priceCents]));
       const tiersById = new Map(discRows.map((r) => [r.id, parseQuantityDiscounts(r.quantityDiscounts)]));
       for (const line of existing) {
         if (!line.menuItemId) continue;
@@ -2645,18 +2647,25 @@ export async function proRoutes(app: FastifyInstance) {
       })).min(1).max(100),
     }).parse(req.body);
 
+    // Parallélisé par chunks pour éviter 100 round-trips séquentiels sur un gros import IA
+    const CHUNK = 20;
     const created: StockProductRow[] = [];
-    for (const p of body.products) {
-      const id = crypto.randomUUID();
-      await prisma.$executeRawUnsafe(
-        `INSERT INTO "StockProduct" (id, "restaurantId", name, unit, category, "isFresh",
-           "currentQty", "lowThreshold", "weeklyEstimate", notes, "linkedDishes", "updatedAt", "createdAt")
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, NOW(), NOW())`,
-        id, me.restaurantId, p.name, p.unit, p.category, p.isFresh,
-        p.currentQty, p.lowThreshold, p.weeklyEstimate,
-        p.notes ?? null, JSON.stringify(p.linkedDishes)
-      );
-      created.push({ id, restaurantId: me.restaurantId, ...p, notes: p.notes ?? null, updatedAt: new Date(), createdAt: new Date() });
+    for (let i = 0; i < body.products.length; i += CHUNK) {
+      const slice = body.products.slice(i, i + CHUNK);
+      const rows = slice.map((p) => ({ id: crypto.randomUUID(), p }));
+      await Promise.all(rows.map(({ id, p }) =>
+        prisma.$executeRawUnsafe(
+          `INSERT INTO "StockProduct" (id, "restaurantId", name, unit, category, "isFresh",
+             "currentQty", "lowThreshold", "weeklyEstimate", notes, "linkedDishes", "updatedAt", "createdAt")
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, NOW(), NOW())`,
+          id, me.restaurantId, p.name, p.unit, p.category, p.isFresh,
+          p.currentQty, p.lowThreshold, p.weeklyEstimate,
+          p.notes ?? null, JSON.stringify(p.linkedDishes)
+        )
+      ));
+      for (const { id, p } of rows) {
+        created.push({ id, restaurantId: me.restaurantId, ...p, notes: p.notes ?? null, updatedAt: new Date(), createdAt: new Date() });
+      }
     }
     return { created: created.length };
   });

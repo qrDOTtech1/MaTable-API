@@ -1463,19 +1463,25 @@ Réponds UNIQUEMENT en JSON valide avec ce format EXACT:
       let updatedCount = 0;
       const allNewBeverages = new Set<string>();
       
-      for (const imp of improvements) {
-        if (!imp.menuItemId) continue;
-        const pairings = Array.isArray(imp.suggestedPairings) ? imp.suggestedPairings : [];
-        const upsells = Array.isArray(imp.upsellItemIds) ? imp.upsellItemIds : [];
+      // Parallélisé par chunks pour réduire la latence des SSE menu-suggest-pairings
+      // (jusqu'à 50+ items séquentiels → quelques chunks parallèles)
+      const validImps = improvements.filter((imp: any) => imp.menuItemId);
+      for (const imp of validImps) {
         const newBevs = Array.isArray(imp.newBeverageSuggestions) ? imp.newBeverageSuggestions : [];
-        
         newBevs.forEach((b: string) => allNewBeverages.add(b));
-
-        await prisma.$executeRawUnsafe(
-          `UPDATE "MenuItem" SET "suggestedPairings" = $1::jsonb, "upsellItems" = $2::jsonb WHERE id = $3 AND "restaurantId" = $4`,
-          JSON.stringify(pairings), JSON.stringify(upsells), imp.menuItemId, me.restaurantId
-        );
-        updatedCount++;
+      }
+      const CHUNK = 10;
+      for (let i = 0; i < validImps.length; i += CHUNK) {
+        const slice = validImps.slice(i, i + CHUNK);
+        await Promise.all(slice.map((imp: any) => {
+          const pairings = Array.isArray(imp.suggestedPairings) ? imp.suggestedPairings : [];
+          const upsells = Array.isArray(imp.upsellItemIds) ? imp.upsellItemIds : [];
+          return prisma.$executeRawUnsafe(
+            `UPDATE "MenuItem" SET "suggestedPairings" = $1::jsonb, "upsellItems" = $2::jsonb WHERE id = $3 AND "restaurantId" = $4`,
+            JSON.stringify(pairings), JSON.stringify(upsells), imp.menuItemId, me.restaurantId
+          );
+        }));
+        updatedCount += slice.length;
       }
 
       send({ 
@@ -1508,21 +1514,28 @@ Réponds UNIQUEMENT en JSON valide avec ce format EXACT:
       })).min(1).max(50),
     }).parse(req.body);
 
-    const created = [];
-    for (const item of items) {
-      const { waitMinutes, ...prismaData } = item;
-      const mi = await prisma.menuItem.create({
-        data: {
-          ...prismaData,
-          allergens: (prismaData.allergens ?? []) as any,
-          diets: (prismaData.diets ?? []) as any,
-          restaurantId: me.restaurantId,
-        } as any,
-      });
-      if (waitMinutes && waitMinutes > 0) {
-        await prisma.$executeRaw`UPDATE "MenuItem" SET "waitMinutes" = ${waitMinutes} WHERE id = ${mi.id}`;
-      }
-      created.push(mi);
+    // Parallélisé par chunks pour réduire la latence sans saturer le pool DB
+    // (jusqu'à 50 items × 2 round-trips = 100 séquentiels → ~10 chunks parallèles)
+    const CHUNK = 10;
+    const created: any[] = [];
+    for (let i = 0; i < items.length; i += CHUNK) {
+      const slice = items.slice(i, i + CHUNK);
+      const results = await Promise.all(slice.map(async (item) => {
+        const { waitMinutes, ...prismaData } = item;
+        const mi = await prisma.menuItem.create({
+          data: {
+            ...prismaData,
+            allergens: (prismaData.allergens ?? []) as any,
+            diets: (prismaData.diets ?? []) as any,
+            restaurantId: me.restaurantId,
+          } as any,
+        });
+        if (waitMinutes && waitMinutes > 0) {
+          await prisma.$executeRaw`UPDATE "MenuItem" SET "waitMinutes" = ${waitMinutes} WHERE id = ${mi.id}`;
+        }
+        return mi;
+      }));
+      created.push(...results);
     }
 
     return { ok: true, count: created.length, items: created };
