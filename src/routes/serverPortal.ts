@@ -821,13 +821,19 @@ Format: retourne UNIQUEMENT 3 lignes, une par défi, sans numérotation, sans ex
     const hasIa = await hasApp(me.restaurantId, "nova_ia");
     if (!hasIa) return reply.code(403).send({ error: "APP_NOT_ENABLED", app: "nova_ia" });
 
-    const restaurant = await prisma.restaurant.findUnique({
-      where: { id: me.restaurantId },
-      select: { name: true },
-    });
+    // 3 reads indépendants : parallélisés pour réduire la latence du prompt IA
+    const [restaurant, iaConfig, server] = await Promise.all([
+      prisma.restaurant.findUnique({
+        where: { id: me.restaurantId },
+        select: { name: true },
+      }),
+      getGlobalIaConfig(),
+      prisma.server.findUnique({
+        where: { id: me.serverId },
+        select: { name: true },
+      }),
+    ]);
     if (!restaurant) return reply.code(404).send({ error: "NOT_FOUND" });
-
-    const iaConfig = await getGlobalIaConfig();
     if (!iaConfig.ollamaApiKey) {
       return reply.code(503).send({ error: "IA_KEY_MISSING" });
     }
@@ -836,11 +842,6 @@ Format: retourne UNIQUEMENT 3 lignes, une par défi, sans numérotation, sans ex
       context: z.string().max(500),
       currentPlanning: z.string().max(2000).optional(),
     }).parse(req.body);
-
-    const server = await prisma.server.findUnique({
-      where: { id: me.serverId },
-      select: { name: true },
-    });
 
     const prompt = `Tu es un assistant pour un serveur en restaurant nommé ${server?.name ?? "serveur"}.
 Voici le contexte/retour client du serveur : "${context}"
