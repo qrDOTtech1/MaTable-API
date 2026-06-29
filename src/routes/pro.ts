@@ -565,55 +565,52 @@ export async function proRoutes(app: FastifyInstance) {
 
   app.get("/me", async (req, reply) => {
     const me = await requirePro(req, reply);
-    const restaurant = await prisma.restaurant.findUnique({
-      where: { id: me.restaurantId },
-      include: { openingHours: { orderBy: [{ dayOfWeek: "asc" }, { openMin: "asc" }] } },
-    });
-    
-    if (restaurant) {
-      const configRaw = await prisma.$queryRawUnsafe<any[]>(
-        `SELECT "googleReviewLink", "reviewVoucherConfig", "businessType", "reviewCustomQuestions", "serverUniqueReviewQr", "reviewRatingCategories", "reservationAlertEmail", "reservationAlertEmails" FROM "Restaurant" WHERE id = $1`, me.restaurantId
-      );
-      (restaurant as any).googleReviewLink = configRaw[0]?.googleReviewLink || null;
-      (restaurant as any).reviewVoucherConfig = configRaw[0]?.reviewVoucherConfig || null;
-      (restaurant as any).businessType = configRaw[0]?.businessType || "RESTAURANT";
-      (restaurant as any).reviewCustomQuestions = configRaw[0]?.reviewCustomQuestions || null;
-      (restaurant as any).serverUniqueReviewQr = configRaw[0]?.serverUniqueReviewQr ?? true;
-      (restaurant as any).reviewRatingCategories = Array.isArray(configRaw[0]?.reviewRatingCategories) ? configRaw[0].reviewRatingCategories : [];
-      (restaurant as any).reservationAlertEmail = configRaw[0]?.reservationAlertEmail ?? null;
-      (restaurant as any).reservationAlertEmails = Array.isArray(configRaw[0]?.reservationAlertEmails)
-        ? configRaw[0].reservationAlertEmails
-        : (configRaw[0]?.reservationAlertEmail ? [configRaw[0].reservationAlertEmail] : []);
 
-      // Colonnes hors schéma Prisma : raccourcis dashboard + onboarding + signature CGV
-      try {
-        const qaRaw = await prisma.$queryRawUnsafe<any[]>(
-          `SELECT "dashboardQuickActions", "dashboardBottomNav", "onboardingCompleted",
-                  "cgvAcceptedAt", "cgvSignatureName", "cgvContractData"
-             FROM "Restaurant" WHERE id = $1`, me.restaurantId
-        );
-        (restaurant as any).dashboardQuickActions = Array.isArray(qaRaw[0]?.dashboardQuickActions)
-          ? qaRaw[0].dashboardQuickActions
-          : [];
-        (restaurant as any).dashboardBottomNav = Array.isArray(qaRaw[0]?.dashboardBottomNav)
-          ? qaRaw[0].dashboardBottomNav
-          : [];
-        (restaurant as any).onboardingCompleted = qaRaw[0]?.onboardingCompleted ?? false;
-        (restaurant as any).cgvAcceptedAt = qaRaw[0]?.cgvAcceptedAt ?? null;
-        (restaurant as any).cgvSignatureName = qaRaw[0]?.cgvSignatureName ?? null;
-        (restaurant as any).cgvContractData = qaRaw[0]?.cgvContractData ?? null;
-      } catch {
-        (restaurant as any).dashboardQuickActions = [];
-        (restaurant as any).dashboardBottomNav = [];
-        (restaurant as any).onboardingCompleted = true;
-        (restaurant as any).cgvAcceptedAt = null;
-        (restaurant as any).cgvSignatureName = null;
-        (restaurant as any).cgvContractData = null;
-      }
+    // Fold the three Restaurant raw lookups + getEnabledApps into a single round-trip
+    // and run it in parallel with the Prisma findUnique (which fans out to openingHours).
+    const rawSelectsPromise = prisma
+      .$queryRawUnsafe<any[]>(
+        `SELECT "googleReviewLink", "reviewVoucherConfig", "businessType",
+                "reviewCustomQuestions", "serverUniqueReviewQr", "reviewRatingCategories",
+                "reservationAlertEmail", "reservationAlertEmails",
+                "dashboardQuickActions", "dashboardBottomNav", "onboardingCompleted",
+                "cgvAcceptedAt", "cgvSignatureName", "cgvContractData",
+                "enabledApps"
+           FROM "Restaurant" WHERE id = $1`,
+        me.restaurantId,
+      )
+      .catch(() => [] as any[]);
+
+    const [restaurant, rawRows] = await Promise.all([
+      prisma.restaurant.findUnique({
+        where: { id: me.restaurantId },
+        include: { openingHours: { orderBy: [{ dayOfWeek: "asc" }, { openMin: "asc" }] } },
+      }),
+      rawSelectsPromise,
+    ]);
+
+    const row = rawRows[0] ?? {};
+    if (restaurant) {
+      (restaurant as any).googleReviewLink = row.googleReviewLink || null;
+      (restaurant as any).reviewVoucherConfig = row.reviewVoucherConfig || null;
+      (restaurant as any).businessType = row.businessType || "RESTAURANT";
+      (restaurant as any).reviewCustomQuestions = row.reviewCustomQuestions || null;
+      (restaurant as any).serverUniqueReviewQr = row.serverUniqueReviewQr ?? true;
+      (restaurant as any).reviewRatingCategories = Array.isArray(row.reviewRatingCategories) ? row.reviewRatingCategories : [];
+      (restaurant as any).reservationAlertEmail = row.reservationAlertEmail ?? null;
+      (restaurant as any).reservationAlertEmails = Array.isArray(row.reservationAlertEmails)
+        ? row.reservationAlertEmails
+        : (row.reservationAlertEmail ? [row.reservationAlertEmail] : []);
+      (restaurant as any).dashboardQuickActions = Array.isArray(row.dashboardQuickActions) ? row.dashboardQuickActions : [];
+      (restaurant as any).dashboardBottomNav = Array.isArray(row.dashboardBottomNav) ? row.dashboardBottomNav : [];
+      (restaurant as any).onboardingCompleted = row.onboardingCompleted ?? (rawRows.length === 0 ? true : false);
+      (restaurant as any).cgvAcceptedAt = row.cgvAcceptedAt ?? null;
+      (restaurant as any).cgvSignatureName = row.cgvSignatureName ?? null;
+      (restaurant as any).cgvContractData = row.cgvContractData ?? null;
     }
 
-    const enabledApps = await getEnabledApps(me.restaurantId);
-    
+    const enabledApps = Array.isArray(row.enabledApps) ? new Set<string>(row.enabledApps as string[]) : new Set<string>(["reviews"]);
+
     return { userId: me.userId, restaurant, enabledApps: [...enabledApps] };
   });
 
@@ -1010,43 +1007,42 @@ export async function proRoutes(app: FastifyInstance) {
 
     // ── Attribution automatique de points fidélité + ticket email ───────────
     try {
-      const loyaltyConfig = await prisma.$queryRawUnsafe<Array<{
-        enabled: boolean; ptsPerEuro: number; minSpendCents: number;
-      }>>(
-        `SELECT enabled, "ptsPerEuro", "minSpendCents" FROM "LoyaltyConfig"
-         WHERE "restaurantId" = $1 LIMIT 1`,
-        me.restaurantId
-      );
-
-      // Données de la session (email, téléphone, client fidélité lié)
-      const sessionData = await prisma.$queryRawUnsafe<Array<{
-        customerEmail: string | null;
-        customerPhone: string | null;
-        loyaltyCustomerId: string | null;
-        customerName: string | null;
-      }>>(
-        `SELECT "customerEmail", "customerPhone", "loyaltyCustomerId", "customerName"
-         FROM "TableSession" WHERE id = $1`,
-        session.id
-      );
+      // These three lookups are independent — fan them out in parallel.
+      const [loyaltyConfig, sessionData, orderRows] = await Promise.all([
+        prisma.$queryRawUnsafe<Array<{
+          enabled: boolean; ptsPerEuro: number; minSpendCents: number;
+        }>>(
+          `SELECT enabled, "ptsPerEuro", "minSpendCents" FROM "LoyaltyConfig"
+           WHERE "restaurantId" = $1 LIMIT 1`,
+          me.restaurantId
+        ),
+        prisma.$queryRawUnsafe<Array<{
+          customerEmail: string | null;
+          customerPhone: string | null;
+          loyaltyCustomerId: string | null;
+          customerName: string | null;
+        }>>(
+          `SELECT "customerEmail", "customerPhone", "loyaltyCustomerId", "customerName"
+           FROM "TableSession" WHERE id = $1`,
+          session.id
+        ),
+        prisma.$queryRawUnsafe<Array<{
+          totalCents: number;
+          itemName: string;
+          qty: number;
+          unitCents: number;
+        }>>(
+          `SELECT COALESCE(SUM(oi.quantity * oi."unitPriceCents"),0) AS "totalCents",
+                  oi.name AS "itemName", SUM(oi.quantity)::int AS qty,
+                  oi."unitPriceCents" AS "unitCents"
+           FROM "Order" o
+           JOIN "OrderItem" oi ON oi."orderId" = o.id
+           WHERE o."sessionId" = $1 AND o.status NOT IN ('CANCELLED')
+           GROUP BY oi.name, oi."unitPriceCents"`,
+          session.id
+        ),
+      ]);
       const sess = sessionData[0];
-
-      // Calculer le total + récupérer les articles
-      const orderRows = await prisma.$queryRawUnsafe<Array<{
-        totalCents: number;
-        itemName: string;
-        qty: number;
-        unitCents: number;
-      }>>(
-        `SELECT COALESCE(SUM(oi.quantity * oi."unitPriceCents"),0) AS "totalCents",
-                oi.name AS "itemName", SUM(oi.quantity)::int AS qty,
-                oi."unitPriceCents" AS "unitCents"
-         FROM "Order" o
-         JOIN "OrderItem" oi ON oi."orderId" = o.id
-         WHERE o."sessionId" = $1 AND o.status NOT IN ('CANCELLED')
-         GROUP BY oi.name, oi."unitPriceCents"`,
-        session.id
-      );
       const totalCents = Number(orderRows[0]?.totalCents ?? 0);
 
       // ── Fidélité ──────────────────────────────────────────────────────────
