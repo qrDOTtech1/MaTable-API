@@ -565,15 +565,27 @@ export async function proRoutes(app: FastifyInstance) {
 
   app.get("/me", async (req, reply) => {
     const me = await requirePro(req, reply);
-    const restaurant = await prisma.restaurant.findUnique({
-      where: { id: me.restaurantId },
-      include: { openingHours: { orderBy: [{ dayOfWeek: "asc" }, { openMin: "asc" }] } },
-    });
-    
+
+    // Fan out: all four reads depend only on me.restaurantId — no need to chain.
+    const [restaurant, configRaw, qaRawResult, enabledApps] = await Promise.all([
+      prisma.restaurant.findUnique({
+        where: { id: me.restaurantId },
+        include: { openingHours: { orderBy: [{ dayOfWeek: "asc" }, { openMin: "asc" }] } },
+      }),
+      prisma.$queryRawUnsafe<any[]>(
+        `SELECT "googleReviewLink", "reviewVoucherConfig", "businessType", "reviewCustomQuestions", "serverUniqueReviewQr", "reviewRatingCategories", "reservationAlertEmail", "reservationAlertEmails" FROM "Restaurant" WHERE id = $1`,
+        me.restaurantId,
+      ),
+      prisma.$queryRawUnsafe<any[]>(
+        `SELECT "dashboardQuickActions", "dashboardBottomNav", "onboardingCompleted",
+                "cgvAcceptedAt", "cgvSignatureName", "cgvContractData"
+           FROM "Restaurant" WHERE id = $1`,
+        me.restaurantId,
+      ).catch(() => null), // table/colonnes absentes en dev → fallback gracieux
+      getEnabledApps(me.restaurantId),
+    ]);
+
     if (restaurant) {
-      const configRaw = await prisma.$queryRawUnsafe<any[]>(
-        `SELECT "googleReviewLink", "reviewVoucherConfig", "businessType", "reviewCustomQuestions", "serverUniqueReviewQr", "reviewRatingCategories", "reservationAlertEmail", "reservationAlertEmails" FROM "Restaurant" WHERE id = $1`, me.restaurantId
-      );
       (restaurant as any).googleReviewLink = configRaw[0]?.googleReviewLink || null;
       (restaurant as any).reviewVoucherConfig = configRaw[0]?.reviewVoucherConfig || null;
       (restaurant as any).businessType = configRaw[0]?.businessType || "RESTAURANT";
@@ -586,23 +598,18 @@ export async function proRoutes(app: FastifyInstance) {
         : (configRaw[0]?.reservationAlertEmail ? [configRaw[0].reservationAlertEmail] : []);
 
       // Colonnes hors schéma Prisma : raccourcis dashboard + onboarding + signature CGV
-      try {
-        const qaRaw = await prisma.$queryRawUnsafe<any[]>(
-          `SELECT "dashboardQuickActions", "dashboardBottomNav", "onboardingCompleted",
-                  "cgvAcceptedAt", "cgvSignatureName", "cgvContractData"
-             FROM "Restaurant" WHERE id = $1`, me.restaurantId
-        );
-        (restaurant as any).dashboardQuickActions = Array.isArray(qaRaw[0]?.dashboardQuickActions)
-          ? qaRaw[0].dashboardQuickActions
+      if (qaRawResult) {
+        (restaurant as any).dashboardQuickActions = Array.isArray(qaRawResult[0]?.dashboardQuickActions)
+          ? qaRawResult[0].dashboardQuickActions
           : [];
-        (restaurant as any).dashboardBottomNav = Array.isArray(qaRaw[0]?.dashboardBottomNav)
-          ? qaRaw[0].dashboardBottomNav
+        (restaurant as any).dashboardBottomNav = Array.isArray(qaRawResult[0]?.dashboardBottomNav)
+          ? qaRawResult[0].dashboardBottomNav
           : [];
-        (restaurant as any).onboardingCompleted = qaRaw[0]?.onboardingCompleted ?? false;
-        (restaurant as any).cgvAcceptedAt = qaRaw[0]?.cgvAcceptedAt ?? null;
-        (restaurant as any).cgvSignatureName = qaRaw[0]?.cgvSignatureName ?? null;
-        (restaurant as any).cgvContractData = qaRaw[0]?.cgvContractData ?? null;
-      } catch {
+        (restaurant as any).onboardingCompleted = qaRawResult[0]?.onboardingCompleted ?? false;
+        (restaurant as any).cgvAcceptedAt = qaRawResult[0]?.cgvAcceptedAt ?? null;
+        (restaurant as any).cgvSignatureName = qaRawResult[0]?.cgvSignatureName ?? null;
+        (restaurant as any).cgvContractData = qaRawResult[0]?.cgvContractData ?? null;
+      } else {
         (restaurant as any).dashboardQuickActions = [];
         (restaurant as any).dashboardBottomNav = [];
         (restaurant as any).onboardingCompleted = true;
@@ -612,8 +619,6 @@ export async function proRoutes(app: FastifyInstance) {
       }
     }
 
-    const enabledApps = await getEnabledApps(me.restaurantId);
-    
     return { userId: me.userId, restaurant, enabledApps: [...enabledApps] };
   });
 
