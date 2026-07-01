@@ -1426,6 +1426,34 @@ export async function proRoutes(app: FastifyInstance) {
     })).max(20).optional(),
   });
 
+  // Build a parameterized SET clause for MenuItem extension columns.
+  // Values are bound as query parameters — never inlined — so untrusted
+  // strings (suggestedPairings, upsellItems, …) can't break out of the JSON literal.
+  function buildMenuExtUpdate(input: {
+    waitMinutes?: number;
+    suggestedPairings?: string[];
+    upsellItems?: string[];
+    quantityDiscounts?: any;
+    quantityTiers?: any;
+  }) {
+    const setClauses: string[] = [];
+    const params: any[] = [];
+    const push = (col: string, cast: string, value: any) => {
+      params.push(value);
+      setClauses.push(`"${col}" = $${params.length}${cast}`);
+    };
+    if (input.waitMinutes !== undefined) push("waitMinutes", "::int", Number(input.waitMinutes));
+    if (input.suggestedPairings !== undefined) push("suggestedPairings", "::jsonb", JSON.stringify(input.suggestedPairings));
+    if (input.upsellItems !== undefined) push("upsellItems", "::jsonb", JSON.stringify(input.upsellItems));
+    if (input.quantityDiscounts !== undefined) {
+      push("quantityDiscounts", "::jsonb", JSON.stringify(parseQuantityDiscounts(input.quantityDiscounts)));
+    }
+    if (input.quantityTiers !== undefined) {
+      push("quantityTiers", "::jsonb", JSON.stringify(parseQuantityTiers(input.quantityTiers)));
+    }
+    return { setClauses, params };
+  }
+
   app.post("/menu", async (req, reply) => {
     const me = await requirePro(req, reply);
     const { waitMinutes, suggestedPairings, upsellItems, quantityDiscounts, quantityTiers, ...data } = menuInput.parse(req.body);
@@ -1434,21 +1462,13 @@ export async function proRoutes(app: FastifyInstance) {
     });
 
     // Extensions managed via ensure_columns.sql (not in Prisma schema)
-    const updates: string[] = [];
-    if (waitMinutes !== undefined) updates.push(`"waitMinutes" = ${Number(waitMinutes)}`);
-    if (suggestedPairings !== undefined) updates.push(`"suggestedPairings" = '${JSON.stringify(suggestedPairings)}'::jsonb`);
-    if (upsellItems !== undefined) updates.push(`"upsellItems" = '${JSON.stringify(upsellItems)}'::jsonb`);
-    if (quantityDiscounts !== undefined) {
-      const cleaned = parseQuantityDiscounts(quantityDiscounts);
-      updates.push(`"quantityDiscounts" = '${JSON.stringify(cleaned).replace(/'/g, "''")}'::jsonb`);
-    }
-    if (quantityTiers !== undefined) {
-      const cleaned = parseQuantityTiers(quantityTiers);
-      updates.push(`"quantityTiers" = '${JSON.stringify(cleaned).replace(/'/g, "''")}'::jsonb`);
-    }
-
-    if (updates.length > 0) {
-      await prisma.$executeRawUnsafe(`UPDATE "MenuItem" SET ${updates.join(", ")} WHERE id = $1`, item.id);
+    const { setClauses, params } = buildMenuExtUpdate({ waitMinutes, suggestedPairings, upsellItems, quantityDiscounts, quantityTiers });
+    if (setClauses.length > 0) {
+      params.push(item.id);
+      await prisma.$executeRawUnsafe(
+        `UPDATE "MenuItem" SET ${setClauses.join(", ")} WHERE id = $${params.length}`,
+        ...params,
+      );
     }
 
     return { item: {
@@ -1472,27 +1492,16 @@ export async function proRoutes(app: FastifyInstance) {
     }
 
     // Extensions managed via ensure_columns.sql
-    const updates: string[] = [];
-    if (waitMinutes !== undefined) updates.push(`"waitMinutes" = ${Number(waitMinutes)}`);
-    if (suggestedPairings !== undefined) updates.push(`"suggestedPairings" = '${JSON.stringify(suggestedPairings)}'::jsonb`);
-    if (upsellItems !== undefined) updates.push(`"upsellItems" = '${JSON.stringify(upsellItems)}'::jsonb`);
-    if (quantityDiscounts !== undefined) {
-      const cleaned = parseQuantityDiscounts(quantityDiscounts);
-      updates.push(`"quantityDiscounts" = '${JSON.stringify(cleaned).replace(/'/g, "''")}'::jsonb`);
-    }
-    if (quantityTiers !== undefined) {
-      const cleaned = parseQuantityTiers(quantityTiers);
-      updates.push(`"quantityTiers" = '${JSON.stringify(cleaned).replace(/'/g, "''")}'::jsonb`);
+    const { setClauses, params } = buildMenuExtUpdate({ waitMinutes, suggestedPairings, upsellItems, quantityDiscounts, quantityTiers });
+    if (setClauses.length > 0) {
+      // Enforce ownership in the same statement — no extra round-trip needed.
+      params.push(id, me.restaurantId);
+      await prisma.$executeRawUnsafe(
+        `UPDATE "MenuItem" SET ${setClauses.join(", ")} WHERE id = $${params.length - 1} AND "restaurantId" = $${params.length}`,
+        ...params,
+      );
     }
 
-    if (updates.length > 0) {
-      // Must verify ownership again to be safe before raw update
-      const exists = await prisma.menuItem.findFirst({ where: { id, restaurantId: me.restaurantId }});
-      if (exists) {
-        await prisma.$executeRawUnsafe(`UPDATE "MenuItem" SET ${updates.join(", ")} WHERE id = $1`, id);
-      }
-    }
-    
     return { ok: true };
   });
 
@@ -2645,19 +2654,38 @@ export async function proRoutes(app: FastifyInstance) {
       })).min(1).max(100),
     }).parse(req.body);
 
-    const created: StockProductRow[] = [];
-    for (const p of body.products) {
-      const id = crypto.randomUUID();
-      await prisma.$executeRawUnsafe(
-        `INSERT INTO "StockProduct" (id, "restaurantId", name, unit, category, "isFresh",
-           "currentQty", "lowThreshold", "weeklyEstimate", notes, "linkedDishes", "updatedAt", "createdAt")
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, NOW(), NOW())`,
-        id, me.restaurantId, p.name, p.unit, p.category, p.isFresh,
-        p.currentQty, p.lowThreshold, p.weeklyEstimate,
-        p.notes ?? null, JSON.stringify(p.linkedDishes)
+    // Batch INSERT — one round-trip regardless of product count.
+    // Values placeholder tuples are generated in-order so all inputs stay parameter-bound.
+    const created: StockProductRow[] = body.products.map((p) => ({
+      id: crypto.randomUUID(),
+      restaurantId: me.restaurantId,
+      ...p,
+      notes: p.notes ?? null,
+      updatedAt: new Date(),
+      createdAt: new Date(),
+    }));
+    const cols = 11; // id, restaurantId, name, unit, category, isFresh, currentQty, lowThreshold, weeklyEstimate, notes, linkedDishes
+    const valuesSql = created
+      .map((_, i) => {
+        const base = i * cols;
+        return `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}, $${base + 6}, `
+             + `$${base + 7}, $${base + 8}, $${base + 9}, $${base + 10}, $${base + 11}::jsonb, NOW(), NOW())`;
+      })
+      .join(", ");
+    const params: any[] = [];
+    for (const row of created) {
+      params.push(
+        row.id, row.restaurantId, row.name, row.unit, row.category, row.isFresh,
+        row.currentQty, row.lowThreshold, row.weeklyEstimate,
+        row.notes, JSON.stringify(row.linkedDishes),
       );
-      created.push({ id, restaurantId: me.restaurantId, ...p, notes: p.notes ?? null, updatedAt: new Date(), createdAt: new Date() });
     }
+    await prisma.$executeRawUnsafe(
+      `INSERT INTO "StockProduct" (id, "restaurantId", name, unit, category, "isFresh",
+         "currentQty", "lowThreshold", "weeklyEstimate", notes, "linkedDishes", "updatedAt", "createdAt")
+       VALUES ${valuesSql}`,
+      ...params,
+    );
     return { created: created.length };
   });
 
