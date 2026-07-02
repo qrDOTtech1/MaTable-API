@@ -1508,22 +1508,23 @@ Réponds UNIQUEMENT en JSON valide avec ce format EXACT:
       })).min(1).max(50),
     }).parse(req.body);
 
-    const created = [];
-    for (const item of items) {
-      const { waitMinutes, ...prismaData } = item;
-      const mi = await prisma.menuItem.create({
-        data: {
-          ...prismaData,
-          allergens: (prismaData.allergens ?? []) as any,
-          diets: (prismaData.diets ?? []) as any,
-          restaurantId: me.restaurantId,
-        } as any,
-      });
-      if (waitMinutes && waitMinutes > 0) {
-        await prisma.$executeRaw`UPDATE "MenuItem" SET "waitMinutes" = ${waitMinutes} WHERE id = ${mi.id}`;
-      }
-      created.push(mi);
-    }
+    const created = await Promise.all(
+      items.map(async (item) => {
+        const { waitMinutes, ...prismaData } = item;
+        const mi = await prisma.menuItem.create({
+          data: {
+            ...prismaData,
+            allergens: (prismaData.allergens ?? []) as any,
+            diets: (prismaData.diets ?? []) as any,
+            restaurantId: me.restaurantId,
+          } as any,
+        });
+        if (waitMinutes && waitMinutes > 0) {
+          await prisma.$executeRaw`UPDATE "MenuItem" SET "waitMinutes" = ${waitMinutes} WHERE id = ${mi.id}`;
+        }
+        return mi;
+      })
+    );
 
     return { ok: true, count: created.length, items: created };
   });

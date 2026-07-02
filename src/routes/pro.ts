@@ -2645,19 +2645,38 @@ export async function proRoutes(app: FastifyInstance) {
       })).min(1).max(100),
     }).parse(req.body);
 
-    const created: StockProductRow[] = [];
-    for (const p of body.products) {
-      const id = crypto.randomUUID();
-      await prisma.$executeRawUnsafe(
-        `INSERT INTO "StockProduct" (id, "restaurantId", name, unit, category, "isFresh",
-           "currentQty", "lowThreshold", "weeklyEstimate", notes, "linkedDishes", "updatedAt", "createdAt")
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, NOW(), NOW())`,
-        id, me.restaurantId, p.name, p.unit, p.category, p.isFresh,
-        p.currentQty, p.lowThreshold, p.weeklyEstimate,
-        p.notes ?? null, JSON.stringify(p.linkedDishes)
-      );
-      created.push({ id, restaurantId: me.restaurantId, ...p, notes: p.notes ?? null, updatedAt: new Date(), createdAt: new Date() });
-    }
+    if (body.products.length === 0) return { created: 0 };
+
+    const created: StockProductRow[] = body.products.map((p) => ({
+      id: crypto.randomUUID(),
+      restaurantId: me.restaurantId,
+      ...p,
+      notes: p.notes ?? null,
+      updatedAt: new Date(),
+      createdAt: new Date(),
+    }));
+
+    // Single multi-row insert instead of N round-trips.
+    const cols = 11;
+    const valuesSql = created
+      .map((_, i) => {
+        const base = i * cols;
+        return `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}, $${base + 6}, $${base + 7}, $${base + 8}, $${base + 9}, $${base + 10}, $${base + 11}::jsonb, NOW(), NOW())`;
+      })
+      .join(", ");
+    const params = created.flatMap((p) => [
+      p.id, p.restaurantId, p.name, p.unit, p.category, p.isFresh,
+      p.currentQty, p.lowThreshold, p.weeklyEstimate,
+      p.notes, JSON.stringify(p.linkedDishes),
+    ]);
+
+    await prisma.$executeRawUnsafe(
+      `INSERT INTO "StockProduct" (id, "restaurantId", name, unit, category, "isFresh",
+         "currentQty", "lowThreshold", "weeklyEstimate", notes, "linkedDishes", "updatedAt", "createdAt")
+       VALUES ${valuesSql}`,
+      ...params,
+    );
+
     return { created: created.length };
   });
 
