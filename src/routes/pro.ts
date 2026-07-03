@@ -1573,11 +1573,13 @@ export async function proRoutes(app: FastifyInstance) {
   // ---------------------------------------------------------------------------
   app.get("/servers", async (req, reply) => {
     const me = await requirePro(req, reply);
-    const servers = await prisma.server.findMany({ where: { restaurantId: me.restaurantId }, orderBy: { name: "asc" } });
-    const reviews = await prisma.serverReview.groupBy({
-      by: ["serverId"], where: { restaurantId: me.restaurantId },
-      _avg: { rating: true }, _count: { _all: true },
-    });
+    const [servers, reviews] = await Promise.all([
+      prisma.server.findMany({ where: { restaurantId: me.restaurantId }, orderBy: { name: "asc" } }),
+      prisma.serverReview.groupBy({
+        by: ["serverId"], where: { restaurantId: me.restaurantId },
+        _avg: { rating: true }, _count: { _all: true },
+      }),
+    ]);
     const byId = new Map(reviews.map((r) => [r.serverId, { avg: r._avg.rating, count: r._count._all }]));
     return {
       servers: servers.map((s) => ({ ...s, avgRating: byId.get(s.id)?.avg ?? null, reviewsCount: byId.get(s.id)?.count ?? 0 })),
@@ -1962,10 +1964,38 @@ export async function proRoutes(app: FastifyInstance) {
     const me = await requirePro(req, reply);
     const q = z.object({ days: z.coerce.number().int().min(1).max(90).default(7) }).parse(req.query);
     const since = new Date(Date.now() - q.days * 24 * 3600 * 1000);
-    const paidOrders = await prisma.order.findMany({
-      where: { table: { restaurantId: me.restaurantId }, status: "PAID", createdAt: { gte: since } },
-      include: { server: true },
-    });
+
+    // Fan out the five independent restaurant-scoped reads.
+    // Previously these ran sequentially — on a 90-day window this was 5 serial round trips.
+    const [paidOrders, reservations, reviewAgg, loyalty, menuForDead] = await Promise.all([
+      prisma.order.findMany({
+        where: { table: { restaurantId: me.restaurantId }, status: "PAID", createdAt: { gte: since } },
+        include: { server: true },
+      }),
+      prisma.reservation.findMany({
+        where: { restaurantId: me.restaurantId, startsAt: { gte: since } },
+        select: { startsAt: true, partySize: true, status: true, table: { select: { zone: true } } },
+      }),
+      prisma.dishReview.aggregate({
+        where: { restaurantId: me.restaurantId, createdAt: { gte: since } },
+        _avg: { rating: true },
+        _count: { id: true },
+      }),
+      prisma.$queryRawUnsafe<Array<{ customers: bigint; points: bigint; visits: bigint; offers: bigint; redemptions: bigint }>>(
+        `SELECT
+          (SELECT COUNT(*)::bigint FROM "LoyaltyCustomer" WHERE "restaurantId" = $1) AS customers,
+          (SELECT COALESCE(SUM(points),0)::bigint FROM "LoyaltyCustomer" WHERE "restaurantId" = $1) AS points,
+          (SELECT COALESCE(SUM("visitCount"),0)::bigint FROM "LoyaltyCustomer" WHERE "restaurantId" = $1) AS visits,
+          (SELECT COUNT(*)::bigint FROM "LoyaltyOffer" WHERE "restaurantId" = $1 AND active = true) AS offers,
+          (SELECT COUNT(*)::bigint FROM "LoyaltyTransaction" t JOIN "LoyaltyCustomer" c ON c.id = t."customerId" WHERE c."restaurantId" = $1 AND t.type = 'redeem') AS redemptions`,
+        me.restaurantId
+      ).catch(() => [{ customers: 0n, points: 0n, visits: 0n, offers: 0n, redemptions: 0n }]),
+      // Only available items can be "dead" — push the filter to SQL.
+      prisma.menuItem.findMany({
+        where: { restaurantId: me.restaurantId, available: true },
+        select: { name: true, priceCents: true, category: true },
+      }),
+    ]);
     const revenueCents = paidOrders.reduce((s, o) => s + o.totalCents + o.tipCents, 0);
     const tipsCents = paidOrders.reduce((s, o) => s + o.tipCents, 0);
     const ordersCount = paidOrders.length;
@@ -1998,10 +2028,6 @@ export async function proRoutes(app: FastifyInstance) {
       prev.revenueCents += o.totalCents + o.tipCents; prev.orders += 1;
       byServer.set(o.server.id, prev);
     }
-    const reservations = await prisma.reservation.findMany({
-      where: { restaurantId: me.restaurantId, startsAt: { gte: since } },
-      select: { startsAt: true, partySize: true, status: true, table: { select: { zone: true } } },
-    });
     const reservationStats = {
       count: reservations.length,
       covers: reservations.reduce((s, r) => s + r.partySize, 0),
@@ -2025,21 +2051,6 @@ export async function proRoutes(app: FastifyInstance) {
       reservationsByZone.set(zone, zonePrev);
     }
 
-    const reviewAgg = await prisma.dishReview.aggregate({
-      where: { restaurantId: me.restaurantId, createdAt: { gte: since } },
-      _avg: { rating: true },
-      _count: { id: true },
-    });
-    const loyalty = await prisma.$queryRawUnsafe<Array<{ customers: bigint; points: bigint; visits: bigint; offers: bigint; redemptions: bigint }>>(
-      `SELECT
-        (SELECT COUNT(*)::bigint FROM "LoyaltyCustomer" WHERE "restaurantId" = $1) AS customers,
-        (SELECT COALESCE(SUM(points),0)::bigint FROM "LoyaltyCustomer" WHERE "restaurantId" = $1) AS points,
-        (SELECT COALESCE(SUM("visitCount"),0)::bigint FROM "LoyaltyCustomer" WHERE "restaurantId" = $1) AS visits,
-        (SELECT COUNT(*)::bigint FROM "LoyaltyOffer" WHERE "restaurantId" = $1 AND active = true) AS offers,
-        (SELECT COUNT(*)::bigint FROM "LoyaltyTransaction" t JOIN "LoyaltyCustomer" c ON c.id = t."customerId" WHERE c."restaurantId" = $1 AND t.type = 'redeem') AS redemptions`,
-      me.restaurantId
-    ).catch(() => [{ customers: 0n, points: 0n, visits: 0n, offers: 0n, redemptions: 0n }]);
-
     // ── Heatmap affluence : ventes par jour de semaine × heure (fuseau Paris) ──
     const parisParts = (d: Date) => {
       const parts = new Intl.DateTimeFormat("en-GB", {
@@ -2061,12 +2072,8 @@ export async function proRoutes(app: FastifyInstance) {
     const salesHeatmap = Array.from(heatCells.values());
 
     // ── Poids morts : plats disponibles jamais vendus sur la période ──────────
-    const menuForDead = await prisma.menuItem.findMany({
-      where: { restaurantId: me.restaurantId },
-      select: { name: true, priceCents: true, available: true, category: true },
-    });
     const deadItems = menuForDead
-      .filter((m) => m.available && !(itemCounts.get(m.name)?.qty))
+      .filter((m) => !(itemCounts.get(m.name)?.qty))
       .map((m) => ({ name: m.name, priceCents: m.priceCents, category: m.category ?? "Non catégorisé" }))
       .slice(0, 30);
 
@@ -2872,34 +2879,29 @@ export async function proRoutes(app: FastifyInstance) {
       return reply.code(400).send({ error: "missing_period" });
     }
 
-    const orders = await prisma.order.findMany({
+    // Aggregate in SQL — the previous version loaded every order row (with items JSON)
+    // just to sum totalCents in JS, which for a quarterly period could pull >>10k rows.
+    const agg = await prisma.order.aggregate({
       where: {
         table: { restaurantId: me.restaurantId },
         createdAt: { gte: start, lt: end },
-        status: { in: ["PAID", "SERVED", "COOKING", "PENDING"] } // usually PAID, but keeping it broad for now if status tracking isn't strict
+        status: { in: ["PAID", "SERVED", "COOKING", "PENDING"] },
       },
-      select: { totalCents: true, items: true }
+      _sum: { totalCents: true },
+      _count: { _all: true },
     });
 
-    let totalCents = 0;
-    let onSiteCents = 0;
-    let takeAwayCents = 0;
-
-    for (const o of orders) {
-      totalCents += o.totalCents;
-      // Pour l'instant, on met tout dans "sur place" par défaut.
-      // Si une notion "à emporter" existe dans les items/orders, il faudra la parser ici.
-      onSiteCents += o.totalCents;
-    }
-
+    const totalCents = agg._sum.totalCents ?? 0;
+    // Pour l'instant on met tout dans "sur place" par défaut.
+    // Si une notion "à emporter" apparaît côté items/orders, il faudra la parser côté SQL.
     return {
       period: { start, end },
       revenue: {
         totalCents,
-        onSiteCents,
-        takeAwayCents,
+        onSiteCents: totalCents,
+        takeAwayCents: 0,
       },
-      ordersCount: orders.length,
+      ordersCount: agg._count._all,
     };
   });
 
@@ -3460,19 +3462,21 @@ export async function proRoutes(app: FastifyInstance) {
       offerId:    z.string(),
     }).parse(req.body);
 
-    const custRows = await prisma.$queryRawUnsafe<Array<{ points: number; tier: string }>>(
-      `SELECT points, tier FROM "LoyaltyCustomer" WHERE id = $1 AND "restaurantId" = $2 LIMIT 1`,
-      customerId, restaurantId
-    );
-    const offerRows = await prisma.$queryRawUnsafe<Array<{
-      pointsCost: number; minTier: string|null; active: boolean;
-      usageLimit: number|null; usageCount: number; expiresAt: string|null;
-      name: string; type: string; value: number;
-    }>>(
-      `SELECT "pointsCost", "minTier", active, "usageLimit", "usageCount", "expiresAt", name, type, value
-       FROM "LoyaltyOffer" WHERE id = $1 AND "restaurantId" = $2 LIMIT 1`,
-      offerId, restaurantId
-    );
+    const [custRows, offerRows] = await Promise.all([
+      prisma.$queryRawUnsafe<Array<{ points: number; tier: string }>>(
+        `SELECT points, tier FROM "LoyaltyCustomer" WHERE id = $1 AND "restaurantId" = $2 LIMIT 1`,
+        customerId, restaurantId
+      ),
+      prisma.$queryRawUnsafe<Array<{
+        pointsCost: number; minTier: string|null; active: boolean;
+        usageLimit: number|null; usageCount: number; expiresAt: string|null;
+        name: string; type: string; value: number;
+      }>>(
+        `SELECT "pointsCost", "minTier", active, "usageLimit", "usageCount", "expiresAt", name, type, value
+         FROM "LoyaltyOffer" WHERE id = $1 AND "restaurantId" = $2 LIMIT 1`,
+        offerId, restaurantId
+      ),
+    ]);
     if (!custRows[0]) return reply.code(404).send({ error: "customer_not_found" });
     const customer = custRows[0];
     const offer    = offerRows[0];
@@ -3514,43 +3518,42 @@ export async function proRoutes(app: FastifyInstance) {
     await ensureLoyaltySchema();
     const restaurantId = me.restaurantId;
 
-    const totals = await prisma.$queryRawUnsafe<Array<{
-      total: bigint; totalPoints: bigint; totalSpent: number;
-    }>>(
-      `SELECT COUNT(*)::bigint AS total, SUM(points)::bigint AS "totalPoints",
-              SUM("totalSpent") AS "totalSpent"
-       FROM "LoyaltyCustomer" WHERE "restaurantId" = $1`,
-      restaurantId
-    );
-
-    const tiers = await prisma.$queryRawUnsafe<Array<{ tier: string; count: bigint }>>(
-      `SELECT tier, COUNT(*)::bigint AS count FROM "LoyaltyCustomer"
-       WHERE "restaurantId" = $1 GROUP BY tier`,
-      restaurantId
-    );
-
-    const recentActivity = await prisma.$queryRawUnsafe<Array<{
-      type: string; points: number; description: string|null; createdAt: string;
-      firstName: string|null; lastName: string|null;
-    }>>(
-      `SELECT t.type, t.points, t.description, t."createdAt",
-              c."firstName", c."lastName"
-       FROM "LoyaltyTransaction" t
-       JOIN "LoyaltyCustomer" c ON c.id = t."customerId"
-       WHERE c."restaurantId" = $1
-       ORDER BY t."createdAt" DESC LIMIT 10`,
-      restaurantId
-    );
-
-    const offerStats = await prisma.$queryRawUnsafe<Array<{
-      total: bigint; active: bigint; totalRedemptions: bigint;
-    }>>(
-      `SELECT COUNT(*)::bigint AS total,
-              SUM(CASE WHEN active THEN 1 ELSE 0 END)::bigint AS active,
-              SUM("usageCount")::bigint AS "totalRedemptions"
-       FROM "LoyaltyOffer" WHERE "restaurantId" = $1`,
-      restaurantId
-    );
+    const [totals, tiers, recentActivity, offerStats] = await Promise.all([
+      prisma.$queryRawUnsafe<Array<{
+        total: bigint; totalPoints: bigint; totalSpent: number;
+      }>>(
+        `SELECT COUNT(*)::bigint AS total, SUM(points)::bigint AS "totalPoints",
+                SUM("totalSpent") AS "totalSpent"
+         FROM "LoyaltyCustomer" WHERE "restaurantId" = $1`,
+        restaurantId
+      ),
+      prisma.$queryRawUnsafe<Array<{ tier: string; count: bigint }>>(
+        `SELECT tier, COUNT(*)::bigint AS count FROM "LoyaltyCustomer"
+         WHERE "restaurantId" = $1 GROUP BY tier`,
+        restaurantId
+      ),
+      prisma.$queryRawUnsafe<Array<{
+        type: string; points: number; description: string|null; createdAt: string;
+        firstName: string|null; lastName: string|null;
+      }>>(
+        `SELECT t.type, t.points, t.description, t."createdAt",
+                c."firstName", c."lastName"
+         FROM "LoyaltyTransaction" t
+         JOIN "LoyaltyCustomer" c ON c.id = t."customerId"
+         WHERE c."restaurantId" = $1
+         ORDER BY t."createdAt" DESC LIMIT 10`,
+        restaurantId
+      ),
+      prisma.$queryRawUnsafe<Array<{
+        total: bigint; active: bigint; totalRedemptions: bigint;
+      }>>(
+        `SELECT COUNT(*)::bigint AS total,
+                SUM(CASE WHEN active THEN 1 ELSE 0 END)::bigint AS active,
+                SUM("usageCount")::bigint AS "totalRedemptions"
+         FROM "LoyaltyOffer" WHERE "restaurantId" = $1`,
+        restaurantId
+      ),
+    ]);
 
     return {
       customers: {
