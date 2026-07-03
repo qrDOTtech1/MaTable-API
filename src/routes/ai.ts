@@ -466,18 +466,19 @@ Reponds UNIQUEMENT par "A" ou "B".`;
         budget: z.number().optional(),
       }).parse(req.body ?? {});
 
-      const menuItems = await prisma.menuItem.findMany({
-        where: { restaurantId: me.restaurantId },
-        select: { id: true, name: true, priceCents: true, category: true, stockEnabled: true, stockQty: true, lowStockThreshold: true, available: true },
-      });
-
       const twoWeeksAgo = new Date(Date.now() - 14 * 86400_000);
-      const recentOrders = await prisma.order.findMany({
-        where: { table: { restaurantId: me.restaurantId }, createdAt: { gte: twoWeeksAgo }, status: { not: "CANCELLED" } },
-        select: { items: true, createdAt: true, totalCents: true },
-        orderBy: { createdAt: "desc" },
-        take: 500,
-      });
+      const [menuItems, recentOrders] = await Promise.all([
+        prisma.menuItem.findMany({
+          where: { restaurantId: me.restaurantId },
+          select: { id: true, name: true, priceCents: true, category: true, stockEnabled: true, stockQty: true, lowStockThreshold: true, available: true },
+        }),
+        prisma.order.findMany({
+          where: { table: { restaurantId: me.restaurantId }, createdAt: { gte: twoWeeksAgo }, status: { not: "CANCELLED" } },
+          select: { items: true, createdAt: true, totalCents: true },
+          orderBy: { createdAt: "desc" },
+          take: 500,
+        }),
+      ]);
 
       const salesMap: Record<string, { qty: number; revenue: number; name: string }> = {};
       for (const order of recentOrders) {
@@ -638,18 +639,19 @@ Regles OBLIGATOIRES:
       budget: z.number().optional(),
     }).parse(req.body ?? {});
 
-    const menuItems = await prisma.menuItem.findMany({
-      where: { restaurantId: me.restaurantId },
-      select: { id: true, name: true, priceCents: true, category: true, stockEnabled: true, stockQty: true, lowStockThreshold: true, available: true },
-    });
-
     const twoWeeksAgo = new Date(Date.now() - 14 * 86400_000);
-    const recentOrders = await prisma.order.findMany({
-      where: { table: { restaurantId: me.restaurantId }, createdAt: { gte: twoWeeksAgo }, status: { not: "CANCELLED" } },
-      select: { items: true, createdAt: true, totalCents: true },
-      orderBy: { createdAt: "desc" },
-      take: 500,
-    });
+    const [menuItems, recentOrders] = await Promise.all([
+      prisma.menuItem.findMany({
+        where: { restaurantId: me.restaurantId },
+        select: { id: true, name: true, priceCents: true, category: true, stockEnabled: true, stockQty: true, lowStockThreshold: true, available: true },
+      }),
+      prisma.order.findMany({
+        where: { table: { restaurantId: me.restaurantId }, createdAt: { gte: twoWeeksAgo }, status: { not: "CANCELLED" } },
+        select: { items: true, createdAt: true, totalCents: true },
+        orderBy: { createdAt: "desc" },
+        take: 500,
+      }),
+    ]);
 
     const salesMap: Record<string, { qty: number; revenue: number; name: string }> = {};
     for (const order of recentOrders) {
@@ -813,17 +815,18 @@ Regles OBLIGATOIRES:
     const { send: sendSSE, close: closeSSE } = setupSSE(reply);
 
     try {
-      const menuItems = await prisma.menuItem.findMany({
-        where: { restaurantId: me.restaurantId },
-        select: { name: true, priceCents: true, category: true, available: true },
-      });
-
       const twoWeeksAgo = new Date(Date.now() - 14 * 86400_000);
-      const recentOrders = await prisma.order.findMany({
-        where: { table: { restaurantId: me.restaurantId }, createdAt: { gte: twoWeeksAgo }, status: { not: "CANCELLED" } },
-        select: { items: true },
-        take: 300,
-      });
+      const [menuItems, recentOrders] = await Promise.all([
+        prisma.menuItem.findMany({
+          where: { restaurantId: me.restaurantId },
+          select: { name: true, priceCents: true, category: true, available: true },
+        }),
+        prisma.order.findMany({
+          where: { table: { restaurantId: me.restaurantId }, createdAt: { gte: twoWeeksAgo }, status: { not: "CANCELLED" } },
+          select: { items: true },
+          take: 300,
+        }),
+      ]);
 
       const catMap: Record<string, typeof menuItems> = {};
       for (const m of menuItems) {
@@ -904,17 +907,18 @@ Retourne UNIQUEMENT un JSON valide (sans markdown):
     try {
       sendSSE({ type: "progress", phase: "loading-menu", message: "Chargement du menu et des ventes..." });
 
-      const menuItems = await prisma.menuItem.findMany({
-        where: { restaurantId: me.restaurantId },
-        select: { name: true, priceCents: true, category: true, available: true },
-      });
-
       const twoWeeksAgo = new Date(Date.now() - 14 * 86400_000);
-      const recentOrders = await prisma.order.findMany({
-        where: { table: { restaurantId: me.restaurantId }, createdAt: { gte: twoWeeksAgo }, status: { not: "CANCELLED" } },
-        select: { items: true },
-        take: 300,
-      });
+      const [menuItems, recentOrders] = await Promise.all([
+        prisma.menuItem.findMany({
+          where: { restaurantId: me.restaurantId },
+          select: { name: true, priceCents: true, category: true, available: true },
+        }),
+        prisma.order.findMany({
+          where: { table: { restaurantId: me.restaurantId }, createdAt: { gte: twoWeeksAgo }, status: { not: "CANCELLED" } },
+          select: { items: true },
+          take: 300,
+        }),
+      ]);
 
       const salesMap: Record<string, { qty: number; name: string }> = {};
       for (const order of recentOrders) {
