@@ -1557,22 +1557,22 @@ Ne renvoie STRICTEMENT rien d'autre que ce JSON (pas de bloc Markdown \`\`\`json
     const session = await prisma.tableSession.findUnique({ where: { id: decoded.sessionId } });
     if (!session || !session.active) return reply.code(401).send({ error: "session_closed" });
 
-    const menuItems = await prisma.menuItem.findMany({
-      where: {
-        id: { in: body.items.map((i) => i.menuItemId) },
-        restaurantId: decoded.restaurantId,
-        available: true,
-      },
-    });
-    const byId = new Map(menuItems.map((m) => [m.id, m]));
-
-    // Read quantity discount tiers + new quantity TIERS (qty → priceCents)
-    // Both columns managed via ensure_columns.sql.
     const menuItemIdsForDiscount = body.items.map((i) => i.menuItemId);
     type DiscRow = { id: string; quantityDiscounts: any; quantityTiers: any };
-    const discRows = menuItemIdsForDiscount.length === 0 ? [] : await prisma.$queryRaw<DiscRow[]>`
-      SELECT id, "quantityDiscounts", "quantityTiers" FROM "MenuItem" WHERE id = ANY(${menuItemIdsForDiscount}::text[])
-    `;
+    // Fetch full menu items and raw discount/tier columns in parallel (single round-trip wait).
+    const [menuItems, discRows] = await Promise.all([
+      prisma.menuItem.findMany({
+        where: {
+          id: { in: menuItemIdsForDiscount },
+          restaurantId: decoded.restaurantId,
+          available: true,
+        },
+      }),
+      menuItemIdsForDiscount.length === 0 ? Promise.resolve<DiscRow[]>([]) : prisma.$queryRaw<DiscRow[]>`
+        SELECT id, "quantityDiscounts", "quantityTiers" FROM "MenuItem" WHERE id = ANY(${menuItemIdsForDiscount}::text[])
+      `,
+    ]);
+    const byId = new Map(menuItems.map((m) => [m.id, m]));
     const tiersById = new Map(discRows.map((r) => [r.id, parseQuantityDiscounts(r.quantityDiscounts)]));
     const qtyTiersById = new Map(discRows.map((r) => [r.id, parseQuantityTiers(r.quantityTiers)]));
 
