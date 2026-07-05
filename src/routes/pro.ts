@@ -2931,7 +2931,22 @@ export async function proRoutes(app: FastifyInstance) {
     return v;
   }
 
-  async function ensureLoyaltySchema() {
+  // Cache the loyalty schema-ensure at process scope so we don't run
+  // ~10 `CREATE TABLE / ALTER TABLE IF NOT EXISTS` per loyalty request.
+  let loyaltySchemaReady: Promise<void> | null = null;
+  async function ensureLoyaltySchema(): Promise<void> {
+    if (loyaltySchemaReady) return loyaltySchemaReady;
+    loyaltySchemaReady = (async () => {
+      try {
+        await ensureLoyaltySchemaImpl();
+      } catch (e) {
+        loyaltySchemaReady = null; // allow retry on next request
+        throw e;
+      }
+    })();
+    return loyaltySchemaReady;
+  }
+  async function ensureLoyaltySchemaImpl() {
     await prisma.$executeRawUnsafe(`CREATE TABLE IF NOT EXISTS "LoyaltyCustomer" (
       "id" TEXT NOT NULL,
       "restaurantId" TEXT NOT NULL,
