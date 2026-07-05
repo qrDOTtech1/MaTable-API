@@ -240,10 +240,18 @@ export function setupSSE(reply: import("fastify").FastifyReply) {
     try { reply.raw.write(": keepalive\n\n"); } catch { /* closed */ }
   }, 15_000);
 
+  let closed = false;
   const close = () => {
+    if (closed) return;
+    closed = true;
     clearInterval(keepaliveTimer);
     try { reply.raw.end(); } catch { /* already closed */ }
   };
+
+  // If the client disconnects mid-stream, stop the keepalive interval so we
+  // don't keep writing (and throwing) into a dead socket for minutes.
+  reply.request.raw.on("close", close);
+  reply.raw.on("close", close);
 
   return { send, close };
 }

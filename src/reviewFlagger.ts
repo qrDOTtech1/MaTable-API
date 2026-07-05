@@ -76,6 +76,21 @@ function normalize(input: string): string {
     .trim();
 }
 
+// Pre-compile regexes once at module load. Previously `detectFlags` rebuilt
+// ~130 RegExp objects per call — called ~200× per /reviews/insights request,
+// that was 26k allocations + compiles for what is effectively a static table.
+type CompiledKeyword = { category: FlagCategory; keyword: string; regex: RegExp };
+const COMPILED_KEYWORDS: CompiledKeyword[] = KEYWORD_MAP.flatMap(({ category, keywords }) =>
+  keywords
+    .map((kw) => {
+      const needle = normalize(kw);
+      if (!needle) return null;
+      const escaped = needle.replace(/[-\/\\^$*+?.()|[\]{}]/g, "\\$&");
+      return { category, keyword: kw, regex: new RegExp(`(^|\\s)${escaped}(\\s|$)`) };
+    })
+    .filter((x): x is CompiledKeyword => x !== null)
+);
+
 /**
  * Detect flag categories triggered by the given text.
  * Always returns a structured result; empty arrays = no flag.
@@ -91,17 +106,11 @@ export function detectFlags(...texts: (string | null | undefined)[]): {
   const matched: { category: FlagCategory; keyword: string }[] = [];
   const seenCategories = new Set<FlagCategory>();
 
-  for (const { category, keywords } of KEYWORD_MAP) {
-    for (const kw of keywords) {
-      const needle = normalize(kw);
-      if (!needle) continue;
-      // Word boundary-ish: ensure surrounded by non-word chars or string boundaries.
-      const re = new RegExp(`(^|\\s)${needle.replace(/[-\/\\^$*+?.()|[\]{}]/g, "\\$&")}(\\s|$)`);
-      if (re.test(blob)) {
-        matched.push({ category, keyword: kw });
-        seenCategories.add(category);
-        break; // 1 match per category is enough
-      }
+  for (const { category, keyword, regex } of COMPILED_KEYWORDS) {
+    if (seenCategories.has(category)) continue; // 1 match per category is enough
+    if (regex.test(blob)) {
+      matched.push({ category, keyword });
+      seenCategories.add(category);
     }
   }
 
