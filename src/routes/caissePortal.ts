@@ -49,18 +49,14 @@ export async function caissePortalRoutes(app: FastifyInstance) {
       pin: z.string().min(4).max(8),
     }).parse(req.body);
 
-    const restaurant = await prisma.restaurant.findUnique({
-      where: { slug },
-      select: { id: true, name: true },
-    });
-
-    if (!restaurant) return reply.code(404).send({ error: "RESTAURANT_NOT_FOUND" });
-
-    // caissePin is added via ensure_columns.sql — not yet in generated Prisma client
-    const rows = await prisma.$queryRaw<Array<{ caissePin: string | null }>>`
-      SELECT "caissePin" FROM "Restaurant" WHERE id = ${restaurant.id}
+    // Single query — restaurant identity + caissePin in one round-trip.
+    // caissePin is added via ensure_columns.sql, not yet in the generated Prisma client.
+    const rows = await prisma.$queryRaw<Array<{ id: string; name: string; caissePin: string | null }>>`
+      SELECT id, name, "caissePin" FROM "Restaurant" WHERE slug = ${slug}
     `;
-    const storedPin = rows[0]?.caissePin ?? null;
+    const restaurant = rows[0] ? { id: rows[0].id, name: rows[0].name } : null;
+    if (!restaurant) return reply.code(404).send({ error: "RESTAURANT_NOT_FOUND" });
+    const storedPin = rows[0].caissePin ?? null;
 
     if (!storedPin) return reply.code(503).send({ error: "CAISSE_NOT_CONFIGURED", message: "PIN caisse non configuré. Contactez le gérant." });
     if (storedPin !== pin) return reply.code(401).send({ error: "INVALID_PIN" });

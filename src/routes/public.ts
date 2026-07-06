@@ -421,6 +421,22 @@ export async function publicRoutes(app: FastifyInstance) {
 
     const tiersById = new Map(tiersRows.map(r => [r.id, parseQuantityTiers(r.quantityTiers)]));
 
+    // Bucket photos once by menuItemId (null = restaurant-level). Before this,
+    // rendering a menu with N items and P photos ran N × P filter passes.
+    const photosByMenuItem = new Map<string, { id: string; url: string }[]>();
+    const restaurantPhotos: { id: string; url: string }[] = [];
+    for (const p of ((restaurant as any).photos ?? [])) {
+      if (p.kind === "STAFF") continue;
+      const url = `/api/photo/${p.id}`;
+      if (p.menuItemId) {
+        const bucket = photosByMenuItem.get(p.menuItemId);
+        if (bucket) bucket.push({ id: p.id, url });
+        else photosByMenuItem.set(p.menuItemId, [{ id: p.id, url }]);
+      } else {
+        restaurantPhotos.push({ id: p.id, url });
+      }
+    }
+
     return {
       restaurant: {
         id: restaurant.id,
@@ -439,15 +455,11 @@ export async function publicRoutes(app: FastifyInstance) {
         menuItems: restaurant.menuItems.map((m) => ({
           ...m,
           quantityTiers: tiersById.get(m.id) ?? [],
-          photos: (restaurant as any).photos
-            ?.filter((p: any) => p.menuItemId === m.id && p.kind !== "STAFF")
-            .map((p: any) => ({ id: p.id, url: `/api/photo/${p.id}` })) ?? [],
+          photos: photosByMenuItem.get(m.id) ?? [],
         })),
         openingHours: restaurant.openingHours,
         // STAFF photos are never exposed on the public restaurant page
-        photos: (restaurant as any).photos
-          ?.filter((p: any) => !p.menuItemId && p.kind !== "STAFF")
-          .map((p: any) => ({ id: p.id, url: `/api/photo/${p.id}` })) ?? [],
+        photos: restaurantPhotos,
         servers: restaurant.servers,
       },
       reviews: {
@@ -518,6 +530,16 @@ export async function publicRoutes(app: FastifyInstance) {
 
     const maxCoversPerSlot: number | null = (restaurant as any).maxCoversPerSlot ?? null;
 
+    // Group tables by zone once. Doesn't depend on the slot — used to be rebuilt
+    // for every slot inside canBook.
+    const tablesByZone = new Map<string | null, string[]>();
+    for (const t of reservableTables) {
+      const key = t.zone ?? null;
+      const bucket = tablesByZone.get(key);
+      if (bucket) bucket.push(t.id);
+      else tablesByZone.set(key, [t.id]);
+    }
+
     /**
      * Vérifie si au moins une table réservable peut accueillir une nouvelle
      * réservation sur le créneau [slotStart, slotStart + mealMin], en respectant
@@ -540,15 +562,7 @@ export async function publicRoutes(app: FastifyInstance) {
 
       const occupiedTableIds = new Set<string>(overlapping.map((r) => r.tableId as string));
 
-      // Compter par zone : tables libres VS quota walk-in
-      const byZone = new Map<string | null, string[]>();
-      for (const t of reservableTables) {
-        const key = t.zone ?? null;
-        if (!byZone.has(key)) byZone.set(key, []);
-        byZone.get(key)!.push(t.id);
-      }
-
-      for (const [zone, tableIds] of byZone.entries()) {
+      for (const [zone, tableIds] of tablesByZone.entries()) {
         const quota = zone !== null ? (quotaByZone.get(zone) ?? 0) : 0;
         const freeTables = tableIds.filter((id) => !occupiedTableIds.has(id));
         const bookable = freeTables.length - quota;
