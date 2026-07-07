@@ -2645,18 +2645,35 @@ export async function proRoutes(app: FastifyInstance) {
       })).min(1).max(100),
     }).parse(req.body);
 
-    const created: StockProductRow[] = [];
-    for (const p of body.products) {
-      const id = crypto.randomUUID();
+    // Bulk INSERT en une seule requête — 11 colonnes × N lignes.
+    // Évite N round-trips séquentiels (jusqu'à 100 → 1).
+    const created: StockProductRow[] = body.products.map(p => ({
+      id: crypto.randomUUID(),
+      restaurantId: me.restaurantId,
+      ...p,
+      notes: p.notes ?? null,
+      updatedAt: new Date(),
+      createdAt: new Date(),
+    }));
+
+    if (created.length > 0) {
+      const values: string[] = [];
+      const params: unknown[] = [];
+      let idx = 1;
+      for (const row of created) {
+        values.push(`($${idx++}, $${idx++}, $${idx++}, $${idx++}, $${idx++}, $${idx++}, $${idx++}, $${idx++}, $${idx++}, $${idx++}, $${idx++}::jsonb, NOW(), NOW())`);
+        params.push(
+          row.id, row.restaurantId, row.name, row.unit, row.category, row.isFresh,
+          row.currentQty, row.lowThreshold, row.weeklyEstimate,
+          row.notes, JSON.stringify(row.linkedDishes),
+        );
+      }
       await prisma.$executeRawUnsafe(
         `INSERT INTO "StockProduct" (id, "restaurantId", name, unit, category, "isFresh",
            "currentQty", "lowThreshold", "weeklyEstimate", notes, "linkedDishes", "updatedAt", "createdAt")
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, NOW(), NOW())`,
-        id, me.restaurantId, p.name, p.unit, p.category, p.isFresh,
-        p.currentQty, p.lowThreshold, p.weeklyEstimate,
-        p.notes ?? null, JSON.stringify(p.linkedDishes)
+         VALUES ${values.join(", ")}`,
+        ...params,
       );
-      created.push({ id, restaurantId: me.restaurantId, ...p, notes: p.notes ?? null, updatedAt: new Date(), createdAt: new Date() });
     }
     return { created: created.length };
   });
@@ -2741,31 +2758,27 @@ export async function proRoutes(app: FastifyInstance) {
       body.realCost, body.notes ?? null, id, me.restaurantId,
     );
 
-    // Mettre à jour currentQty dans StockProduct pour chaque article acheté, ou le créer
+    // Mettre à jour currentQty dans StockProduct pour chaque article acheté, ou le créer.
+    // Chaque item cible un nom distinct → pas de contention → fan-out en parallèle.
     const shoppingList: Array<{ ingredient: string; toBuy: number; unit: string; category?: string }> = rows[0].shoppingList ?? [];
-    let stockUpdated = 0;
-    for (const item of shoppingList) {
-      if (!item.ingredient || !item.toBuy || item.toBuy <= 0) continue;
-      // Chercher par nom (case-insensitive)
+    const applicableItems = shoppingList.filter(item => item.ingredient && item.toBuy && item.toBuy > 0);
+    const results = await Promise.all(applicableItems.map(async (item) => {
       const updated = await prisma.$executeRawUnsafe(
         `UPDATE "StockProduct"
          SET "currentQty" = "currentQty" + $1, "updatedAt" = NOW()
          WHERE "restaurantId" = $2 AND LOWER(name) = LOWER($3)`,
         item.toBuy, me.restaurantId, item.ingredient,
       );
-      if (Number(updated) > 0) {
-        stockUpdated++;
-      } else {
-        // Si le produit n'existe pas, on le crée
-        const newId = crypto.randomUUID();
-        await prisma.$executeRawUnsafe(
-          `INSERT INTO "StockProduct" (id, "restaurantId", name, unit, category, "currentQty", "updatedAt", "createdAt")
-           VALUES ($1, $2, $3, $4, $5, $6, NOW(), NOW())`,
-          newId, me.restaurantId, item.ingredient, item.unit || "unité(s)", item.category || "Autre", item.toBuy
-        );
-        stockUpdated++;
-      }
-    }
+      if (Number(updated) > 0) return true;
+      const newId = crypto.randomUUID();
+      await prisma.$executeRawUnsafe(
+        `INSERT INTO "StockProduct" (id, "restaurantId", name, unit, category, "currentQty", "updatedAt", "createdAt")
+         VALUES ($1, $2, $3, $4, $5, $6, NOW(), NOW())`,
+        newId, me.restaurantId, item.ingredient, item.unit || "unité(s)", item.category || "Autre", item.toBuy
+      );
+      return true;
+    }));
+    const stockUpdated = results.filter(Boolean).length;
 
     return { ok: true, stockUpdated };
   });
