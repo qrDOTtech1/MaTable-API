@@ -1458,25 +1458,24 @@ Réponds UNIQUEMENT en JSON valide avec ce format EXACT:
 
       await saveAiHistory(me.restaurantId, "MENU", `Génération Accords & Upsell (${itemsToImprove.length} plats)`, { result });
 
-      // Application des modifications directement via ensure_columns.sql logic
+      // Application des modifications — fan-out en parallèle (chaque UPDATE cible
+      // un menuItemId distinct → pas de contention), une seule round-trip logique.
       const improvements = Array.isArray(result.improvements) ? result.improvements : [];
-      let updatedCount = 0;
       const allNewBeverages = new Set<string>();
-      
-      for (const imp of improvements) {
-        if (!imp.menuItemId) continue;
+      const applicable = improvements.filter((imp: any) => imp.menuItemId);
+      for (const imp of applicable) {
+        const newBevs = Array.isArray(imp.newBeverageSuggestions) ? imp.newBeverageSuggestions : [];
+        newBevs.forEach((b: string) => allNewBeverages.add(b));
+      }
+      await Promise.all(applicable.map((imp: any) => {
         const pairings = Array.isArray(imp.suggestedPairings) ? imp.suggestedPairings : [];
         const upsells = Array.isArray(imp.upsellItemIds) ? imp.upsellItemIds : [];
-        const newBevs = Array.isArray(imp.newBeverageSuggestions) ? imp.newBeverageSuggestions : [];
-        
-        newBevs.forEach((b: string) => allNewBeverages.add(b));
-
-        await prisma.$executeRawUnsafe(
+        return prisma.$executeRawUnsafe(
           `UPDATE "MenuItem" SET "suggestedPairings" = $1::jsonb, "upsellItems" = $2::jsonb WHERE id = $3 AND "restaurantId" = $4`,
           JSON.stringify(pairings), JSON.stringify(upsells), imp.menuItemId, me.restaurantId
         );
-        updatedCount++;
-      }
+      }));
+      const updatedCount = applicable.length;
 
       send({ 
         type: "result", 
@@ -1508,8 +1507,9 @@ Réponds UNIQUEMENT en JSON valide avec ce format EXACT:
       })).min(1).max(50),
     }).parse(req.body);
 
-    const created = [];
-    for (const item of items) {
+    // Fan-out crée + éventuel UPDATE waitMinutes en parallèle. Chaque item cible
+    // une ligne distincte (id fraîchement créé) → aucune contention entre chaines.
+    const created = await Promise.all(items.map(async (item) => {
       const { waitMinutes, ...prismaData } = item;
       const mi = await prisma.menuItem.create({
         data: {
@@ -1522,8 +1522,8 @@ Réponds UNIQUEMENT en JSON valide avec ce format EXACT:
       if (waitMinutes && waitMinutes > 0) {
         await prisma.$executeRaw`UPDATE "MenuItem" SET "waitMinutes" = ${waitMinutes} WHERE id = ${mi.id}`;
       }
-      created.push(mi);
-    }
+      return mi;
+    }));
 
     return { ok: true, count: created.length, items: created };
   });
