@@ -193,26 +193,24 @@ export async function platformBillingRoutes(app: FastifyInstance) {
   // ── GET /status ────────────────────────────────────────────────────────────
   app.get("/status", async (req, reply) => {
     const me = await requirePro(req, reply);
-    const cfg = await getConfig();
-    const rows = await prisma.$queryRawUnsafe<Array<{
-      subscription: string; subscriptionExpiresAt: Date | null;
-      platformStripeSubscriptionId: string | null; billingPastDue: boolean | null;
-    }>>(
-      `SELECT subscription::text AS subscription, "subscriptionExpiresAt",
-              "platformStripeSubscriptionId", "billingPastDue"
-       FROM "Restaurant" WHERE id = $1`, me.restaurantId,
-    );
-    const r = rows[0];
-
-    // Une facture encaissée = fin de la version d'essai (table peut ne pas exister)
-    let hasInvoice = false;
-    try {
-      const inv = await prisma.$queryRawUnsafe<Array<{ c: bigint }>>(
+    const [cfg, rows, inv] = await Promise.all([
+      getConfig(),
+      prisma.$queryRawUnsafe<Array<{
+        subscription: string; subscriptionExpiresAt: Date | null;
+        platformStripeSubscriptionId: string | null; billingPastDue: boolean | null;
+      }>>(
+        `SELECT subscription::text AS subscription, "subscriptionExpiresAt",
+                "platformStripeSubscriptionId", "billingPastDue"
+         FROM "Restaurant" WHERE id = $1`, me.restaurantId,
+      ),
+      // Une facture encaissée = fin de la version d'essai (table peut ne pas exister)
+      prisma.$queryRawUnsafe<Array<{ c: bigint }>>(
         `SELECT COUNT(*)::bigint AS c FROM "SubscriptionEvent" WHERE "restaurantId" = $1 AND "amountCents" > 0`,
         me.restaurantId,
-      );
-      hasInvoice = Number(inv[0]?.c ?? 0n) > 0;
-    } catch { /* table absente → on reste en essai */ }
+      ).catch(() => [] as Array<{ c: bigint }>),
+    ]);
+    const r = rows[0];
+    const hasInvoice = Number(inv[0]?.c ?? 0n) > 0;
 
     const subscribed = !!r?.platformStripeSubscriptionId;
     const expiresAt = r?.subscriptionExpiresAt ?? null;
