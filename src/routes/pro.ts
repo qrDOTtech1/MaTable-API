@@ -2645,19 +2645,36 @@ export async function proRoutes(app: FastifyInstance) {
       })).min(1).max(100),
     }).parse(req.body);
 
-    const created: StockProductRow[] = [];
-    for (const p of body.products) {
-      const id = crypto.randomUUID();
-      await prisma.$executeRawUnsafe(
-        `INSERT INTO "StockProduct" (id, "restaurantId", name, unit, category, "isFresh",
-           "currentQty", "lowThreshold", "weeklyEstimate", notes, "linkedDishes", "updatedAt", "createdAt")
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, NOW(), NOW())`,
-        id, me.restaurantId, p.name, p.unit, p.category, p.isFresh,
-        p.currentQty, p.lowThreshold, p.weeklyEstimate,
-        p.notes ?? null, JSON.stringify(p.linkedDishes)
+    // Batch insert: one multi-row INSERT instead of N sequential ones (up to 100 → 1 round-trip).
+    if (body.products.length === 0) return { created: 0 };
+    const cols = 11; // id, restaurantId, name, unit, category, isFresh, currentQty, lowThreshold, weeklyEstimate, notes, linkedDishes
+    const created: StockProductRow[] = body.products.map((p) => ({
+      id: crypto.randomUUID(),
+      restaurantId: me.restaurantId,
+      ...p,
+      notes: p.notes ?? null,
+      updatedAt: new Date(),
+      createdAt: new Date(),
+    }));
+    const values: unknown[] = [];
+    const placeholders: string[] = [];
+    created.forEach((row, i) => {
+      const base = i * cols;
+      placeholders.push(
+        `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}, $${base + 6}, $${base + 7}, $${base + 8}, $${base + 9}, $${base + 10}, $${base + 11}::jsonb, NOW(), NOW())`
       );
-      created.push({ id, restaurantId: me.restaurantId, ...p, notes: p.notes ?? null, updatedAt: new Date(), createdAt: new Date() });
-    }
+      values.push(
+        row.id, row.restaurantId, row.name, row.unit, row.category, row.isFresh,
+        row.currentQty, row.lowThreshold, row.weeklyEstimate,
+        row.notes, JSON.stringify(row.linkedDishes),
+      );
+    });
+    await prisma.$executeRawUnsafe(
+      `INSERT INTO "StockProduct" (id, "restaurantId", name, unit, category, "isFresh",
+         "currentQty", "lowThreshold", "weeklyEstimate", notes, "linkedDishes", "updatedAt", "createdAt")
+       VALUES ${placeholders.join(", ")}`,
+      ...values,
+    );
     return { created: created.length };
   });
 
@@ -3205,22 +3222,41 @@ export async function proRoutes(app: FastifyInstance) {
       })).max(5000),
     }).parse(req.body);
 
-    let imported = 0, skipped = 0;
-    for (const c of body.customers) {
-      if (!c.email && !c.phone && !c.firstName && !c.lastName) { skipped++; continue; }
-      try {
-        await upsertLoyaltyCustomer(restaurantId, {
-          ...c,
-          firstName: normalizeText(c.firstName) ?? undefined,
-          lastName: normalizeText(c.lastName) ?? undefined,
-          email: normalizeEmail(c.email) ?? undefined,
-          phone: normalizeText(c.phone) ?? undefined,
-          birthDate: normalizeNullableDate(c.birthDate) ?? undefined,
-          source: "import",
-        });
-        imported++;
-      } catch { skipped++; }
-    }
+    // Filter out unusable rows up front so `skipped` counters are correct
+    // regardless of concurrency ordering.
+    const usable = body.customers.filter(
+      (c) => c.email || c.phone || c.firstName || c.lastName,
+    );
+    let imported = 0;
+    let skipped = body.customers.length - usable.length;
+
+    // Run upserts with bounded concurrency: each upsertLoyaltyCustomer
+    // does 1–3 sequential queries, so a serial loop over 5000 items would
+    // fire up to 15k queries end-to-end. A 20-worker pool cuts wall-clock
+    // by ~20× while keeping the pool small enough not to saturate the DB.
+    const CONCURRENCY = 20;
+    let cursor = 0;
+    await Promise.all(
+      Array.from({ length: Math.min(CONCURRENCY, usable.length) }, async () => {
+        while (true) {
+          const i = cursor++;
+          if (i >= usable.length) return;
+          const c = usable[i];
+          try {
+            await upsertLoyaltyCustomer(restaurantId, {
+              ...c,
+              firstName: normalizeText(c.firstName) ?? undefined,
+              lastName: normalizeText(c.lastName) ?? undefined,
+              email: normalizeEmail(c.email) ?? undefined,
+              phone: normalizeText(c.phone) ?? undefined,
+              birthDate: normalizeNullableDate(c.birthDate) ?? undefined,
+              source: "import",
+            });
+            imported++;
+          } catch { skipped++; }
+        }
+      }),
+    );
     return { imported, skipped, total: body.customers.length };
   });
 
