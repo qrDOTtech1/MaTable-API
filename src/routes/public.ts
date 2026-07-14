@@ -1401,28 +1401,35 @@ Ne renvoie STRICTEMENT rien d'autre que ce JSON (pas de bloc Markdown \`\`\`json
     const slotEnd = new Date(startsAt.getTime() + mealMin * 60_000);
 
     // ── Trouver la meilleure table disponible en respectant les quotas ────────
-    const reservableTables = await prisma.table.findMany({
-      where: {
-        restaurantId: restaurant.id,
-        reservable: true,
-        seats: { gte: input.guests },
-        // Si une zone est demandée, filtrer dessus
-        ...(input.zone ? { zone: input.zone } as any : {}),
-      },
-      select: { id: true, zone: true, seats: true },
-      orderBy: { seats: "asc" }, // préférer la table la plus petite qui convient
-    });
-
-    // Tables déjà occupées sur ce créneau
-    const overlapping = await prisma.reservation.findMany({
-      where: {
-        restaurantId: restaurant.id,
-        status: { notIn: ["CANCELLED"] },
-        tableId: { not: null },
-        startsAt: { lt: slotEnd },
-      },
-      select: { tableId: true, startsAt: true, durationMin: true },
-    });
+    // Ces 3 reads sont indépendants — les paralléliser divise la latence par ~3.
+    const [reservableTables, overlapping, zoneConfigs] = await Promise.all([
+      prisma.table.findMany({
+        where: {
+          restaurantId: restaurant.id,
+          reservable: true,
+          seats: { gte: input.guests },
+          // Si une zone est demandée, filtrer dessus
+          ...(input.zone ? { zone: input.zone } as any : {}),
+        },
+        select: { id: true, zone: true, seats: true },
+        orderBy: { seats: "asc" }, // préférer la table la plus petite qui convient
+      }),
+      // Tables déjà occupées sur ce créneau
+      prisma.reservation.findMany({
+        where: {
+          restaurantId: restaurant.id,
+          status: { notIn: ["CANCELLED"] },
+          tableId: { not: null },
+          startsAt: { lt: slotEnd },
+        },
+        select: { tableId: true, startsAt: true, durationMin: true },
+      }),
+      // Quotas walk-in
+      (prisma as any).zoneConfig.findMany({
+        where: { restaurantId: restaurant.id },
+        select: { zone: true, minFreeWalkIn: true },
+      }) as Promise<{ zone: string; minFreeWalkIn: number }[]>,
+    ]);
     const occupiedIds = new Set<string>(
       overlapping
         .filter((r) => {
@@ -1431,12 +1438,6 @@ Ne renvoie STRICTEMENT rien d'autre que ce JSON (pas de bloc Markdown \`\`\`json
         })
         .map((r) => r.tableId as string)
     );
-
-    // Charger quotas walk-in
-    const zoneConfigs: { zone: string; minFreeWalkIn: number }[] = await (prisma as any).zoneConfig.findMany({
-      where: { restaurantId: restaurant.id },
-      select: { zone: true, minFreeWalkIn: true },
-    });
     const quotaByZone = new Map<string, number>(zoneConfigs.map((c: any) => [c.zone, c.minFreeWalkIn]));
 
     // Grouper par zone pour vérifier le quota
