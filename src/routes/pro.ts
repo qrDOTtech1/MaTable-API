@@ -2645,19 +2645,25 @@ export async function proRoutes(app: FastifyInstance) {
       })).min(1).max(100),
     }).parse(req.body);
 
-    const created: StockProductRow[] = [];
-    for (const p of body.products) {
-      const id = crypto.randomUUID();
-      await prisma.$executeRawUnsafe(
+    const now = new Date();
+    const created: StockProductRow[] = body.products.map((p) => ({
+      id: crypto.randomUUID(),
+      restaurantId: me.restaurantId,
+      ...p,
+      notes: p.notes ?? null,
+      updatedAt: now,
+      createdAt: now,
+    }));
+    await Promise.all(created.map((p) =>
+      prisma.$executeRawUnsafe(
         `INSERT INTO "StockProduct" (id, "restaurantId", name, unit, category, "isFresh",
            "currentQty", "lowThreshold", "weeklyEstimate", notes, "linkedDishes", "updatedAt", "createdAt")
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, NOW(), NOW())`,
-        id, me.restaurantId, p.name, p.unit, p.category, p.isFresh,
+        p.id, me.restaurantId, p.name, p.unit, p.category, p.isFresh,
         p.currentQty, p.lowThreshold, p.weeklyEstimate,
         p.notes ?? null, JSON.stringify(p.linkedDishes)
-      );
-      created.push({ id, restaurantId: me.restaurantId, ...p, notes: p.notes ?? null, updatedAt: new Date(), createdAt: new Date() });
-    }
+      )
+    ));
     return { created: created.length };
   });
 
@@ -2743,29 +2749,37 @@ export async function proRoutes(app: FastifyInstance) {
 
     // Mettre à jour currentQty dans StockProduct pour chaque article acheté, ou le créer
     const shoppingList: Array<{ ingredient: string; toBuy: number; unit: string; category?: string }> = rows[0].shoppingList ?? [];
-    let stockUpdated = 0;
+    // Regrouper par nom (case-insensitive) pour sommer les toBuy avant de paralléliser
+    // — évite les race-conditions sur "SET currentQty = currentQty + N" quand un même
+    // ingrédient apparaît deux fois dans la liste.
+    const byName = new Map<string, { ingredient: string; toBuy: number; unit: string; category?: string }>();
     for (const item of shoppingList) {
       if (!item.ingredient || !item.toBuy || item.toBuy <= 0) continue;
-      // Chercher par nom (case-insensitive)
+      const key = item.ingredient.toLowerCase();
+      const prev = byName.get(key);
+      if (prev) {
+        prev.toBuy += item.toBuy;
+      } else {
+        byName.set(key, { ...item });
+      }
+    }
+    const results = await Promise.all(Array.from(byName.values()).map(async (item) => {
       const updated = await prisma.$executeRawUnsafe(
         `UPDATE "StockProduct"
          SET "currentQty" = "currentQty" + $1, "updatedAt" = NOW()
          WHERE "restaurantId" = $2 AND LOWER(name) = LOWER($3)`,
         item.toBuy, me.restaurantId, item.ingredient,
       );
-      if (Number(updated) > 0) {
-        stockUpdated++;
-      } else {
-        // Si le produit n'existe pas, on le crée
-        const newId = crypto.randomUUID();
-        await prisma.$executeRawUnsafe(
-          `INSERT INTO "StockProduct" (id, "restaurantId", name, unit, category, "currentQty", "updatedAt", "createdAt")
-           VALUES ($1, $2, $3, $4, $5, $6, NOW(), NOW())`,
-          newId, me.restaurantId, item.ingredient, item.unit || "unité(s)", item.category || "Autre", item.toBuy
-        );
-        stockUpdated++;
-      }
-    }
+      if (Number(updated) > 0) return 1;
+      const newId = crypto.randomUUID();
+      await prisma.$executeRawUnsafe(
+        `INSERT INTO "StockProduct" (id, "restaurantId", name, unit, category, "currentQty", "updatedAt", "createdAt")
+         VALUES ($1, $2, $3, $4, $5, $6, NOW(), NOW())`,
+        newId, me.restaurantId, item.ingredient, item.unit || "unité(s)", item.category || "Autre", item.toBuy
+      );
+      return 1;
+    }));
+    const stockUpdated = results.reduce((a, b) => a + b, 0);
 
     return { ok: true, stockUpdated };
   });
