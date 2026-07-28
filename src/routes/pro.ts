@@ -2743,29 +2743,24 @@ export async function proRoutes(app: FastifyInstance) {
 
     // Mettre à jour currentQty dans StockProduct pour chaque article acheté, ou le créer
     const shoppingList: Array<{ ingredient: string; toBuy: number; unit: string; category?: string }> = rows[0].shoppingList ?? [];
-    let stockUpdated = 0;
-    for (const item of shoppingList) {
-      if (!item.ingredient || !item.toBuy || item.toBuy <= 0) continue;
-      // Chercher par nom (case-insensitive)
+    const valid = shoppingList.filter((it) => it.ingredient && it.toBuy && it.toBuy > 0);
+    const results = await Promise.all(valid.map(async (item) => {
       const updated = await prisma.$executeRawUnsafe(
         `UPDATE "StockProduct"
          SET "currentQty" = "currentQty" + $1, "updatedAt" = NOW()
          WHERE "restaurantId" = $2 AND LOWER(name) = LOWER($3)`,
         item.toBuy, me.restaurantId, item.ingredient,
       );
-      if (Number(updated) > 0) {
-        stockUpdated++;
-      } else {
-        // Si le produit n'existe pas, on le crée
-        const newId = crypto.randomUUID();
-        await prisma.$executeRawUnsafe(
-          `INSERT INTO "StockProduct" (id, "restaurantId", name, unit, category, "currentQty", "updatedAt", "createdAt")
-           VALUES ($1, $2, $3, $4, $5, $6, NOW(), NOW())`,
-          newId, me.restaurantId, item.ingredient, item.unit || "unité(s)", item.category || "Autre", item.toBuy
-        );
-        stockUpdated++;
-      }
-    }
+      if (Number(updated) > 0) return 1;
+      const newId = crypto.randomUUID();
+      await prisma.$executeRawUnsafe(
+        `INSERT INTO "StockProduct" (id, "restaurantId", name, unit, category, "currentQty", "updatedAt", "createdAt")
+         VALUES ($1, $2, $3, $4, $5, $6, NOW(), NOW())`,
+        newId, me.restaurantId, item.ingredient, item.unit || "unité(s)", item.category || "Autre", item.toBuy
+      );
+      return 1;
+    }));
+    const stockUpdated = results.reduce((a, b) => a + b, 0);
 
     return { ok: true, stockUpdated };
   });
