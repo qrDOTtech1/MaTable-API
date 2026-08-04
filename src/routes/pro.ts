@@ -1311,25 +1311,24 @@ export async function proRoutes(app: FastifyInstance) {
       }
     }
 
-    // Re-apply quantity discounts on lines whose qty changed (base price from current MenuItem)
+    // Re-apply quantity discounts on lines whose qty changed (base price from current MenuItem).
+    // One raw SELECT pulls both priceCents and quantityDiscounts, plus enforces restaurantId — was two sequential round-trips.
     const remainingIds = existing.map((l) => l.menuItemId).filter((x): x is string => !!x);
     if (remainingIds.length > 0) {
-      const menuItems = await prisma.menuItem.findMany({
-        where: { id: { in: remainingIds }, restaurantId: me.restaurantId },
-        select: { id: true, priceCents: true },
-      });
-      const baseById = new Map(menuItems.map((m) => [m.id, m.priceCents]));
-      type DiscRow = { id: string; quantityDiscounts: any };
-      const discRows = await prisma.$queryRaw<DiscRow[]>`
-        SELECT id, "quantityDiscounts" FROM "MenuItem" WHERE id = ANY(${remainingIds}::text[])
+      type MenuRow = { id: string; priceCents: number; quantityDiscounts: any };
+      const rows = await prisma.$queryRaw<MenuRow[]>`
+        SELECT id, "priceCents", "quantityDiscounts"
+        FROM "MenuItem"
+        WHERE id = ANY(${remainingIds}::text[]) AND "restaurantId" = ${me.restaurantId}
       `;
-      const tiersById = new Map(discRows.map((r) => [r.id, parseQuantityDiscounts(r.quantityDiscounts)]));
+      const byId = new Map(rows.map((r) => [r.id, r]));
       for (const line of existing) {
         if (!line.menuItemId) continue;
-        const base = baseById.get(line.menuItemId);
-        const tiers = tiersById.get(line.menuItemId);
-        if (base != null && tiers && tiers.length > 0) {
-          line.priceCents = effectiveUnitPriceCents(base, line.quantity, tiers);
+        const row = byId.get(line.menuItemId);
+        if (!row) continue;
+        const tiers = parseQuantityDiscounts(row.quantityDiscounts);
+        if (tiers.length > 0) {
+          line.priceCents = effectiveUnitPriceCents(row.priceCents, line.quantity, tiers);
         }
       }
     }
@@ -2645,18 +2644,31 @@ export async function proRoutes(app: FastifyInstance) {
       })).min(1).max(100),
     }).parse(req.body);
 
+    // Batch all rows into a single multi-VALUES INSERT (1 round-trip instead of N).
     const created: StockProductRow[] = [];
+    const values: string[] = [];
+    const params: unknown[] = [];
+    let idx = 1;
     for (const p of body.products) {
       const id = crypto.randomUUID();
-      await prisma.$executeRawUnsafe(
-        `INSERT INTO "StockProduct" (id, "restaurantId", name, unit, category, "isFresh",
-           "currentQty", "lowThreshold", "weeklyEstimate", notes, "linkedDishes", "updatedAt", "createdAt")
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, NOW(), NOW())`,
+      values.push(
+        `($${idx++}, $${idx++}, $${idx++}, $${idx++}, $${idx++}, $${idx++}, ` +
+        `$${idx++}, $${idx++}, $${idx++}, $${idx++}, $${idx++}::jsonb, NOW(), NOW())`
+      );
+      params.push(
         id, me.restaurantId, p.name, p.unit, p.category, p.isFresh,
         p.currentQty, p.lowThreshold, p.weeklyEstimate,
         p.notes ?? null, JSON.stringify(p.linkedDishes)
       );
       created.push({ id, restaurantId: me.restaurantId, ...p, notes: p.notes ?? null, updatedAt: new Date(), createdAt: new Date() });
+    }
+    if (values.length > 0) {
+      await prisma.$executeRawUnsafe(
+        `INSERT INTO "StockProduct" (id, "restaurantId", name, unit, category, "isFresh",
+           "currentQty", "lowThreshold", "weeklyEstimate", notes, "linkedDishes", "updatedAt", "createdAt")
+         VALUES ${values.join(", ")}`,
+        ...params,
+      );
     }
     return { created: created.length };
   });
