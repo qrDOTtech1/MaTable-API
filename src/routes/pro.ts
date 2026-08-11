@@ -1962,117 +1962,44 @@ export async function proRoutes(app: FastifyInstance) {
     const me = await requirePro(req, reply);
     const q = z.object({ days: z.coerce.number().int().min(1).max(90).default(7) }).parse(req.query);
     const since = new Date(Date.now() - q.days * 24 * 3600 * 1000);
-    const paidOrders = await prisma.order.findMany({
-      where: { table: { restaurantId: me.restaurantId }, status: "PAID", createdAt: { gte: since } },
-      include: { server: true },
-    });
-    const revenueCents = paidOrders.reduce((s, o) => s + o.totalCents + o.tipCents, 0);
-    const tipsCents = paidOrders.reduce((s, o) => s + o.tipCents, 0);
-    const ordersCount = paidOrders.length;
-    const avgTicketCents = ordersCount ? Math.round(revenueCents / ordersCount) : 0;
-    const itemsSold = paidOrders.reduce((s, o) => s + (Array.isArray(o.items) ? (o.items as any[]).reduce((n, it) => n + (Number(it.quantity) || 0), 0) : 0), 0);
-    const itemCounts = new Map<string, { name: string; qty: number; revenueCents: number }>();
-    const categoryCounts = new Map<string, { name: string; qty: number; revenueCents: number }>();
-    for (const o of paidOrders) {
-      for (const it of (o.items as any[])) {
-        const prev = itemCounts.get(it.name) ?? { name: it.name, qty: 0, revenueCents: 0 };
-        prev.qty += it.quantity; prev.revenueCents += it.priceCents * it.quantity;
-        itemCounts.set(it.name, prev);
-        const cat = it.category ?? "Non catégorisé";
-        const catPrev = categoryCounts.get(cat) ?? { name: cat, qty: 0, revenueCents: 0 };
-        catPrev.qty += it.quantity; catPrev.revenueCents += it.priceCents * it.quantity;
-        categoryCounts.set(cat, catPrev);
-      }
-    }
-    const topItems = Array.from(itemCounts.values()).sort((a, b) => b.qty - a.qty).slice(0, 10);
-    const byDay = new Map<string, number>();
-    for (const o of paidOrders) {
-      const key = o.createdAt.toISOString().slice(0, 10);
-      byDay.set(key, (byDay.get(key) ?? 0) + o.totalCents + o.tipCents);
-    }
-    const revenueByDay = Array.from(byDay.entries()).sort().map(([date, cents]) => ({ date, cents }));
-    const byServer = new Map<string, { name: string; revenueCents: number; orders: number }>();
-    for (const o of paidOrders) {
-      if (!o.server) continue;
-      const prev = byServer.get(o.server.id) ?? { name: o.server.name, revenueCents: 0, orders: 0 };
-      prev.revenueCents += o.totalCents + o.tipCents; prev.orders += 1;
-      byServer.set(o.server.id, prev);
-    }
-    const reservations = await prisma.reservation.findMany({
-      where: { restaurantId: me.restaurantId, startsAt: { gte: since } },
-      select: { startsAt: true, partySize: true, status: true, table: { select: { zone: true } } },
-    });
-    const reservationStats = {
-      count: reservations.length,
-      covers: reservations.reduce((s, r) => s + r.partySize, 0),
-      pending: reservations.filter(r => r.status === "PENDING").length,
-      confirmed: reservations.filter(r => r.status === "CONFIRMED").length,
-      seated: reservations.filter(r => r.status === "SEATED").length,
-      honored: reservations.filter(r => r.status === "HONORED").length,
-      noShows: reservations.filter(r => r.status === "NO_SHOW").length,
-      cancelled: reservations.filter(r => r.status === "CANCELLED").length,
-    };
-    const reservationsByDay = new Map<string, { date: string; reservations: number; covers: number }>();
-    const reservationsByZone = new Map<string, { zone: string; reservations: number; covers: number }>();
-    for (const r of reservations) {
-      const day = r.startsAt.toISOString().slice(0, 10);
-      const dayPrev = reservationsByDay.get(day) ?? { date: day, reservations: 0, covers: 0 };
-      dayPrev.reservations += 1; dayPrev.covers += r.partySize;
-      reservationsByDay.set(day, dayPrev);
-      const zone = r.table?.zone ?? "Sans zone";
-      const zonePrev = reservationsByZone.get(zone) ?? { zone, reservations: 0, covers: 0 };
-      zonePrev.reservations += 1; zonePrev.covers += r.partySize;
-      reservationsByZone.set(zone, zonePrev);
-    }
-
-    const reviewAgg = await prisma.dishReview.aggregate({
-      where: { restaurantId: me.restaurantId, createdAt: { gte: since } },
-      _avg: { rating: true },
-      _count: { id: true },
-    });
-    const loyalty = await prisma.$queryRawUnsafe<Array<{ customers: bigint; points: bigint; visits: bigint; offers: bigint; redemptions: bigint }>>(
-      `SELECT
-        (SELECT COUNT(*)::bigint FROM "LoyaltyCustomer" WHERE "restaurantId" = $1) AS customers,
-        (SELECT COALESCE(SUM(points),0)::bigint FROM "LoyaltyCustomer" WHERE "restaurantId" = $1) AS points,
-        (SELECT COALESCE(SUM("visitCount"),0)::bigint FROM "LoyaltyCustomer" WHERE "restaurantId" = $1) AS visits,
-        (SELECT COUNT(*)::bigint FROM "LoyaltyOffer" WHERE "restaurantId" = $1 AND active = true) AS offers,
-        (SELECT COUNT(*)::bigint FROM "LoyaltyTransaction" t JOIN "LoyaltyCustomer" c ON c.id = t."customerId" WHERE c."restaurantId" = $1 AND t.type = 'redeem') AS redemptions`,
-      me.restaurantId
-    ).catch(() => [{ customers: 0n, points: 0n, visits: 0n, offers: 0n, redemptions: 0n }]);
-
-    // ── Heatmap affluence : ventes par jour de semaine × heure (fuseau Paris) ──
-    const parisParts = (d: Date) => {
-      const parts = new Intl.DateTimeFormat("en-GB", {
-        timeZone: "Europe/Paris", hour: "2-digit", hour12: false, weekday: "short",
-      }).formatToParts(d);
-      const hour = parseInt(parts.find((p) => p.type === "hour")?.value ?? "0", 10) % 24;
-      const wdMap: Record<string, number> = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
-      const dow = wdMap[parts.find((p) => p.type === "weekday")?.value ?? "Mon"] ?? 1;
-      return { hour, dow };
-    };
-    const heatCells = new Map<string, { dow: number; hour: number; orders: number; revenueCents: number }>();
-    for (const o of paidOrders) {
-      const { hour, dow } = parisParts(o.createdAt);
-      const key = `${dow}-${hour}`;
-      const cell = heatCells.get(key) ?? { dow, hour, orders: 0, revenueCents: 0 };
-      cell.orders += 1; cell.revenueCents += o.totalCents + o.tipCents;
-      heatCells.set(key, cell);
-    }
-    const salesHeatmap = Array.from(heatCells.values());
-
-    // ── Poids morts : plats disponibles jamais vendus sur la période ──────────
-    const menuForDead = await prisma.menuItem.findMany({
-      where: { restaurantId: me.restaurantId },
-      select: { name: true, priceCents: true, available: true, category: true },
-    });
-    const deadItems = menuForDead
-      .filter((m) => m.available && !(itemCounts.get(m.name)?.qty))
-      .map((m) => ({ name: m.name, priceCents: m.priceCents, category: m.category ?? "Non catégorisé" }))
-      .slice(0, 30);
-
-    // ── Période précédente (même durée) pour les tendances ↑↓ ─────────────────
     const prevSince = new Date(since.getTime() - q.days * 24 * 3600 * 1000);
-    const [prevOrders, prevReservationsCount] = await Promise.all([
+
+    // Fan out every independent read at once instead of chaining 6+ round-trips.
+    const [
+      paidOrders,
+      reservations,
+      reviewAgg,
+      loyalty,
+      menuForDead,
+      prevOrders,
+      prevReservationsCount,
+    ] = await Promise.all([
+      prisma.order.findMany({
+        where: { table: { restaurantId: me.restaurantId }, status: "PAID", createdAt: { gte: since } },
+        include: { server: true },
+      }),
+      prisma.reservation.findMany({
+        where: { restaurantId: me.restaurantId, startsAt: { gte: since } },
+        select: { startsAt: true, partySize: true, status: true, table: { select: { zone: true } } },
+      }),
+      prisma.dishReview.aggregate({
+        where: { restaurantId: me.restaurantId, createdAt: { gte: since } },
+        _avg: { rating: true },
+        _count: { id: true },
+      }),
+      prisma.$queryRawUnsafe<Array<{ customers: bigint; points: bigint; visits: bigint; offers: bigint; redemptions: bigint }>>(
+        `SELECT
+          (SELECT COUNT(*)::bigint FROM "LoyaltyCustomer" WHERE "restaurantId" = $1) AS customers,
+          (SELECT COALESCE(SUM(points),0)::bigint FROM "LoyaltyCustomer" WHERE "restaurantId" = $1) AS points,
+          (SELECT COALESCE(SUM("visitCount"),0)::bigint FROM "LoyaltyCustomer" WHERE "restaurantId" = $1) AS visits,
+          (SELECT COUNT(*)::bigint FROM "LoyaltyOffer" WHERE "restaurantId" = $1 AND active = true) AS offers,
+          (SELECT COUNT(*)::bigint FROM "LoyaltyTransaction" t JOIN "LoyaltyCustomer" c ON c.id = t."customerId" WHERE c."restaurantId" = $1 AND t.type = 'redeem') AS redemptions`,
+        me.restaurantId
+      ).catch(() => [{ customers: 0n, points: 0n, visits: 0n, offers: 0n, redemptions: 0n }]),
+      prisma.menuItem.findMany({
+        where: { restaurantId: me.restaurantId },
+        select: { name: true, priceCents: true, available: true, category: true },
+      }),
       prisma.order.findMany({
         where: { table: { restaurantId: me.restaurantId }, status: "PAID", createdAt: { gte: prevSince, lt: since } },
         select: { totalCents: true, tipCents: true },
@@ -2081,7 +2008,103 @@ export async function proRoutes(app: FastifyInstance) {
         where: { restaurantId: me.restaurantId, startsAt: { gte: prevSince, lt: since } },
       }),
     ]);
-    const prevRevenueCents = prevOrders.reduce((s, o) => s + o.totalCents + o.tipCents, 0);
+
+    // Heatmap needs day-of-week + hour in Europe/Paris; keep the formatter hoisted.
+    const wdMap: Record<string, number> = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
+    const parisFmt = new Intl.DateTimeFormat("en-GB", {
+      timeZone: "Europe/Paris", hour: "2-digit", hour12: false, weekday: "short",
+    });
+    const parisParts = (d: Date) => {
+      const parts = parisFmt.formatToParts(d);
+      let hour = 0, dow = 1;
+      for (const p of parts) {
+        if (p.type === "hour") hour = parseInt(p.value, 10) % 24;
+        else if (p.type === "weekday") dow = wdMap[p.value] ?? 1;
+      }
+      return { hour, dow };
+    };
+
+    // Single sweep over paidOrders: revenue, tips, items sold, item/category counts,
+    // per-day revenue, per-server revenue, and the heatmap cell.
+    let revenueCents = 0, tipsCents = 0, itemsSold = 0;
+    const itemCounts = new Map<string, { name: string; qty: number; revenueCents: number }>();
+    const categoryCounts = new Map<string, { name: string; qty: number; revenueCents: number }>();
+    const byDay = new Map<string, number>();
+    const byServer = new Map<string, { name: string; revenueCents: number; orders: number }>();
+    const heatCells = new Map<string, { dow: number; hour: number; orders: number; revenueCents: number }>();
+    for (const o of paidOrders) {
+      const orderTotal = o.totalCents + o.tipCents;
+      revenueCents += orderTotal;
+      tipsCents += o.tipCents;
+
+      if (Array.isArray(o.items)) {
+        for (const it of o.items as any[]) {
+          const qty = Number(it.quantity) || 0;
+          itemsSold += qty;
+          const rev = it.priceCents * it.quantity;
+          const prev = itemCounts.get(it.name);
+          if (prev) { prev.qty += it.quantity; prev.revenueCents += rev; }
+          else itemCounts.set(it.name, { name: it.name, qty: it.quantity, revenueCents: rev });
+          const cat = it.category ?? "Non catégorisé";
+          const catPrev = categoryCounts.get(cat);
+          if (catPrev) { catPrev.qty += it.quantity; catPrev.revenueCents += rev; }
+          else categoryCounts.set(cat, { name: cat, qty: it.quantity, revenueCents: rev });
+        }
+      }
+
+      const dayKey = o.createdAt.toISOString().slice(0, 10);
+      byDay.set(dayKey, (byDay.get(dayKey) ?? 0) + orderTotal);
+
+      if (o.server) {
+        const prev = byServer.get(o.server.id);
+        if (prev) { prev.revenueCents += orderTotal; prev.orders += 1; }
+        else byServer.set(o.server.id, { name: o.server.name, revenueCents: orderTotal, orders: 1 });
+      }
+
+      const { hour, dow } = parisParts(o.createdAt);
+      const cellKey = `${dow}-${hour}`;
+      const cell = heatCells.get(cellKey);
+      if (cell) { cell.orders += 1; cell.revenueCents += orderTotal; }
+      else heatCells.set(cellKey, { dow, hour, orders: 1, revenueCents: orderTotal });
+    }
+    const ordersCount = paidOrders.length;
+    const avgTicketCents = ordersCount ? Math.round(revenueCents / ordersCount) : 0;
+    const topItems = Array.from(itemCounts.values()).sort((a, b) => b.qty - a.qty).slice(0, 10);
+    const revenueByDay = Array.from(byDay.entries()).sort().map(([date, cents]) => ({ date, cents }));
+    const salesHeatmap = Array.from(heatCells.values());
+
+    // Single sweep over reservations: totals, per-status counts, per-day, per-zone.
+    let covers = 0, pending = 0, confirmed = 0, seated = 0, honored = 0, noShows = 0, cancelled = 0;
+    const reservationsByDay = new Map<string, { date: string; reservations: number; covers: number }>();
+    const reservationsByZone = new Map<string, { zone: string; reservations: number; covers: number }>();
+    for (const r of reservations) {
+      covers += r.partySize;
+      switch (r.status) {
+        case "PENDING": pending++; break;
+        case "CONFIRMED": confirmed++; break;
+        case "SEATED": seated++; break;
+        case "HONORED": honored++; break;
+        case "NO_SHOW": noShows++; break;
+        case "CANCELLED": cancelled++; break;
+      }
+      const day = r.startsAt.toISOString().slice(0, 10);
+      const dayPrev = reservationsByDay.get(day);
+      if (dayPrev) { dayPrev.reservations += 1; dayPrev.covers += r.partySize; }
+      else reservationsByDay.set(day, { date: day, reservations: 1, covers: r.partySize });
+      const zone = r.table?.zone ?? "Sans zone";
+      const zonePrev = reservationsByZone.get(zone);
+      if (zonePrev) { zonePrev.reservations += 1; zonePrev.covers += r.partySize; }
+      else reservationsByZone.set(zone, { zone, reservations: 1, covers: r.partySize });
+    }
+    const reservationStats = { count: reservations.length, covers, pending, confirmed, seated, honored, noShows, cancelled };
+
+    const deadItems = menuForDead
+      .filter((m) => m.available && !(itemCounts.get(m.name)?.qty))
+      .map((m) => ({ name: m.name, priceCents: m.priceCents, category: m.category ?? "Non catégorisé" }))
+      .slice(0, 30);
+
+    let prevRevenueCents = 0;
+    for (const o of prevOrders) prevRevenueCents += o.totalCents + o.tipCents;
     const prevOrdersCount = prevOrders.length;
     const previous = {
       revenueCents: prevRevenueCents,
