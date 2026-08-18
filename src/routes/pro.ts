@@ -19,6 +19,18 @@ const DIETS = [
   "PORK_FREE","LOW_CAL","SPICY",
 ] as const;
 
+// Hoisted so the analytics heatmap doesn't allocate a new formatter per order.
+const PARIS_PARTS_FMT = new Intl.DateTimeFormat("en-GB", {
+  timeZone: "Europe/Paris", hour: "2-digit", hour12: false, weekday: "short",
+});
+const WEEKDAY_MAP: Record<string, number> = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
+function parisParts(d: Date): { hour: number; dow: number } {
+  const parts = PARIS_PARTS_FMT.formatToParts(d);
+  const hour = parseInt(parts.find((p) => p.type === "hour")?.value ?? "0", 10) % 24;
+  const dow = WEEKDAY_MAP[parts.find((p) => p.type === "weekday")?.value ?? "Mon"] ?? 1;
+  return { hour, dow };
+}
+
 function generatePassword(length = 12): string {
   const chars = "abcdefghjkmnpqrstuvwxyzABCDEFGHJKMNPQRSTUVWXYZ23456789";
   return Array.from(crypto.getRandomValues(new Uint8Array(length)))
@@ -1573,11 +1585,13 @@ export async function proRoutes(app: FastifyInstance) {
   // ---------------------------------------------------------------------------
   app.get("/servers", async (req, reply) => {
     const me = await requirePro(req, reply);
-    const servers = await prisma.server.findMany({ where: { restaurantId: me.restaurantId }, orderBy: { name: "asc" } });
-    const reviews = await prisma.serverReview.groupBy({
-      by: ["serverId"], where: { restaurantId: me.restaurantId },
-      _avg: { rating: true }, _count: { _all: true },
-    });
+    const [servers, reviews] = await Promise.all([
+      prisma.server.findMany({ where: { restaurantId: me.restaurantId }, orderBy: { name: "asc" } }),
+      prisma.serverReview.groupBy({
+        by: ["serverId"], where: { restaurantId: me.restaurantId },
+        _avg: { rating: true }, _count: { _all: true },
+      }),
+    ]);
     const byId = new Map(reviews.map((r) => [r.serverId, { avg: r._avg.rating, count: r._count._all }]));
     return {
       servers: servers.map((s) => ({ ...s, avgRating: byId.get(s.id)?.avg ?? null, reviewsCount: byId.get(s.id)?.count ?? 0 })),
@@ -1962,10 +1976,37 @@ export async function proRoutes(app: FastifyInstance) {
     const me = await requirePro(req, reply);
     const q = z.object({ days: z.coerce.number().int().min(1).max(90).default(7) }).parse(req.query);
     const since = new Date(Date.now() - q.days * 24 * 3600 * 1000);
-    const paidOrders = await prisma.order.findMany({
-      where: { table: { restaurantId: me.restaurantId }, status: "PAID", createdAt: { gte: since } },
-      include: { server: true },
-    });
+    // Five independent reads (paid orders, reservations, review agg, loyalty raw,
+    // menu items) — fire them in parallel; nothing between them depends on
+    // another's result before all resolve.
+    const [paidOrders, reservations, reviewAgg, loyalty, menuForDead] = await Promise.all([
+      prisma.order.findMany({
+        where: { table: { restaurantId: me.restaurantId }, status: "PAID", createdAt: { gte: since } },
+        include: { server: true },
+      }),
+      prisma.reservation.findMany({
+        where: { restaurantId: me.restaurantId, startsAt: { gte: since } },
+        select: { startsAt: true, partySize: true, status: true, table: { select: { zone: true } } },
+      }),
+      prisma.dishReview.aggregate({
+        where: { restaurantId: me.restaurantId, createdAt: { gte: since } },
+        _avg: { rating: true },
+        _count: { id: true },
+      }),
+      prisma.$queryRawUnsafe<Array<{ customers: bigint; points: bigint; visits: bigint; offers: bigint; redemptions: bigint }>>(
+        `SELECT
+          (SELECT COUNT(*)::bigint FROM "LoyaltyCustomer" WHERE "restaurantId" = $1) AS customers,
+          (SELECT COALESCE(SUM(points),0)::bigint FROM "LoyaltyCustomer" WHERE "restaurantId" = $1) AS points,
+          (SELECT COALESCE(SUM("visitCount"),0)::bigint FROM "LoyaltyCustomer" WHERE "restaurantId" = $1) AS visits,
+          (SELECT COUNT(*)::bigint FROM "LoyaltyOffer" WHERE "restaurantId" = $1 AND active = true) AS offers,
+          (SELECT COUNT(*)::bigint FROM "LoyaltyTransaction" t JOIN "LoyaltyCustomer" c ON c.id = t."customerId" WHERE c."restaurantId" = $1 AND t.type = 'redeem') AS redemptions`,
+        me.restaurantId
+      ).catch(() => [{ customers: 0n, points: 0n, visits: 0n, offers: 0n, redemptions: 0n }]),
+      prisma.menuItem.findMany({
+        where: { restaurantId: me.restaurantId },
+        select: { name: true, priceCents: true, available: true, category: true },
+      }),
+    ]);
     const revenueCents = paidOrders.reduce((s, o) => s + o.totalCents + o.tipCents, 0);
     const tipsCents = paidOrders.reduce((s, o) => s + o.tipCents, 0);
     const ordersCount = paidOrders.length;
@@ -1998,10 +2039,6 @@ export async function proRoutes(app: FastifyInstance) {
       prev.revenueCents += o.totalCents + o.tipCents; prev.orders += 1;
       byServer.set(o.server.id, prev);
     }
-    const reservations = await prisma.reservation.findMany({
-      where: { restaurantId: me.restaurantId, startsAt: { gte: since } },
-      select: { startsAt: true, partySize: true, status: true, table: { select: { zone: true } } },
-    });
     const reservationStats = {
       count: reservations.length,
       covers: reservations.reduce((s, r) => s + r.partySize, 0),
@@ -2025,31 +2062,7 @@ export async function proRoutes(app: FastifyInstance) {
       reservationsByZone.set(zone, zonePrev);
     }
 
-    const reviewAgg = await prisma.dishReview.aggregate({
-      where: { restaurantId: me.restaurantId, createdAt: { gte: since } },
-      _avg: { rating: true },
-      _count: { id: true },
-    });
-    const loyalty = await prisma.$queryRawUnsafe<Array<{ customers: bigint; points: bigint; visits: bigint; offers: bigint; redemptions: bigint }>>(
-      `SELECT
-        (SELECT COUNT(*)::bigint FROM "LoyaltyCustomer" WHERE "restaurantId" = $1) AS customers,
-        (SELECT COALESCE(SUM(points),0)::bigint FROM "LoyaltyCustomer" WHERE "restaurantId" = $1) AS points,
-        (SELECT COALESCE(SUM("visitCount"),0)::bigint FROM "LoyaltyCustomer" WHERE "restaurantId" = $1) AS visits,
-        (SELECT COUNT(*)::bigint FROM "LoyaltyOffer" WHERE "restaurantId" = $1 AND active = true) AS offers,
-        (SELECT COUNT(*)::bigint FROM "LoyaltyTransaction" t JOIN "LoyaltyCustomer" c ON c.id = t."customerId" WHERE c."restaurantId" = $1 AND t.type = 'redeem') AS redemptions`,
-      me.restaurantId
-    ).catch(() => [{ customers: 0n, points: 0n, visits: 0n, offers: 0n, redemptions: 0n }]);
-
     // ── Heatmap affluence : ventes par jour de semaine × heure (fuseau Paris) ──
-    const parisParts = (d: Date) => {
-      const parts = new Intl.DateTimeFormat("en-GB", {
-        timeZone: "Europe/Paris", hour: "2-digit", hour12: false, weekday: "short",
-      }).formatToParts(d);
-      const hour = parseInt(parts.find((p) => p.type === "hour")?.value ?? "0", 10) % 24;
-      const wdMap: Record<string, number> = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
-      const dow = wdMap[parts.find((p) => p.type === "weekday")?.value ?? "Mon"] ?? 1;
-      return { hour, dow };
-    };
     const heatCells = new Map<string, { dow: number; hour: number; orders: number; revenueCents: number }>();
     for (const o of paidOrders) {
       const { hour, dow } = parisParts(o.createdAt);
@@ -2061,10 +2074,6 @@ export async function proRoutes(app: FastifyInstance) {
     const salesHeatmap = Array.from(heatCells.values());
 
     // ── Poids morts : plats disponibles jamais vendus sur la période ──────────
-    const menuForDead = await prisma.menuItem.findMany({
-      where: { restaurantId: me.restaurantId },
-      select: { name: true, priceCents: true, available: true, category: true },
-    });
     const deadItems = menuForDead
       .filter((m) => m.available && !(itemCounts.get(m.name)?.qty))
       .map((m) => ({ name: m.name, priceCents: m.priceCents, category: m.category ?? "Non catégorisé" }))
@@ -2221,7 +2230,9 @@ export async function proRoutes(app: FastifyInstance) {
     const to = q.to ? new Date(q.to) : new Date(Date.now() + 30*24*3600*1000);
     const reservations = await prisma.reservation.findMany({
       where: { restaurantId: me.restaurantId, startsAt: { gte: from, lte: to }, ...(q.status ? { status: q.status as any } : {}) },
-      include: { table: true }, orderBy: { startsAt: "asc" },
+      include: { table: { select: { id: true, number: true, zone: true, seats: true } } },
+      orderBy: { startsAt: "asc" },
+      take: 500,
     });
     return { reservations };
   });
@@ -2645,19 +2656,25 @@ export async function proRoutes(app: FastifyInstance) {
       })).min(1).max(100),
     }).parse(req.body);
 
-    const created: StockProductRow[] = [];
-    for (const p of body.products) {
-      const id = crypto.randomUUID();
-      await prisma.$executeRawUnsafe(
+    // Batch the 1-100 inserts in a single transaction — one roundtrip per
+    // request instead of N sequential ones (StockProduct is a raw-SQL table so
+    // we keep $executeRawUnsafe rather than switching to createMany).
+    const created: StockProductRow[] = body.products.map((p) => ({
+      id: crypto.randomUUID(),
+      restaurantId: me.restaurantId,
+      ...p, notes: p.notes ?? null,
+      updatedAt: new Date(), createdAt: new Date(),
+    }));
+    await prisma.$transaction(
+      created.map((row) => prisma.$executeRawUnsafe(
         `INSERT INTO "StockProduct" (id, "restaurantId", name, unit, category, "isFresh",
            "currentQty", "lowThreshold", "weeklyEstimate", notes, "linkedDishes", "updatedAt", "createdAt")
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, NOW(), NOW())`,
-        id, me.restaurantId, p.name, p.unit, p.category, p.isFresh,
-        p.currentQty, p.lowThreshold, p.weeklyEstimate,
-        p.notes ?? null, JSON.stringify(p.linkedDishes)
-      );
-      created.push({ id, restaurantId: me.restaurantId, ...p, notes: p.notes ?? null, updatedAt: new Date(), createdAt: new Date() });
-    }
+        row.id, row.restaurantId, row.name, row.unit, row.category, row.isFresh,
+        row.currentQty, row.lowThreshold, row.weeklyEstimate,
+        row.notes, JSON.stringify(row.linkedDishes)
+      ))
+    );
     return { created: created.length };
   });
 

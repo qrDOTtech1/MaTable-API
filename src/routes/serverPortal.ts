@@ -405,11 +405,13 @@ export async function serverPortalRoutes(app: FastifyInstance) {
     });
     if (!session) return reply.code(404).send({ error: "SESSION_NOT_FOUND" });
 
-    // Garde-fou : ne pas clôturer si des plats sont encore en attente/cuisson/à apporter
-    const unserved = await prisma.order.findMany({
-      where: { sessionId, status: { in: ["PENDING", "COOKING", "READY"] } },
-      select: { id: true },
+    // One roundtrip: fetch every order about to move to PAID (superset), then
+    // split into "unserved" (blocks the close unless forced) and "toPay".
+    const openOrders = await prisma.order.findMany({
+      where: { sessionId, status: { in: ["PENDING", "COOKING", "READY", "SERVED"] } },
+      select: { id: true, status: true },
     });
+    const unserved = openOrders.filter((o) => o.status !== "SERVED");
     if (!force && unserved.length > 0) {
       return reply.code(409).send({
         error: "orders_not_served",
@@ -417,12 +419,7 @@ export async function serverPortalRoutes(app: FastifyInstance) {
         unservedCount: unserved.length,
       });
     }
-
-    // Récupère les commandes à passer en PAID (pour émettre par commande)
-    const toPay = await prisma.order.findMany({
-      where: { sessionId, status: { in: ["PENDING", "COOKING", "READY", "SERVED"] } },
-      select: { id: true },
-    });
+    const toPay = openOrders;
 
     await prisma.$transaction([
       prisma.order.updateMany({

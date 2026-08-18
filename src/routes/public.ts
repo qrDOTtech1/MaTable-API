@@ -1414,12 +1414,18 @@ Ne renvoie STRICTEMENT rien d'autre que ce JSON (pas de bloc Markdown \`\`\`json
     });
 
     // Tables déjà occupées sur ce créneau
+    // Lower bound: no realistic seating lasts more than 24h, so anything
+    // starting before that window can't still be running at startsAt.
+    // Without it, this scans every non-cancelled reservation ever created.
     const overlapping = await prisma.reservation.findMany({
       where: {
         restaurantId: restaurant.id,
         status: { notIn: ["CANCELLED"] },
         tableId: { not: null },
-        startsAt: { lt: slotEnd },
+        startsAt: {
+          gte: new Date(startsAt.getTime() - 24 * 60 * 60_000),
+          lt: slotEnd,
+        },
       },
       select: { tableId: true, startsAt: true, durationMin: true },
     });

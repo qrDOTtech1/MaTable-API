@@ -90,7 +90,9 @@ export async function socialRoutes(app: FastifyInstance) {
         interests: true,
         activeMode: true,
         bio: true,
-      }
+      },
+      orderBy: { updatedAt: "desc" },
+      take: 50,
     });
 
     return { nearby };
@@ -142,6 +144,8 @@ export async function socialRoutes(app: FastifyInstance) {
         id: { not: me.id },
         activeMode: me.activeMode,
       },
+      orderBy: { updatedAt: "desc" },
+      take: 50,
     });
 
     if (others.length === 0) return { matches: [] };
