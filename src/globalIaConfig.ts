@@ -34,13 +34,38 @@ async function ensureGlobalConfigTable() {
   await prisma.$executeRawUnsafe(`INSERT INTO "GlobalConfig" (id) VALUES ('global') ON CONFLICT (id) DO NOTHING`);
 }
 
-let tableEnsured = false;
+// Cache the schema-ensure as a Promise so concurrent cold-start calls share
+// the same in-flight `CREATE TABLE IF NOT EXISTS` sequence instead of racing.
+let tableEnsuredPromise: Promise<void> | null = null;
+function ensureOnce(): Promise<void> {
+  if (tableEnsuredPromise) return tableEnsuredPromise;
+  tableEnsuredPromise = ensureGlobalConfigTable().catch((e) => {
+    console.error("[globalIaConfig] ensureTable error:", e);
+    tableEnsuredPromise = null; // allow retry on next call
+    throw e;
+  });
+  return tableEnsuredPromise;
+}
+
+// In-memory cache: the row is written from the admin panel (a different app),
+// rarely — well under once per minute in practice. A short TTL avoids one DB
+// round-trip per AI request (17 call sites, all hot) and reflects admin
+// updates within the window.
+const CACHE_TTL_MS = 30_000;
+let cached: { value: GlobalIaConfig; expiresAt: number } | null = null;
+
+/** Invalidate the in-memory cache (call after a write to GlobalConfig). */
+export function invalidateGlobalIaConfigCache(): void {
+  cached = null;
+}
 
 /** Fetch the global Ollama Cloud config (single row, id = 'global') */
 export async function getGlobalIaConfig(): Promise<GlobalIaConfig> {
-  if (!tableEnsured) {
-    try { await ensureGlobalConfigTable(); tableEnsured = true; } catch (e) { console.error("[globalIaConfig] ensureTable error:", e); }
-  }
+  const now = Date.now();
+  if (cached && cached.expiresAt > now) return cached.value;
+
+  try { await ensureOnce(); } catch { /* logged in ensureOnce; fall through */ }
+
   try {
     const rows = await prisma.$queryRaw<Array<{
       ollamaApiKey: string | null;
@@ -52,10 +77,14 @@ export async function getGlobalIaConfig(): Promise<GlobalIaConfig> {
     `;
     if (rows.length === 0) {
       console.warn("[globalIaConfig] No row found — returning DEFAULTS (key=null)");
+      cached = { value: DEFAULTS, expiresAt: now + CACHE_TTL_MS };
       return DEFAULTS;
     }
     const cfg = rows[0];
-    console.log(`[globalIaConfig] loaded — key=${cfg.ollamaApiKey ? "SET(" + cfg.ollamaApiKey.slice(0, 8) + "...)" : "NULL"} lang=${cfg.ollamaLangModel} vision=${cfg.ollamaVisionModel}`);
+    // Log only on cache miss (once per TTL, not once per AI request), and
+    // never log any part of the API key — just whether it is set.
+    console.log(`[globalIaConfig] loaded — key=${cfg.ollamaApiKey ? "SET" : "NULL"} lang=${cfg.ollamaLangModel} vision=${cfg.ollamaVisionModel}`);
+    cached = { value: cfg, expiresAt: now + CACHE_TTL_MS };
     return cfg;
   } catch (e) {
     console.error("[globalIaConfig] query error:", e);
