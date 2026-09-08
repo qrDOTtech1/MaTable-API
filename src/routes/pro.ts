@@ -1573,11 +1573,13 @@ export async function proRoutes(app: FastifyInstance) {
   // ---------------------------------------------------------------------------
   app.get("/servers", async (req, reply) => {
     const me = await requirePro(req, reply);
-    const servers = await prisma.server.findMany({ where: { restaurantId: me.restaurantId }, orderBy: { name: "asc" } });
-    const reviews = await prisma.serverReview.groupBy({
-      by: ["serverId"], where: { restaurantId: me.restaurantId },
-      _avg: { rating: true }, _count: { _all: true },
-    });
+    const [servers, reviews] = await Promise.all([
+      prisma.server.findMany({ where: { restaurantId: me.restaurantId }, orderBy: { name: "asc" } }),
+      prisma.serverReview.groupBy({
+        by: ["serverId"], where: { restaurantId: me.restaurantId },
+        _avg: { rating: true }, _count: { _all: true },
+      }),
+    ]);
     const byId = new Map(reviews.map((r) => [r.serverId, { avg: r._avg.rating, count: r._count._all }]));
     return {
       servers: servers.map((s) => ({ ...s, avgRating: byId.get(s.id)?.avg ?? null, reviewsCount: byId.get(s.id)?.count ?? 0 })),

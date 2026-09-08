@@ -210,18 +210,32 @@ export async function serverPortalRoutes(app: FastifyInstance) {
     const me = await requireServer(req, reply);
 
     // All active sessions for the entire restaurant — sorted: mine first, then unassigned, then others
-    const allSessions = await prisma.tableSession.findMany({
-      where: { table: { restaurantId: me.restaurantId }, active: true },
-      include: {
-        table: { select: { id: true, number: true, seats: true } },
-        orders: {
-          where: { status: { in: ["PENDING", "COOKING", "READY", "SERVED"] } },
-          orderBy: { createdAt: "desc" },
+    // Fetched in parallel with `allTables` below (independent queries → cut TTFB on this polled endpoint).
+    const [allSessions, allTables] = await Promise.all([
+      prisma.tableSession.findMany({
+        where: { table: { restaurantId: me.restaurantId }, active: true },
+        include: {
+          table: { select: { id: true, number: true, seats: true } },
+          orders: {
+            where: { status: { in: ["PENDING", "COOKING", "READY", "SERVED"] } },
+            orderBy: { createdAt: "desc" },
+          },
+          server: { select: { id: true, name: true } },
         },
-        server: { select: { id: true, name: true } },
-      },
-      orderBy: { createdAt: "asc" },
-    });
+        orderBy: { createdAt: "asc" },
+      }),
+      prisma.table.findMany({
+        where: { restaurantId: me.restaurantId },
+        include: {
+          sessions: {
+            where: { active: true },
+            take: 1,
+            include: { server: { select: { id: true, name: true } } },
+          },
+        },
+        orderBy: { number: "asc" },
+      }),
+    ]);
 
     // Attach bill + split fields via raw query (added via ensure_columns.sql)
     type BillRow = {
@@ -268,19 +282,6 @@ export async function serverPortalRoutes(app: FastifyInstance) {
       const aMine = a.serverId === me.serverId ? 0 : a.serverId === null ? 1 : 2;
       const bMine = b.serverId === me.serverId ? 0 : b.serverId === null ? 1 : 2;
       return aMine - bMine;
-    });
-
-    // All tables of the restaurant with session state
-    const allTables = await prisma.table.findMany({
-      where: { restaurantId: me.restaurantId },
-      include: {
-        sessions: {
-          where: { active: true },
-          take: 1,
-          include: { server: { select: { id: true, name: true } } },
-        },
-      },
-      orderBy: { number: "asc" },
     });
 
     // My assigned empty tables (no active session yet but table is mine by default)
