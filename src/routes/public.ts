@@ -1867,17 +1867,15 @@ Ne renvoie STRICTEMENT rien d'autre que ce JSON (pas de bloc Markdown \`\`\`json
 
     // Dish reviews
     if (body.dishReviews && body.dishReviews.length > 0) {
-      for (const dr of body.dishReviews) {
-        await prisma.dishReview.create({
-          data: {
-            restaurantId: decoded.restaurantId,
-            menuItemId: dr.menuItemId,
-            orderId: latestOrder?.id,
-            rating: dr.rating,
-            comment: dr.comment ?? null,
-          },
-        });
-      }
+      await prisma.dishReview.createMany({
+        data: body.dishReviews.map((dr) => ({
+          restaurantId: decoded.restaurantId,
+          menuItemId: dr.menuItemId,
+          orderId: latestOrder?.id,
+          rating: dr.rating,
+          comment: dr.comment ?? null,
+        })),
+      });
     }
 
     return { ok: true };
